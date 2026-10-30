@@ -1,0 +1,9 @@
+# Python 3.11 compatibility set for XTTS v2 and WhisperX, including Intel Macs.
+torch==2.2.2
+torchaudio==2.2.2
+numpy==1.26.4
+llvmlite==0.45.1
+numba==0.62.1
+transformers==4.49.0
+coqui-tts==0.22.1
+whisperx==3.3.1

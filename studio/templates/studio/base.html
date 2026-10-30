@@ -1,0 +1,30 @@
+{% load static %}<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#0b151e">
+  <title>{% block title %}Petit Studio Voix{% endblock %}</title>
+  <link rel="stylesheet" href="{% static 'studio/app.css' %}?v=1">
+</head>
+<body {% block body_data %}{% endblock %}>
+<div class="app-shell">
+  <aside class="sidebar">
+    <a class="brand" href="{% url 'home' %}"><span class="brand-mark">✦</span><span>petit studio<small>VOIX LOCALE</small></span></a>
+    <div class="side-label">ESPACE AUDIO</div>
+    <nav class="side-nav"><a href="{% url 'home' %}#voices"><span>♫</span> Bibliothèque de voix</a><a href="{% url 'home' %}#projects"><span>▤</span> Mes narrations</a></nav>
+    <div class="side-label project-heading">MES PROJETS <span>{{ projects|length }}</span></div>
+    <nav class="project-list">
+      {% for item in projects %}<a class="project-link {% if project and item.id == project.id %}selected{% endif %}" href="{% url 'project_detail' item.id %}"><span class="project-dot {% if item.status == 'ready' %}done{% elif item.status == 'error' %}failed{% endif %}"></span><span class="truncate">{{ item.title }}</span><small>{{ item.updated_at|date:"d/m" }}</small></a>{% empty %}<p class="empty-side">Tes narrations apparaîtront ici.</p>{% endfor %}
+    </nav>
+    <form action="{% url 'create_project' %}" method="post" class="new-project-form">{% csrf_token %}<input type="hidden" name="title" value="Nouvelle narration"><button class="button button-secondary full">＋ Nouvelle narration</button></form>
+    <div class="sidebar-bottom"><span class="local-pill"><i></i> Traitement sur cet appareil</span><p>Les échantillons, narrations et projets restent dans le dossier local de l’application.</p></div>
+  </aside>
+  <main class="main">
+    <header class="topbar"><div><div class="eyebrow">ATELIER DE NARRATION</div><h1>{% block heading %}Petit Studio Voix{% endblock %}</h1></div><div class="top-pills"><span class="pill">Django · SQLite</span><span class="pill accent">XTTS v2 · français</span></div></header>
+    {% if messages %}<div class="messages">{% for message in messages %}<div class="message {{ message.tags }}">{{ message }}</div>{% endfor %}</div>{% endif %}
+    {% block content %}{% endblock %}
+    <footer class="footer">Application locale · Pas de comptes · Échantillons et exports stockés sur cet ordinateur</footer>
+  </main>
+</div>
+<script src="{% static 'studio/app.js' %}?v=1" defer></script>
+</body></html>
