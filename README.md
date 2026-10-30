@@ -12,9 +12,10 @@ Les projets, échantillons vocaux, narrations et sous-titres sont stockés dans 
 - Renommage, recatégorisation et suppression confirmée des voix.
 - Projets avec plusieurs segments de texte modifiables, supprimables et réordonnables.
 - Synthèse française XTTS v2 et alignement forcé WhisperX sur l’audio réellement généré.
-- Cache par texte, empreinte SHA-256 de l’échantillon, modèle et langue ; les segments inchangés sont réutilisés.
+- Réutilisation en mémoire du modèle XTTS, du modèle d’alignement WhisperX et des représentations de chaque voix pendant l’exécution du serveur.
+- Cache disque par texte, empreinte SHA-256 de l’échantillon, modèle et langue ; les segments inchangés sont réutilisés.
 - Écoute et téléchargement de chaque segment, plus export WAV complet et SRT avec chronologie cumulée.
-- Progression persistante en base, segment courant, temps écoulé et état prêt/en cours/erreur.
+- Progression persistante en base, segment courant, temps écoulé, durées XTTS/WhisperX et état prêt/en cours/erreur.
 - Interface responsive inspirée des captures fournies, sans dépendance à une police ou ressource distante.
 
 ## Prérequis
@@ -39,6 +40,8 @@ python scripts/check_ai_install.py
 ```
 
 Le jeu de versions IA est volontairement fixé dans `requirements-ai.txt` pour Python 3.11 et les environnements Mac Intel qui nécessitent PyTorch 2.2.2. Installe-le dans un environnement virtuel neuf et vérifie que le terminal affiche bien `(.venv)` avant chaque commande. Si `pip` tente de compiler `llvmlite`, arrête l’installation et vérifie l’architecture et la version de Python utilisées ; ne lance pas de compilation LLVM manuelle.
+
+Sur CPU, l’application limite PyTorch à quatre fils de calcul au maximum (ou au nombre de cœurs disponibles). Pour comparer les performances sur ta machine, définis `STUDIO_TORCH_THREADS` avant le démarrage, par exemple `export STUDIO_TORCH_THREADS=2`, puis relance le serveur. Essaie 1, 2 et 4 : le meilleur réglage dépend du processeur. Le modèle XTTS, l’alignement WhisperX et les latents vocaux sont conservés en mémoire tant que le processus Django reste actif. Les durées mesurées de synthèse et d’alignement sont affichées à la fin de la préparation.
 
 Le script vérifie l’import de PyTorch et XTTS, `Xtts.inference` et la méthode autoregressive `GPT.generate` appelée pendant la synthèse. Pour vérifier aussi une synthèse complète, donne-lui un échantillon vocal autorisé :
 

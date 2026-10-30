@@ -1,13 +1,16 @@
 """Local voice, XTTS, forced-alignment, and WAV/SRT export services."""
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import threading
+import time
 import wave
+from collections import OrderedDict
 
 from django.conf import settings
 from django.core.files import File
@@ -20,10 +23,18 @@ from .models import NarrationProject, NarrationSegment, Voice
 MODEL_ID = "xtts_v2"
 LANGUAGE_CODE = "fr"
 SAMPLE_RATE = 24000
+logger = logging.getLogger(__name__)
 _TTS = None
 _TTS_INIT_LOCK = threading.Lock()
 _TTS_INFER_LOCK = threading.Lock()
 _ALIGN_LOCK = threading.Lock()
+_ALIGNMENT_MODEL = None
+_ALIGNMENT_METADATA = None
+_ALIGNMENT_DEVICE = None
+_ALIGNMENT_BACKEND = None
+_SPEAKER_CONDITIONING_CACHE = OrderedDict()
+_SPEAKER_CONDITIONING_LOCK = threading.Lock()
+_SPEAKER_CONDITIONING_CACHE_LIMIT = 8
 _PIPELINE_LOCK = threading.Lock()
 
 
@@ -95,6 +106,15 @@ def _get_tts():
                 # autoregressive token generation method is GPT.generate().
                 if not callable(getattr(Xtts, "inference", None)) or not callable(getattr(GPT, "generate", None)):
                     raise RuntimeError("API XTTS incomplète : Xtts.inference et GPT.generate sont requis.")
+                # Avoid large CPU thread pools on small machines. Set this before
+                # XTTS/WhisperX starts doing tensor work; users can benchmark 1/2/4.
+                try:
+                    cpu_threads = int(os.environ.get("STUDIO_TORCH_THREADS", min(4, os.cpu_count() or 1)))
+                except (TypeError, ValueError):
+                    cpu_threads = min(4, os.cpu_count() or 1)
+                if cpu_threads > 0:
+                    torch.set_num_threads(cpu_threads)
+                    logger.info("PyTorch utilisera %s fil(s) CPU.", cpu_threads)
                 _TTS = TTS(MODEL_ID_TO_CHECKPOINT, gpu=torch.cuda.is_available())
     return _TTS
 
@@ -151,8 +171,17 @@ def align_audio(audio_path, narration_text):
     audio = whisperx.load_audio(str(audio_path))
     duration = len(audio) / 16000.0
     try:
+        global _ALIGNMENT_MODEL, _ALIGNMENT_METADATA, _ALIGNMENT_DEVICE, _ALIGNMENT_BACKEND
         with _ALIGN_LOCK:
-            model, metadata = whisperx.load_align_model(language_code=LANGUAGE_CODE, device=device)
+            # WhisperX's alignment model is large. Keep it in memory for the
+            # lifetime of this Django process instead of reloading it per segment.
+            if _ALIGNMENT_MODEL is None or _ALIGNMENT_DEVICE != device or _ALIGNMENT_BACKEND is not whisperx:
+                _ALIGNMENT_MODEL, _ALIGNMENT_METADATA = whisperx.load_align_model(
+                    language_code=LANGUAGE_CODE, device=device,
+                )
+                _ALIGNMENT_DEVICE = device
+                _ALIGNMENT_BACKEND = whisperx
+            model, metadata = _ALIGNMENT_MODEL, _ALIGNMENT_METADATA
             result = whisperx.align(
                 [{"start": 0.0, "end": duration, "text": narration_text}],
                 model, metadata, audio, device, return_char_alignments=False,
@@ -165,16 +194,49 @@ def align_audio(audio_path, narration_text):
     return captions
 
 
+def _get_speaker_conditioning(model, voice):
+    """Reuse XTTS voice latents across segments from the same sample."""
+    xtts_model = getattr(getattr(model, "synthesizer", None), "tts_model", None)
+    get_latents = getattr(xtts_model, "get_conditioning_latents", None)
+    if not callable(get_latents) or not callable(getattr(xtts_model, "inference", None)):
+        return None
+
+    sample_digest = voice.sample_sha256 or hash_file(voice.sample.path)
+    key = (id(xtts_model), sample_digest)
+    with _SPEAKER_CONDITIONING_LOCK:
+        if key in _SPEAKER_CONDITIONING_CACHE:
+            _SPEAKER_CONDITIONING_CACHE.move_to_end(key)
+            return _SPEAKER_CONDITIONING_CACHE[key]
+
+        import torch
+        with torch.inference_mode():
+            conditioning = get_latents(audio_path=[voice.sample.path])
+        _SPEAKER_CONDITIONING_CACHE[key] = conditioning
+        while len(_SPEAKER_CONDITIONING_CACHE) > _SPEAKER_CONDITIONING_CACHE_LIMIT:
+            _SPEAKER_CONDITIONING_CACHE.popitem(last=False)
+        return conditioning
+
+
 def _synthesize_segment(text, voice, destination):
     model = _get_tts()
     with tempfile.TemporaryDirectory(prefix="petit-studio-xtts-") as folder:
         raw = Path(folder) / "xtts.wav"
         with _TTS_INFER_LOCK:
             try:
-                model.tts_to_file(
-                    text=text, file_path=str(raw), speaker_wav=[voice.sample.path], language=LANGUAGE_CODE,
-                    split_sentences=True,
-                )
+                conditioning = _get_speaker_conditioning(model, voice)
+                if conditioning is None:
+                    model.tts_to_file(
+                        text=text, file_path=str(raw), speaker_wav=[voice.sample.path], language=LANGUAGE_CODE,
+                        split_sentences=True,
+                    )
+                else:
+                    xtts_model = model.synthesizer.tts_model
+                    import torch
+                    with torch.inference_mode():
+                        output = xtts_model.inference(
+                            text, LANGUAGE_CODE, *conditioning, enable_text_splitting=True,
+                        )
+                    model.synthesizer.save_wav(wav=output["wav"], path=str(raw))
             except Exception as exc:
                 raise RuntimeError(f"XTTS n’a pas pu générer ce segment : {exc}") from exc
         if not raw.exists() or raw.stat().st_size < 1000:
@@ -208,8 +270,10 @@ def _attach_cached_segment(segment, expected_key, audio_path, captions, duration
     segment.save(update_fields=["audio", "subtitle_data", "duration_seconds", "cache_key", "updated_at"])
 
 
-def _prepare_segment(segment, voice, expected_key, on_progress=None):
+def _prepare_segment(segment, voice, expected_key, on_progress=None, timings=None):
     if _segment_is_cached(segment, expected_key):
+        if timings is not None:
+            timings.update({"cached": True, "xtts_seconds": 0.0, "whisperx_seconds": 0.0})
         return segment.subtitle_data, segment.duration_seconds, True
     cache_audio, cache_metadata = _persistent_cache_paths(expected_key)
     if cache_audio.is_file() and cache_metadata.is_file() and cache_audio.stat().st_size > 1000:
@@ -219,6 +283,8 @@ def _prepare_segment(segment, voice, expected_key, on_progress=None):
             duration = float(metadata["duration"])
             if captions and duration > 0:
                 _attach_cached_segment(segment, expected_key, cache_audio, captions, duration)
+                if timings is not None:
+                    timings.update({"cached": True, "xtts_seconds": 0.0, "whisperx_seconds": 0.0})
                 return captions, duration, True
         except (OSError, ValueError, KeyError, json.JSONDecodeError, TypeError):
             # A damaged local cache is ignored and rebuilt below.
@@ -227,11 +293,25 @@ def _prepare_segment(segment, voice, expected_key, on_progress=None):
         audio_path = Path(folder) / "segment.wav"
         if on_progress:
             on_progress("Synthèse XTTS", 0.2)
+        synthesis_started = time.perf_counter()
         _synthesize_segment(segment.text, voice, audio_path)
+        synthesis_seconds = time.perf_counter() - synthesis_started
         if on_progress:
-            on_progress("Alignement WhisperX", 0.68)
+            on_progress(f"Alignement WhisperX · XTTS {synthesis_seconds:.1f} s", 0.68)
+        alignment_started = time.perf_counter()
         captions = align_audio(audio_path, segment.text)
+        alignment_seconds = time.perf_counter() - alignment_started
         duration = wav_duration(audio_path)
+        if timings is not None:
+            timings.update({
+                "cached": False,
+                "xtts_seconds": synthesis_seconds,
+                "whisperx_seconds": alignment_seconds,
+            })
+        logger.info(
+            "Segment %s préparé : XTTS %.1f s, WhisperX %.1f s.",
+            segment.pk, synthesis_seconds, alignment_seconds,
+        )
         cache_audio, cache_metadata = _persistent_cache_paths(expected_key)
         temporary_audio = cache_audio.with_suffix(".wav.tmp")
         temporary_metadata = cache_metadata.with_suffix(".json.tmp")
@@ -307,6 +387,9 @@ def prepare_project(project_id):
             project.status_message = "Préparation de la narration…"
             project.save(update_fields=["total_segments", "current_segment", "status_message", "updated_at"])
             paths = []
+            total_xtts_seconds = 0.0
+            total_whisperx_seconds = 0.0
+            cached_segments = 0
             with tempfile.TemporaryDirectory(prefix=f"petit-studio-project-{project.pk}-") as folder:
                 for index, segment in enumerate(segments, start=1):
                     project.refresh_from_db(fields=["voice_id"])
@@ -324,7 +407,11 @@ def prepare_project(project_id):
                             progress_percent=percent,
                         )
 
-                    _prepare_segment(segment, voice, expected_key, update_progress)
+                    segment_timings = {}
+                    _prepare_segment(segment, voice, expected_key, update_progress, segment_timings)
+                    total_xtts_seconds += segment_timings.get("xtts_seconds", 0.0)
+                    total_whisperx_seconds += segment_timings.get("whisperx_seconds", 0.0)
+                    cached_segments += int(segment_timings.get("cached", False))
                     target = Path(folder) / f"segment-{index:04}.wav"
                     shutil.copy2(segment.audio.path, target)
                     paths.append(target)
@@ -343,7 +430,10 @@ def prepare_project(project_id):
                 project.subtitles.save(f"narration-{project.pk}.srt", ContentFile(srt.encode("utf-8")), save=False)
                 project.duration_seconds = duration
                 project.status = NarrationProject.Status.READY
-                project.status_message = "Narration prête à écouter et à télécharger."
+                project.status_message = (
+                    f"Narration prête · XTTS {total_xtts_seconds:.1f} s · "
+                    f"WhisperX {total_whisperx_seconds:.1f} s · cache {cached_segments}/{len(segments)} segment(s)."
+                )
                 project.error_message = ""
                 project.progress_percent = 100
                 project.current_segment = len(segments)

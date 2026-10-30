@@ -3,8 +3,9 @@ import sys
 import tempfile
 import types
 import wave
+from contextlib import nullcontext
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from django.core.files.base import ContentFile
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -12,9 +13,10 @@ from django.test import TestCase, override_settings
 
 from .models import NarrationProject, NarrationSegment, Voice
 from .services import (
-    _assemble_wav, _group_words, _prepare_segment, align_audio,
+    _assemble_wav, _get_speaker_conditioning, _group_words, _prepare_segment, align_audio,
     cache_key_for, srt_text, wav_duration,
 )
+from . import services
 
 
 class MediaTestCase(TestCase):
@@ -177,6 +179,49 @@ class CacheAndCaptionTests(MediaTestCase):
         with patch.dict(sys.modules, {"torch": torch_stub, "whisperx": whisper_stub}):
             with self.assertRaisesRegex(RuntimeError, "aucun mot aligné"):
                 align_audio("unused.wav", "Un texte.")
+
+    def test_whisperx_alignment_model_is_loaded_once_per_process(self):
+        torch_stub = types.SimpleNamespace(
+            cuda=types.SimpleNamespace(is_available=lambda: False),
+        )
+        align_model, metadata = object(), object()
+        loader = types.SimpleNamespace(
+            load_audio=lambda _path: [0.0] * 16000,
+            load_align_model=Mock(return_value=(align_model, metadata)),
+            align=lambda *_args, **_kwargs: {
+                "word_segments": [{"word": "Bonjour.", "start": 0.1, "end": 0.5}],
+            },
+        )
+        with (
+            patch.dict(sys.modules, {"torch": torch_stub, "whisperx": loader}),
+            patch.object(services, "_ALIGNMENT_MODEL", None),
+            patch.object(services, "_ALIGNMENT_METADATA", None),
+            patch.object(services, "_ALIGNMENT_DEVICE", None),
+            patch.object(services, "_ALIGNMENT_BACKEND", None),
+        ):
+            align_audio("unused.wav", "Bonjour.")
+            align_audio("unused.wav", "Bonjour.")
+        self.assertEqual(loader.load_align_model.call_count, 1)
+
+    def test_xtts_speaker_conditioning_is_cached_for_the_same_voice(self):
+        voice = self.make_voice()
+        conditioning = (object(), object())
+        get_conditioning = Mock(return_value=conditioning)
+        xtts_model = types.SimpleNamespace(
+            get_conditioning_latents=get_conditioning,
+            inference=lambda *_args, **_kwargs: None,
+        )
+        model = types.SimpleNamespace(synthesizer=types.SimpleNamespace(tts_model=xtts_model))
+        torch_stub = types.SimpleNamespace(inference_mode=nullcontext)
+        with (
+            patch.dict(sys.modules, {"torch": torch_stub}),
+            patch.object(services, "_SPEAKER_CONDITIONING_CACHE", services.OrderedDict()),
+        ):
+            first = _get_speaker_conditioning(model, voice)
+            second = _get_speaker_conditioning(model, voice)
+        self.assertIs(first, conditioning)
+        self.assertIs(second, conditioning)
+        get_conditioning.assert_called_once_with(audio_path=[voice.sample.path])
 
     def test_xtts_import_and_generate_method_when_ai_package_is_installed(self):
         if not importlib.util.find_spec("TTS"):
