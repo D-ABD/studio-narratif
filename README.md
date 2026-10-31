@@ -27,7 +27,7 @@ Les projets, échantillons vocaux, narrations et sous-titres sont stockés dans 
 ## Prérequis
 
 - Python 3.11 recommandé.
-- FFmpeg dans le PATH, avec les filtres `zoompan` et `subtitles` (libass), pour les exports MP4 et la normalisation audio. Sur macOS : `brew install ffmpeg`.
+- FFmpeg pour les exports MP4 et la normalisation audio. Sur macOS : `brew install ffmpeg`. L’incrustation des sous-titres requiert aussi le filtre `subtitles` (libass). Si la version Homebrew installée ne le fournit pas, crée une fois l’environnement Conda dédié : `conda create -n ffmpeg-subs -c conda-forge ffmpeg`. L’application détecte automatiquement cet environnement aux emplacements Conda courants, sans commande `export` à répéter.
 - Pillow et PyMuPDF sont installés par `requirements.txt` pour valider les images et convertir les PDF.
 - Environ 8 à 10 Go libres pour les poids XTTS/WhisperX téléchargés au premier lancement. La synthèse CPU peut être lente ; une carte NVIDIA/CUDA accélère le traitement sur les systèmes compatibles.
 
