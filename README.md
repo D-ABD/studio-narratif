@@ -12,6 +12,7 @@ Les projets, échantillons vocaux, narrations et sous-titres sont stockés dans 
 - Renommage, recatégorisation et suppression confirmée des voix.
 - Projets avec plusieurs segments de texte modifiables, supprimables et réordonnables.
 - Import local d’images JPG/PNG ou de PDF ; chaque page PDF est convertie en une scène image.
+- Aperçu des images sélectionnées avant de confirmer leur import dans le projet.
 - Aperçu des scènes, réorganisation par glisser-déposer et choix par scène entre image fixe, zoom avant lent et zoom arrière lent.
 - Synthèse française XTTS v2 et alignement forcé WhisperX sur l’audio réellement généré.
 - Sous-titres synchronisés avec l’audio ; les phrases sont incrustées progressivement dans la vidéo, avec activation/désactivation.

@@ -2,6 +2,47 @@
   const csrfToken = () => document.querySelector('[name=csrfmiddlewaretoken]')?.value || '';
   const wordCount = value => (value.trim() ? value.trim().split(/\s+/).length : 0);
 
+  const sceneFiles = document.querySelector('#sceneFiles');
+  const importPreview = document.querySelector('#importPreview');
+  const importPreviewHeading = document.querySelector('#importPreviewHeading');
+  const importPreviewGrid = document.querySelector('#importPreviewGrid');
+  let importPreviewUrls = [];
+  sceneFiles?.addEventListener('change', () => {
+    importPreviewUrls.forEach(url => URL.revokeObjectURL(url));
+    importPreviewUrls = [];
+    importPreviewGrid.replaceChildren();
+    const files = [...(sceneFiles.files || [])];
+    importPreview.hidden = files.length === 0;
+    if (!files.length) return;
+    importPreviewHeading.textContent = `Aperçu des ${files.length} fichier${files.length > 1 ? 's' : ''} sélectionné${files.length > 1 ? 's' : ''}`;
+    files.forEach(file => {
+      const card = document.createElement('article');
+      card.className = 'import-preview-item';
+      const preview = document.createElement('div');
+      preview.className = 'import-preview-image';
+      const extension = file.name.split('.').pop()?.toLowerCase();
+      if (file.type.startsWith('image/') || ['jpg', 'jpeg', 'png'].includes(extension)) {
+        const image = document.createElement('img');
+        const objectUrl = URL.createObjectURL(file);
+        importPreviewUrls.push(objectUrl);
+        image.src = objectUrl;
+        image.alt = `Aperçu de ${file.name}`;
+        preview.append(image);
+      } else {
+        preview.classList.add('pdf-preview');
+        preview.textContent = 'PDF';
+      }
+      const name = document.createElement('b');
+      name.textContent = file.name;
+      const info = document.createElement('small');
+      info.textContent = extension === 'pdf'
+        ? 'Document PDF · chaque page deviendra une scène'
+        : `${(file.size / (1024 * 1024)).toFixed(1)} Mo`;
+      card.append(preview, name, info);
+      importPreviewGrid.append(card);
+    });
+  });
+
   document.querySelectorAll('.segment-form textarea').forEach(textarea => {
     const card = textarea.closest('.segment-card');
     const update = () => {
