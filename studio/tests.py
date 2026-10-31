@@ -4,12 +4,14 @@ import tempfile
 import types
 import wave
 from contextlib import nullcontext
+from datetime import timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 from django.core.files.base import ContentFile
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
+from django.utils import timezone
 
 from .models import NarrationProject, NarrationSegment, Voice
 from .services import (
@@ -114,6 +116,59 @@ class ProjectViewTests(MediaTestCase):
         self.assertEqual((second.position, first.position), (0, 1))
         self.client.post(f"/projects/{project.pk}/segments/{second.pk}/delete/")
         self.assertEqual(project.segments.count(), 1)
+
+
+class NarrationQueueTests(MediaTestCase):
+    def make_queued_project(self, title, voice, queued_at):
+        project = NarrationProject.objects.create(
+            title=title, voice=voice, status=NarrationProject.Status.QUEUED, queued_at=queued_at,
+        )
+        NarrationSegment.objects.create(project=project, position=0, text="Bonjour.")
+        return project
+
+    def test_prepare_adds_project_to_persistent_queue_without_starting_a_thread(self):
+        voice = self.make_voice()
+        project = NarrationProject.objects.create(title="À préparer", voice=voice)
+        NarrationSegment.objects.create(project=project, position=0, text="Bonjour.")
+
+        response = self.client.post(f"/projects/{project.pk}/prepare/", {"voice_id": voice.pk})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["ok"])
+        project.refresh_from_db()
+        self.assertEqual(project.status, NarrationProject.Status.QUEUED)
+        self.assertIsNotNone(project.queued_at)
+        self.assertIsNone(project.started_at)
+
+    def test_queue_status_reports_fifo_position_and_edits_are_locked(self):
+        voice = self.make_voice()
+        first = self.make_queued_project("Premier", voice, timezone.now())
+        second = self.make_queued_project("Deuxième", voice, timezone.now() + timedelta(seconds=1))
+
+        response = self.client.get(f"/projects/{second.pk}/status/")
+        self.assertEqual(response.json()["queue_position"], 2)
+        self.assertEqual(response.json()["queue_count"], 2)
+
+        segment = second.segments.get()
+        edit = self.client.post(f"/projects/{second.pk}/segments/{segment.pk}/save/", {"text": "Autre."})
+        self.assertEqual(edit.status_code, 409)
+        segment.refresh_from_db()
+        self.assertEqual(segment.text, "Bonjour.")
+        self.assertEqual(first.status, NarrationProject.Status.QUEUED)
+
+    def test_worker_claims_jobs_in_fifo_order(self):
+        from .management.commands.run_narration_worker import Command
+
+        voice = self.make_voice()
+        first = self.make_queued_project("Premier", voice, timezone.now())
+        second = self.make_queued_project("Deuxième", voice, timezone.now() + timedelta(seconds=1))
+
+        self.assertEqual(Command._claim_next_job(), first.pk)
+        first.refresh_from_db()
+        self.assertEqual(first.status, NarrationProject.Status.PROCESSING)
+        self.assertIsNone(first.queued_at)
+        self.assertEqual(Command._claim_next_job(), second.pk)
 
 
 class CacheAndCaptionTests(MediaTestCase):

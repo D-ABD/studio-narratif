@@ -14,7 +14,7 @@
     <nav class="side-nav"><a href="{% url 'home' %}#voices"><span>♫</span> Bibliothèque de voix</a><a href="{% url 'home' %}#projects"><span>▤</span> Mes narrations</a></nav>
     <div class="side-label project-heading">MES PROJETS <span>{{ projects|length }}</span></div>
     <nav class="project-list">
-      {% for item in projects %}<a class="project-link {% if project and item.id == project.id %}selected{% endif %}" href="{% url 'project_detail' item.id %}"><span class="project-dot {% if item.status == 'ready' %}done{% elif item.status == 'error' %}failed{% endif %}"></span><span class="truncate">{{ item.title }}</span><small>{{ item.updated_at|date:"d/m" }}</small></a>{% empty %}<p class="empty-side">Tes narrations apparaîtront ici.</p>{% endfor %}
+      {% for item in projects %}<a class="project-link {% if project and item.id == project.id %}selected{% endif %}" href="{% url 'project_detail' item.id %}"><span class="project-dot {% if item.status == 'ready' %}done{% elif item.status == 'error' %}failed{% elif item.status == 'queued' %}queued{% endif %}"></span><span class="truncate">{{ item.title }}</span><small>{{ item.updated_at|date:"d/m" }}</small></a>{% empty %}<p class="empty-side">Tes narrations apparaîtront ici.</p>{% endfor %}
     </nav>
     <form action="{% url 'create_project' %}" method="post" class="new-project-form">{% csrf_token %}<input type="hidden" name="title" value="Nouvelle narration"><button class="button button-secondary full">＋ Nouvelle narration</button></form>
     <div class="sidebar-bottom"><span class="local-pill"><i></i> Traitement sur cet appareil</span><p>Les échantillons, narrations et projets restent dans le dossier local de l’application.</p></div>

@@ -435,6 +435,7 @@ def prepare_project(project_id):
                 project.subtitles.save(f"narration-{project.pk}.srt", ContentFile(srt.encode("utf-8")), save=False)
                 project.duration_seconds = duration
                 project.status = NarrationProject.Status.READY
+                project.queued_at = None
                 project.status_message = (
                     f"Narration prête · XTTS {total_xtts_seconds:.1f} s · "
                     f"WhisperX {total_whisperx_seconds:.1f} s · cache {cached_segments}/{len(segments)} segment(s)."
@@ -447,13 +448,14 @@ def prepare_project(project_id):
                 project.save(update_fields=[
                     "full_audio", "subtitles", "duration_seconds", "status", "status_message",
                     "error_message", "progress_percent", "current_segment", "total_segments",
-                    "finished_at", "updated_at",
+                    "queued_at", "finished_at", "updated_at",
                 ])
     except Exception as exc:
         NarrationProject.objects.filter(pk=project_id).update(
             status=NarrationProject.Status.ERROR,
             status_message="La préparation de la narration a échoué.",
             error_message=str(exc)[:2000],
+            queued_at=None,
             finished_at=timezone.now(),
         )
     finally:

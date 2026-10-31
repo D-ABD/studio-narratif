@@ -1,17 +1,16 @@
 import json
 from pathlib import Path
-import threading
 
 from django.contrib import messages
 from django.core.files.base import ContentFile
-from django.db import close_old_connections, transaction
+from django.db import transaction
 from django.http import HttpResponse, HttpResponseBadRequest, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.views.decorators.http import require_POST
 
 from .models import NarrationProject, NarrationSegment, Voice
-from .services import _voice_sample_digest, cache_key_for, hash_file, normalize_voice_sample, prepare_project, srt_text
+from .services import _voice_sample_digest, cache_key_for, hash_file, normalize_voice_sample, srt_text
 
 MAX_SAMPLE_BYTES = 25 * 1024 * 1024
 ALLOWED_SAMPLE_EXTENSIONS = {".wav", ".mp3", ".webm", ".m4a", ".ogg"}
@@ -26,6 +25,7 @@ def _invalidate_export(project):
     project.subtitles = ""
     project.duration_seconds = 0
     project.status = NarrationProject.Status.DRAFT
+    project.queued_at = None
     project.status_message = "Modifications en attente de préparation."
     project.error_message = ""
     project.progress_percent = 0
@@ -33,7 +33,7 @@ def _invalidate_export(project):
     project.finished_at = None
     project.save(update_fields=[
         "voice", "full_audio", "subtitles", "duration_seconds", "status", "status_message", "error_message",
-        "progress_percent", "started_at", "finished_at", "updated_at",
+        "progress_percent", "queued_at", "started_at", "finished_at", "updated_at",
     ])
 
 
@@ -161,8 +161,8 @@ def set_project_voice(request, project_id):
     project = get_object_or_404(NarrationProject, pk=project_id)
     voice_id = request.POST.get("voice_id")
     voice = get_object_or_404(Voice, pk=voice_id, consent_confirmed=True) if voice_id else None
-    if project.status == NarrationProject.Status.PROCESSING:
-        return JsonResponse({"ok": False, "error": "Un traitement est déjà en cours."}, status=409)
+    if project.status in {NarrationProject.Status.QUEUED, NarrationProject.Status.PROCESSING}:
+        return JsonResponse({"ok": False, "error": "Ce projet est déjà dans la file ou en cours de traitement."}, status=409)
     if project.voice_id != (voice.pk if voice else None):
         project.voice = voice
         _invalidate_export(project)
@@ -172,7 +172,7 @@ def set_project_voice(request, project_id):
 @require_POST
 def add_segment(request, project_id):
     project = get_object_or_404(NarrationProject, pk=project_id)
-    if project.status == NarrationProject.Status.PROCESSING:
+    if project.status in {NarrationProject.Status.QUEUED, NarrationProject.Status.PROCESSING}:
         return JsonResponse({"ok": False, "error": "Attends la fin du traitement avant de modifier le projet."}, status=409)
     NarrationSegment.objects.create(project=project, position=project.segments.count())
     _invalidate_export(project)
@@ -183,7 +183,7 @@ def add_segment(request, project_id):
 def save_segment(request, project_id, segment_id):
     project = get_object_or_404(NarrationProject, pk=project_id)
     segment = get_object_or_404(NarrationSegment, pk=segment_id, project=project)
-    if project.status == NarrationProject.Status.PROCESSING:
+    if project.status in {NarrationProject.Status.QUEUED, NarrationProject.Status.PROCESSING}:
         return JsonResponse({"ok": False, "error": "Attends la fin du traitement avant de modifier le projet."}, status=409)
     text = (request.POST.get("text") or "").strip()[:12000]
     if text != segment.text:
@@ -206,7 +206,7 @@ def save_segment(request, project_id, segment_id):
 def delete_segment(request, project_id, segment_id):
     project = get_object_or_404(NarrationProject, pk=project_id)
     segment = get_object_or_404(NarrationSegment, pk=segment_id, project=project)
-    if project.status == NarrationProject.Status.PROCESSING:
+    if project.status in {NarrationProject.Status.QUEUED, NarrationProject.Status.PROCESSING}:
         return JsonResponse({"ok": False, "error": "Attends la fin du traitement avant de modifier le projet."}, status=409)
     audio = segment.audio
     segment.delete()
@@ -224,7 +224,7 @@ def delete_segment(request, project_id, segment_id):
 @require_POST
 def reorder_segments(request, project_id):
     project = get_object_or_404(NarrationProject, pk=project_id)
-    if project.status == NarrationProject.Status.PROCESSING:
+    if project.status in {NarrationProject.Status.QUEUED, NarrationProject.Status.PROCESSING}:
         return JsonResponse({"ok": False, "error": "Attends la fin du traitement avant de modifier le projet."}, status=409)
     try:
         ids = json.loads(request.body).get("segment_ids", [])
@@ -259,8 +259,8 @@ def delete_project(request, project_id):
 @require_POST
 def prepare(request, project_id):
     project = get_object_or_404(NarrationProject, pk=project_id)
-    if project.status == NarrationProject.Status.PROCESSING:
-        return JsonResponse({"ok": False, "error": "Un traitement est déjà en cours."}, status=409)
+    if project.status in {NarrationProject.Status.QUEUED, NarrationProject.Status.PROCESSING}:
+        return JsonResponse({"ok": False, "error": "Ce projet est déjà dans la file ou en cours de traitement."}, status=409)
     voice_id = request.POST.get("voice_id") or project.voice_id
     voice = get_object_or_404(Voice, pk=voice_id, consent_confirmed=True) if voice_id else None
     segments = list(project.segments.order_by("position", "id"))
@@ -271,26 +271,17 @@ def prepare(request, project_id):
     if project.voice_id != voice.pk:
         project.voice = voice
         _invalidate_export(project)
-    project.status = NarrationProject.Status.PROCESSING
-    project.status_message = "Mise en attente du moteur vocal…"
+    project.status = NarrationProject.Status.QUEUED
+    project.queued_at = timezone.now()
+    project.status_message = "Ajouté à la file d’attente."
     project.error_message = ""
     project.progress_percent = 0
     project.current_segment = 0
     project.total_segments = len(segments)
-    project.started_at = timezone.now()
+    project.started_at = None
     project.finished_at = None
     project.save()
-    worker = threading.Thread(target=_run_prepare, args=(project.pk,), daemon=True, name=f"narration-{project.pk}")
-    worker.start()
     return JsonResponse({"ok": True, "status_url": f"/projects/{project.pk}/status/"})
-
-
-def _run_prepare(project_id):
-    close_old_connections()
-    try:
-        prepare_project(project_id)
-    finally:
-        close_old_connections()
 
 
 def project_status(request, project_id):
@@ -299,6 +290,10 @@ def project_status(request, project_id):
     if project.started_at:
         end = project.finished_at or timezone.now()
         elapsed = max(0, round((end - project.started_at).total_seconds()))
+    queued = NarrationProject.objects.filter(status=NarrationProject.Status.QUEUED).order_by("queued_at", "id")
+    queue_count = queued.count()
+    queue_position = next((index for index, item in enumerate(queued.values_list("id", flat=True), start=1)
+                           if item == project.pk), 0)
     return JsonResponse({
         "status": project.status,
         "message": project.status_message,
@@ -307,6 +302,8 @@ def project_status(request, project_id):
         "current_segment": project.current_segment,
         "total_segments": project.total_segments,
         "elapsed_seconds": elapsed,
+        "queue_position": queue_position,
+        "queue_count": queue_count,
         "audio_url": project.full_audio.url if project.full_audio else "",
         "subtitles_url": project.subtitles.url if project.subtitles else "",
     })

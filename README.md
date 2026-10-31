@@ -12,10 +12,10 @@ Les projets, échantillons vocaux, narrations et sous-titres sont stockés dans 
 - Renommage, recatégorisation et suppression confirmée des voix.
 - Projets avec plusieurs segments de texte modifiables, supprimables et réordonnables.
 - Synthèse française XTTS v2 et alignement forcé WhisperX sur l’audio réellement généré.
-- Réutilisation en mémoire du modèle XTTS, du modèle d’alignement WhisperX et des représentations de chaque voix pendant l’exécution du serveur.
+- File d’attente persistante des projets : un worker séquentiel garde XTTS et WhisperX chargés en mémoire pendant qu’il traite plusieurs narrations.
 - Cache disque par texte, empreinte SHA-256 de l’échantillon, modèle et langue ; les segments inchangés sont réutilisés.
 - Écoute et téléchargement de chaque segment, plus export WAV complet et SRT avec chronologie cumulée.
-- Progression persistante en base, segment courant, temps écoulé, durées XTTS/WhisperX et état prêt/en cours/erreur.
+- Progression persistante en base, position dans la file, segment courant, temps écoulé, durées XTTS/WhisperX et état prêt/en attente/en cours/erreur.
 - Interface responsive inspirée des captures fournies, sans dépendance à une police ou ressource distante.
 
 ## Prérequis
@@ -53,13 +53,21 @@ Cette commande charge XTTS v2 et télécharge ses poids si nécessaire. Elle éc
 
 ## Lancement
 
-Dans le même environnement virtuel :
+La file utilise un worker dédié pour garder les modèles IA en mémoire. Ouvre deux terminaux dans le dossier du dépôt et active `.venv` dans chacun.
+
+Terminal 1 — site web :
 
 ```bash
 python manage.py runserver 127.0.0.1:8000
 ```
 
-Ouvre ensuite <http://127.0.0.1:8000/>. Le serveur de développement est prévu pour l’accès local ; ne l’expose pas directement sur Internet.
+Terminal 2 — traitement des narrations :
+
+```bash
+python manage.py run_narration_worker
+```
+
+Ouvre ensuite <http://127.0.0.1:8000/>. Ajoute des projets à la file depuis leur page ; le worker les traite dans l’ordre, un par un. La file est enregistrée dans SQLite et reprend les traitements interrompus après un redémarrage. Laisse le terminal du worker ouvert pendant le traitement. Le serveur de développement est prévu pour l’accès local ; ne l’expose pas directement sur Internet.
 
 ## Tests et contrôles
 
@@ -69,13 +77,13 @@ python manage.py makemigrations --check --dry-run
 python manage.py test
 ```
 
-Les tests Django couvrent l’autorisation et la gestion des voix, les segments et leur réorganisation, les clés de cache, l’alignement sans horodatages de secours, l’assemblage WAV et le calcul des offsets SRT. Le test d’import XTTS est automatiquement ignoré si les dépendances IA ne sont pas installées ; le script `check_ai_install.py` fournit le contrôle dédié.
+Les tests Django couvrent l’autorisation et la gestion des voix, les segments et leur réorganisation, la mise en file FIFO, les clés de cache, l’alignement sans horodatages de secours, l’assemblage WAV et le calcul des offsets SRT. Le test d’import XTTS est automatiquement ignoré si les dépendances IA ne sont pas installées ; le script `check_ai_install.py` fournit le contrôle dédié.
 
 ## Utilisation
 
 1. Ajoute une voix WAV/MP3 ou enregistre-la avec le microphone ; écoute-la avant de la sauvegarder et confirme les droits d’utilisation.
 2. Crée un projet de narration, écris tes textes en segments et choisis une voix enregistrée.
-3. Clique sur **Préparer les segments**. XTTS crée les audios et WhisperX aligne chaque texte sur son audio. Les segments déjà prêts et inchangés sont réutilisés.
+3. Clique sur **Ajouter à la file**. Le worker XTTS traite les projets dans l’ordre ; la page affiche la position d’attente et l’avancement. Les segments déjà prêts et inchangés sont réutilisés.
 4. Écoute ou télécharge chaque WAV/SRT séparément, puis récupère la narration complète et son SRT.
 
 Si WhisperX échoue à aligner un segment, le projet passe en erreur avec le détail retourné ; aucun horodatage approximatif n’est créé.

@@ -155,6 +155,17 @@
       details.hidden = data.status !== 'processing';
       currentSegment.textContent = `Segment ${data.current_segment}/${data.total_segments}`;
       elapsedTime.textContent = formatElapsed(data.elapsed_seconds);
+      if (data.status === 'queued') {
+        status.className = 'job-status';
+        status.textContent = data.queue_position
+          ? `En attente · position ${data.queue_position} sur ${data.queue_count}. Le worker traitera les projets dans l’ordre.`
+          : 'Ajouté à la file. En attente du worker…';
+        button.disabled = true;
+        progress.hidden = true;
+        details.hidden = true;
+        window.setTimeout(() => { polling = false; poll(); }, 2500);
+        return;
+      }
       if (data.status === 'ready') {
         status.className = 'job-status success';
         status.textContent = data.message || 'Narration prête à écouter et à télécharger.';
@@ -168,6 +179,7 @@
         return;
       }
       if (data.status === 'processing') {
+        button.disabled = true;
         window.setTimeout(() => { polling = false; poll(); }, 1300);
         return;
       }
@@ -208,7 +220,7 @@
       if (!response.ok) throw new Error(data.error || 'Le traitement n’a pas pu démarrer.');
       progress.hidden = false;
       details.hidden = false;
-      status.textContent = 'Mise en attente du moteur vocal…';
+      status.textContent = 'Ajout du projet à la file…';
       polling = false;
       poll();
     } catch (error) {
@@ -218,10 +230,10 @@
     }
   });
 
-  if (document.body.dataset.projectStatus === 'processing') {
+  if (['processing', 'queued'].includes(document.body.dataset.projectStatus)) {
     button.disabled = true;
-    progress.hidden = false;
-    details.hidden = false;
+    progress.hidden = document.body.dataset.projectStatus !== 'processing';
+    details.hidden = document.body.dataset.projectStatus !== 'processing';
     poll();
   }
 })();
