@@ -180,6 +180,17 @@ class VideoSceneTests(MediaTestCase):
         Image.new("RGB", (80, 60), color).save(buffer, format="PNG")
         return buffer.getvalue()
 
+    def test_camera_motion_presets_keep_the_image_aspect_and_create_movement(self):
+        from .video_services import _movement_filters
+
+        for motion in ("zoom_in", "zoom_out", "pan_h", "pan_v", "zoom_pan"):
+            filters = _movement_filters(motion, 720, 1280, 10)
+            self.assertIn("crop=720:1280", filters)
+            self.assertTrue(any(item.startswith("zoompan=") for item in filters), motion)
+        fixed = _movement_filters("still", 720, 1280, 10)
+        self.assertIn("force_original_aspect_ratio=decrease", fixed[0])
+        self.assertTrue(any(item.startswith("pad=") for item in fixed))
+
     def test_import_image_creates_a_scene_and_reuses_empty_first_segment(self):
         project = NarrationProject.objects.create(title="Images")
         first = NarrationSegment.objects.create(project=project, position=0)

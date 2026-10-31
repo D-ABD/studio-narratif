@@ -16,6 +16,36 @@ def _dimensions(video_format):
     return (720, 1280) if video_format == NarrationProject.VideoFormat.VERTICAL else (1280, 720)
 
 
+def _movement_filters(motion, width, height, duration):
+    """Create restrained camera motion; the source image and characters stay unchanged."""
+    if motion == "still":
+        return [
+            f"scale={width}:{height}:force_original_aspect_ratio=decrease",
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black",
+            "fps=24",
+        ]
+    frames = max(1, round(max(0.1, duration) * 24))
+    progress = f"min(on/{frames},1)"
+    base = [f"scale={width}:{height}:force_original_aspect_ratio=increase", f"crop={width}:{height}"]
+    if motion == "zoom_in":
+        return base + [f"zoompan=z='min(zoom+0.00010,1.08)':d=1:s={width}x{height}:fps=24"]
+    if motion == "zoom_out":
+        return base + [f"zoompan=z='if(eq(on,1),1.08,max(zoom-0.00010,1.0))':d=1:s={width}x{height}:fps=24"]
+    if motion == "pan_h":
+        return base + [
+            f"zoompan=z='1.08':x='(iw-iw/zoom)*{progress}':y='(ih-ih/zoom)/2':d=1:s={width}x{height}:fps=24"
+        ]
+    if motion == "pan_v":
+        return base + [
+            f"zoompan=z='1.08':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)*{progress}':d=1:s={width}x{height}:fps=24"
+        ]
+    if motion == "zoom_pan":
+        return base + [
+            f"zoompan=z='1+0.08*{progress}':x='(iw-iw/zoom)*{progress}':y='(ih-ih/zoom)*{progress}':d=1:s={width}x{height}:fps=24"
+        ]
+    raise RuntimeError("Le mouvement choisi pour une scène n’est pas reconnu.")
+
+
 def _run_ffmpeg(command, cwd, operation):
     try:
         result = subprocess.run(command, cwd=cwd, capture_output=True, text=True, check=False)
@@ -53,14 +83,7 @@ def render_project_video(project_id):
 
                 clip = folder / f"scene-{index:04}.mp4"
                 duration = max(0.1, float(scene.duration_seconds))
-                if scene.motion == "zoom_in":
-                    filters = [f"scale={width}:{height}:force_original_aspect_ratio=increase", f"crop={width}:{height}"]
-                    filters.append(f"zoompan=z='min(zoom+0.00010,1.08)':d=1:s={width}x{height}:fps=24")
-                elif scene.motion == "zoom_out":
-                    filters = [f"scale={width}:{height}:force_original_aspect_ratio=increase", f"crop={width}:{height}"]
-                    filters.append(f"zoompan=z='if(eq(on,1),1.08,max(zoom-0.00010,1.0))':d=1:s={width}x{height}:fps=24")
-                else:
-                    filters = [f"scale={width}:{height}:force_original_aspect_ratio=decrease", f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black", "fps=24"]
+                filters = _movement_filters(scene.motion, width, height, duration)
                 if project.subtitles_enabled:
                     subtitle_file = folder / f"scene-{index:04}.srt"
                     subtitle_file.write_text(srt_text([scene]), encoding="utf-8")
