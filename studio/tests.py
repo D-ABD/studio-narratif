@@ -62,6 +62,18 @@ class VoiceLibraryTests(MediaTestCase):
 
 
 class ProjectViewTests(MediaTestCase):
+    @patch("studio.services.hash_file", wraps=services.hash_file)
+    def test_project_detail_hashes_voice_sample_once_for_multiple_segments(self, hash_sample):
+        voice = self.make_voice()
+        project = NarrationProject.objects.create(title="Projet", voice=voice)
+        NarrationSegment.objects.create(project=project, position=0, text="Premier segment.")
+        NarrationSegment.objects.create(project=project, position=1, text="Deuxième segment.")
+
+        response = self.client.get(f"/projects/{project.pk}/")
+
+        self.assertEqual(response.status_code, 200)
+        hash_sample.assert_called_once_with(voice.sample.path)
+
     def test_changing_project_voice_is_persisted_and_invalidates_complete_exports(self):
         project = NarrationProject.objects.create(title="Voix différente")
         voice = self.make_voice("Voix B", Voice.Category.WOMAN)

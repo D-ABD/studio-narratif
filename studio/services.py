@@ -74,11 +74,15 @@ def normalize_voice_sample(upload):
         return output.read_bytes()
 
 
-def cache_key_for(text, voice, model_id=MODEL_ID, language=LANGUAGE_CODE):
-    """Stable cache identity: exact text, sample bytes, model, and language."""
+def _voice_sample_digest(voice):
     if not voice.sample or not voice.sample.name:
         raise ValueError("La voix ne possède pas d’échantillon audio.")
-    sample_digest = voice.sample_sha256 or hash_file(voice.sample.path)
+    return voice.sample_sha256 or hash_file(voice.sample.path)
+
+
+def cache_key_for(text, voice, model_id=MODEL_ID, language=LANGUAGE_CODE, sample_digest=None):
+    """Stable cache identity: exact text, sample bytes, model, and language."""
+    sample_digest = sample_digest or _voice_sample_digest(voice)
     source = json.dumps({
         "text": text.strip(),
         "voice_sample": sample_digest,
@@ -382,6 +386,7 @@ def prepare_project(project_id):
                 raise RuntimeError("Choisis une voix dont l’autorisation d’utilisation est confirmée.")
             if not segments or any(not item.text.strip() for item in segments):
                 raise RuntimeError("Ajoute un texte à chaque segment avant de préparer la narration.")
+            sample_digest = _voice_sample_digest(voice)
             project.total_segments = len(segments)
             project.current_segment = 0
             project.status_message = "Préparation de la narration…"
@@ -398,7 +403,7 @@ def prepare_project(project_id):
                     project.current_segment = index
                     project.status_message = f"Segment {index}/{len(segments)} · vérification du cache"
                     project.save(update_fields=["current_segment", "status_message", "updated_at"])
-                    expected_key = cache_key_for(segment.text, voice)
+                    expected_key = cache_key_for(segment.text, voice, sample_digest=sample_digest)
 
                     def update_progress(stage, fraction, index=index):
                         percent = round(((index - 1 + max(0.0, min(1.0, fraction))) / len(segments)) * 95)

@@ -11,7 +11,7 @@ from django.utils import timezone
 from django.views.decorators.http import require_POST
 
 from .models import NarrationProject, NarrationSegment, Voice
-from .services import cache_key_for, hash_file, normalize_voice_sample, prepare_project, srt_text
+from .services import _voice_sample_digest, cache_key_for, hash_file, normalize_voice_sample, prepare_project, srt_text
 
 MAX_SAMPLE_BYTES = 25 * 1024 * 1024
 ALLOWED_SAMPLE_EXTENSIONS = {".wav", ".mp3", ".webm", ".m4a", ".ogg"}
@@ -132,11 +132,16 @@ def create_project(request):
 def project_detail(request, project_id):
     project = get_object_or_404(NarrationProject, pk=project_id)
     segments = list(project.segments.all())
+    voice = project.voice if project.voice_id else None
+    try:
+        sample_digest = _voice_sample_digest(voice) if voice else ""
+    except (OSError, ValueError):
+        sample_digest = ""
     for segment in segments:
         try:
             segment.ready_for_voice = bool(
-                project.voice_id and segment.text.strip()
-                and segment.cache_key == cache_key_for(segment.text, project.voice)
+                voice and sample_digest and segment.text.strip()
+                and segment.cache_key == cache_key_for(segment.text, voice, sample_digest=sample_digest)
                 and segment.audio and Path(segment.audio.path).is_file()
                 and segment.subtitle_data
             )
