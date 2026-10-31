@@ -40,7 +40,47 @@ _PIPELINE_LOCK = threading.Lock()
 
 def _ffmpeg_path():
     configured = os.environ.get("FFMPEG_BINARY")
-    path = configured if configured and Path(configured).is_file() else shutil.which("ffmpeg")
+    if configured and Path(configured).is_file():
+        return configured
+
+    # Prefer the dedicated Conda environment, which can include libass even
+    # when the system/Homebrew FFmpeg build does not.
+    candidates = []
+    conda_prefix = os.environ.get("CONDA_PREFIX")
+    if conda_prefix:
+        prefix = Path(conda_prefix).expanduser()
+        if prefix.name == "ffmpeg-subs":
+            candidates.append(prefix / "bin" / "ffmpeg")
+        else:
+            candidates.append(prefix / "envs" / "ffmpeg-subs" / "bin" / "ffmpeg")
+
+    conda_exe = os.environ.get("CONDA_EXE")
+    if conda_exe:
+        conda_base = Path(conda_exe).expanduser().resolve().parent.parent
+        candidates.append(conda_base / "envs" / "ffmpeg-subs" / "bin" / "ffmpeg")
+
+    # Common macOS Conda locations also cover launching the app outside an
+    # activated Conda shell, while keeping the override above available.
+    home = Path.home()
+    for conda_base in (
+        home / "miniconda3",
+        home / "anaconda3",
+        home / "Applications" / "miniconda3",
+        Path("/opt/miniconda3"),
+        Path("/opt/anaconda3"),
+    ):
+        candidates.append(conda_base / "envs" / "ffmpeg-subs" / "bin" / "ffmpeg")
+
+    seen = set()
+    for candidate in candidates:
+        candidate = candidate.expanduser()
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate.is_file():
+            return str(candidate)
+
+    path = shutil.which("ffmpeg")
     if not path:
         raise RuntimeError("FFmpeg est introuvable. Installe-le puis relance Petit Studio Voix.")
     return path
