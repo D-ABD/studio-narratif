@@ -13,6 +13,17 @@
     textarea.addEventListener('input', update);
     update();
   });
+  document.querySelectorAll('.segment-form select[name="motion"]').forEach(select => {
+    select.dataset.initialValue = select.value;
+    select.addEventListener('change', () => {
+      select.form.dataset.motionDirty = select.value !== select.dataset.initialValue ? 'true' : 'false';
+    });
+  });
+  const videoOptionsForm = document.querySelector('#videoOptionsForm');
+  videoOptionsForm?.querySelectorAll('select,input').forEach(input => {
+    input.dataset.initialValue = input.type === 'checkbox' ? String(input.checked) : input.value;
+    input.addEventListener('change', () => { videoOptionsForm.dataset.dirty = 'true'; });
+  });
 
   const sampleInput = document.querySelector('#sampleInput');
   const samplePreview = document.querySelector('#samplePreview');
@@ -141,6 +152,16 @@
     srtDownload.href = subtitlesUrl;
     box.hidden = false;
   };
+  const showVideoExport = videoUrl => {
+    if (!videoUrl) return;
+    const box = document.querySelector('#videoExport');
+    const video = document.querySelector('#projectVideo');
+    const download = document.querySelector('#videoDownload');
+    if (!box || !video || !download) return;
+    video.src = videoUrl;
+    download.href = videoUrl;
+    box.hidden = false;
+  };
 
   const poll = async () => {
     if (polling) return;
@@ -170,6 +191,7 @@
         status.className = 'job-status success';
         status.textContent = data.message || 'Narration prête à écouter et à télécharger.';
         showFullExport(data.audio_url, data.subtitles_url);
+        showVideoExport(data.video_url);
         button.disabled = false;
         return;
       }
@@ -194,12 +216,21 @@
   };
 
   const saveDirtySegments = async () => {
-    for (const textarea of document.querySelectorAll('.segment-form textarea[data-dirty="true"]')) {
-      const form = textarea.closest('form');
+    for (const form of document.querySelectorAll('.segment-form')) {
+      const textarea = form.querySelector('textarea');
+      if (textarea?.dataset.dirty !== 'true' && form.dataset.motionDirty !== 'true') continue;
       const response = await fetch(form.action, {method: 'POST', body: new FormData(form)});
       if (!response.ok) throw new Error('Impossible d’enregistrer un segment modifié.');
-      textarea.defaultValue = textarea.value;
-      textarea.dataset.dirty = 'false';
+      if (textarea) {
+        textarea.defaultValue = textarea.value;
+        textarea.dataset.dirty = 'false';
+      }
+      form.dataset.motionDirty = 'false';
+    }
+    if (videoOptionsForm?.dataset.dirty === 'true') {
+      const response = await fetch(videoOptionsForm.action, {method: 'POST', body: new FormData(videoOptionsForm)});
+      if (!response.ok) throw new Error('Impossible d’enregistrer les réglages vidéo.');
+      videoOptionsForm.dataset.dirty = 'false';
     }
   };
 

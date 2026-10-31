@@ -434,17 +434,22 @@ def prepare_project(project_id):
                     project.full_audio.save(f"narration-{project.pk}.wav", File(stream), save=False)
                 project.subtitles.save(f"narration-{project.pk}.srt", ContentFile(srt.encode("utf-8")), save=False)
                 project.duration_seconds = duration
-                project.status = NarrationProject.Status.READY
+                generating_video = project.job_type == NarrationProject.JobType.VIDEO
+                project.status = NarrationProject.Status.PROCESSING if generating_video else NarrationProject.Status.READY
                 project.queued_at = None
+                timings_message = (
+                    f"XTTS {total_xtts_seconds:.1f} s · WhisperX {total_whisperx_seconds:.1f} s · "
+                    f"cache {cached_segments}/{len(segments)} segment(s)."
+                )
                 project.status_message = (
-                    f"Narration prête · XTTS {total_xtts_seconds:.1f} s · "
-                    f"WhisperX {total_whisperx_seconds:.1f} s · cache {cached_segments}/{len(segments)} segment(s)."
+                    f"Narration prête · rendu vidéo en cours · {timings_message}"
+                    if generating_video else f"Narration prête · {timings_message}"
                 )
                 project.error_message = ""
-                project.progress_percent = 100
+                project.progress_percent = 95 if generating_video else 100
                 project.current_segment = len(segments)
                 project.total_segments = len(segments)
-                project.finished_at = timezone.now()
+                project.finished_at = None if generating_video else timezone.now()
                 project.save(update_fields=[
                     "full_audio", "subtitles", "duration_seconds", "status", "status_message",
                     "error_message", "progress_percent", "current_segment", "total_segments",

@@ -32,10 +32,21 @@ class NarrationProject(models.Model):
         READY = "ready", "Prêt"
         ERROR = "error", "Erreur"
 
+    class VideoFormat(models.TextChoices):
+        VERTICAL = "9:16", "Vertical · 9:16"
+        HORIZONTAL = "16:9", "Horizontal · 16:9"
+
+    class JobType(models.TextChoices):
+        AUDIO = "audio", "Narration audio"
+        VIDEO = "video", "Vidéo"
+
     title = models.CharField("titre", max_length=120, default="Nouvelle narration")
     voice = models.ForeignKey(Voice, null=True, blank=True, on_delete=models.SET_NULL, related_name="projects")
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.DRAFT)
     queued_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    job_type = models.CharField(max_length=8, choices=JobType.choices, default=JobType.AUDIO)
+    video_format = models.CharField(max_length=5, choices=VideoFormat.choices, default=VideoFormat.VERTICAL)
+    subtitles_enabled = models.BooleanField(default=True)
     status_message = models.CharField(max_length=240, blank=True)
     error_message = models.TextField(blank=True)
     progress_percent = models.PositiveSmallIntegerField(default=0)
@@ -45,6 +56,7 @@ class NarrationProject(models.Model):
     finished_at = models.DateTimeField(null=True, blank=True)
     full_audio = models.FileField(upload_to="exports/audio/", blank=True)
     subtitles = models.FileField(upload_to="exports/subtitles/", blank=True)
+    video_file = models.FileField(upload_to="exports/video/", blank=True)
     duration_seconds = models.FloatField(default=0)
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
@@ -57,8 +69,15 @@ class NarrationProject(models.Model):
 
 
 class NarrationSegment(models.Model):
+    class Motion(models.TextChoices):
+        STILL = "still", "Image fixe"
+        ZOOM_IN = "zoom_in", "Zoom avant lent"
+        ZOOM_OUT = "zoom_out", "Zoom arrière lent"
+
     project = models.ForeignKey(NarrationProject, on_delete=models.CASCADE, related_name="segments")
     position = models.PositiveSmallIntegerField(default=0)
+    image = models.ImageField(upload_to="scenes/", blank=True)
+    motion = models.CharField(max_length=8, choices=Motion.choices, default=Motion.ZOOM_IN)
     text = models.TextField(blank=True)
     audio = models.FileField(upload_to="segments/audio/", blank=True)
     subtitle_data = models.JSONField(default=list, blank=True)

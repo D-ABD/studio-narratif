@@ -8,6 +8,7 @@ from django.utils import timezone
 
 from studio.models import NarrationProject
 from studio.services import prepare_project
+from studio.video_services import render_project_video
 
 
 class Command(BaseCommand):
@@ -39,7 +40,12 @@ class Command(BaseCommand):
 
             self.stdout.write(f"Préparation du projet {project_id}…")
             try:
+                job_type = NarrationProject.objects.filter(pk=project_id).values_list("job_type", flat=True).first()
                 prepare_project(project_id)
+                if job_type == NarrationProject.JobType.VIDEO:
+                    project = NarrationProject.objects.filter(pk=project_id).first()
+                    if project and project.status == NarrationProject.Status.PROCESSING:
+                        render_project_video(project_id)
             except Exception as exc:  # prepare_project records errors; protect the worker from unexpected failures.
                 NarrationProject.objects.filter(pk=project_id).update(
                     status=NarrationProject.Status.ERROR,

@@ -1,4 +1,5 @@
 import importlib.util
+from io import BytesIO
 import sys
 import tempfile
 import types
@@ -12,6 +13,7 @@ from django.core.files.base import ContentFile
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from django.utils import timezone
+from PIL import Image
 
 from .models import NarrationProject, NarrationSegment, Voice
 from .services import (
@@ -169,6 +171,91 @@ class NarrationQueueTests(MediaTestCase):
         self.assertEqual(first.status, NarrationProject.Status.PROCESSING)
         self.assertIsNone(first.queued_at)
         self.assertEqual(Command._claim_next_job(), second.pk)
+
+
+class VideoSceneTests(MediaTestCase):
+    @staticmethod
+    def png_bytes(color=(240, 120, 20)):
+        buffer = BytesIO()
+        Image.new("RGB", (80, 60), color).save(buffer, format="PNG")
+        return buffer.getvalue()
+
+    def test_import_image_creates_a_scene_and_reuses_empty_first_segment(self):
+        project = NarrationProject.objects.create(title="Images")
+        first = NarrationSegment.objects.create(project=project, position=0)
+        upload = SimpleUploadedFile("coach.png", self.png_bytes(), content_type="image/png")
+
+        response = self.client.post(f"/projects/{project.pk}/scenes/import/", {"files": [upload]})
+
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(project.segments.count(), 1)
+        first.refresh_from_db()
+        self.assertEqual(Path(first.image.name).suffix, ".png")
+        self.assertTrue(Path(first.image.path).is_file())
+
+    def test_import_pdf_creates_one_scene_per_page(self):
+        import pymupdf
+
+        document = pymupdf.open()
+        document.new_page(width=120, height=160)
+        document.new_page(width=160, height=120)
+        pdf_data = document.tobytes()
+        document.close()
+        project = NarrationProject.objects.create(title="PDF")
+        NarrationSegment.objects.create(project=project, position=0)
+        upload = SimpleUploadedFile("pages.pdf", pdf_data, content_type="application/pdf")
+
+        response = self.client.post(f"/projects/{project.pk}/scenes/import/", {"files": [upload]})
+
+        self.assertEqual(response.status_code, 302)
+        scenes = list(project.segments.order_by("position"))
+        self.assertEqual(len(scenes), 2)
+        self.assertTrue(all(scene.image.name.endswith(".png") for scene in scenes))
+        self.assertTrue(all(Path(scene.image.path).is_file() for scene in scenes))
+
+    def test_prepare_queues_video_when_every_scene_has_an_image(self):
+        voice = self.make_voice()
+        project = NarrationProject.objects.create(title="Vidéo", voice=voice)
+        scene = NarrationSegment.objects.create(project=project, position=0, text="Bonjour.")
+        scene.image.save("scene.png", ContentFile(self.png_bytes()), save=True)
+
+        response = self.client.post(f"/projects/{project.pk}/prepare/", {"voice_id": voice.pk})
+
+        self.assertEqual(response.status_code, 200)
+        project.refresh_from_db()
+        self.assertEqual(project.job_type, NarrationProject.JobType.VIDEO)
+        self.assertEqual(project.status, NarrationProject.Status.QUEUED)
+
+    @patch("studio.video_services._ffmpeg_path", return_value="ffmpeg")
+    @patch("studio.video_services.subprocess.run")
+    def test_video_export_assembles_scene_and_caption(self, run_ffmpeg, _ffmpeg):
+        from .video_services import render_project_video
+
+        project = NarrationProject.objects.create(title="Vidéo", status=NarrationProject.Status.PROCESSING)
+        scene = NarrationSegment.objects.create(
+            project=project,
+            position=0,
+            text="Bonjour.",
+            subtitle_data=[{"start": 0.0, "end": 0.8, "text": "Bonjour."}],
+            duration_seconds=1.0,
+        )
+        scene.image.save("scene.png", ContentFile(self.png_bytes()), save=False)
+        scene.audio.save("scene.wav", ContentFile(b"audio test data"), save=True)
+
+        def make_output(command, **_kwargs):
+            Path(command[-1]).write_bytes(b"x" * 2048)
+            return types.SimpleNamespace(returncode=0, stderr="")
+
+        run_ffmpeg.side_effect = make_output
+        render_project_video(project.pk)
+
+        project.refresh_from_db()
+        self.assertEqual(project.status, NarrationProject.Status.READY)
+        self.assertTrue(project.video_file.name.endswith(".mp4"))
+        self.assertTrue(Path(project.video_file.path).is_file())
+        self.assertEqual(run_ffmpeg.call_count, 2)
+        scene_command = run_ffmpeg.call_args_list[0].args[0]
+        self.assertIn("subtitles=filename=scene-0001.srt", scene_command[scene_command.index("-vf") + 1])
 
 
 class CacheAndCaptionTests(MediaTestCase):

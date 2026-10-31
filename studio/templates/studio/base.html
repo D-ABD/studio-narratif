@@ -4,12 +4,12 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="theme-color" content="#0b151e">
   <title>{% block title %}Petit Studio Voix{% endblock %}</title>
-  <link rel="stylesheet" href="{% static 'studio/app.css' %}?v=1">
+  <link rel="stylesheet" href="{% static 'studio/app.css' %}?v=2">
 </head>
 <body {% block body_data %}{% endblock %}>
 <div class="app-shell">
   <aside class="sidebar">
-    <a class="brand" href="{% url 'home' %}"><span class="brand-mark">✦</span><span>petit studio<small>VOIX LOCALE</small></span></a>
+    <a class="brand" href="{% url 'home' %}"><span class="brand-mark">✦</span><span>petit studio<small>CRÉATION LOCALE</small></span></a>
     <div class="side-label">ESPACE AUDIO</div>
     <nav class="side-nav"><a href="{% url 'home' %}#voices"><span>♫</span> Bibliothèque de voix</a><a href="{% url 'home' %}#projects"><span>▤</span> Mes narrations</a></nav>
     <div class="side-label project-heading">MES PROJETS <span>{{ projects|length }}</span></div>
@@ -26,5 +26,5 @@
     <footer class="footer">Application locale · Pas de comptes · Échantillons et exports stockés sur cet ordinateur</footer>
   </main>
 </div>
-<script src="{% static 'studio/app.js' %}?v=1" defer></script>
+<script src="{% static 'studio/app.js' %}?v=2" defer></script>
 </body></html>
