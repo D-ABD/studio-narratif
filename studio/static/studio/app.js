@@ -157,7 +157,7 @@
       elapsedTime.textContent = formatElapsed(data.elapsed_seconds);
       if (data.status === 'ready') {
         status.className = 'job-status success';
-        status.textContent = 'Narration prête à écouter et à télécharger.';
+        status.textContent = data.message || 'Narration prête à écouter et à télécharger.';
         showFullExport(data.audio_url, data.subtitles_url);
         button.disabled = false;
         return;
