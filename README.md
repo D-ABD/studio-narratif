@@ -53,21 +53,23 @@ Cette commande charge XTTS v2 et télécharge ses poids si nécessaire. Elle éc
 
 ## Lancement
 
-La file utilise un worker dédié pour garder les modèles IA en mémoire. Ouvre deux terminaux dans le dossier du dépôt et active `.venv` dans chacun.
+Pour démarrer le site et le worker depuis un seul terminal, active `.venv` dans le dossier du dépôt puis exécute :
 
-Terminal 1 — site web :
+```bash
+python manage.py run_studio
+```
+
+Ouvre ensuite <http://127.0.0.1:8000/>. Cette commande démarre le site web et le worker XTTS ensemble ; Ctrl+C arrête les deux. Le serveur de développement est lancé sans rechargement automatique : après une modification du code, relance la commande.
+
+Tu peux aussi les lancer séparément dans deux terminaux si tu préfères :
 
 ```bash
 python manage.py runserver 127.0.0.1:8000
-```
-
-Terminal 2 — traitement des narrations :
-
-```bash
+# Dans l’autre terminal, avec le même environnement virtuel :
 python manage.py run_narration_worker
 ```
 
-Ouvre ensuite <http://127.0.0.1:8000/>. Ajoute des projets à la file depuis leur page ; le worker les traite dans l’ordre, un par un. La file est enregistrée dans SQLite et reprend les traitements interrompus après un redémarrage. Laisse le terminal du worker ouvert pendant le traitement. Le serveur de développement est prévu pour l’accès local ; ne l’expose pas directement sur Internet.
+Ajoute des projets à la file depuis leurs pages ; le worker les traite dans l’ordre, un par un. La file est enregistrée dans SQLite et reprend les traitements interrompus après un redémarrage. Le serveur de développement est prévu pour l’accès local ; ne l’expose pas directement sur Internet.
 
 ## Tests et contrôles
 
