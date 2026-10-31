@@ -21,7 +21,6 @@ from django.utils import timezone
 from .models import NarrationProject, NarrationSegment, Voice
 
 MODEL_ID = "xtts_v2"
-CHATTERBOX_MODEL_ID = "chatterbox_cpp_multilingual_q4"
 LANGUAGE_CODE = "fr"
 SAMPLE_RATE = 24000
 logger = logging.getLogger(__name__)
@@ -91,12 +90,6 @@ def cache_key_for(text, voice, model_id=MODEL_ID, language=LANGUAGE_CODE, sample
         "language": language,
     }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(source.encode("utf-8")).hexdigest()
-
-
-def engine_cache_model_id(engine):
-    if engine == NarrationProject.Engine.CHATTERBOX:
-        return CHATTERBOX_MODEL_ID
-    return MODEL_ID
 
 
 def _get_tts():
@@ -228,71 +221,7 @@ def _get_speaker_conditioning(model, voice):
         return conditioning
 
 
-def _chatterbox_configuration():
-    binary = os.environ.get("CHATTERBOX_CPP_BIN") or shutil.which("tts-cli")
-    t3_model = os.environ.get("CHATTERBOX_T3_MODEL")
-    s3gen_model = os.environ.get("CHATTERBOX_S3GEN_MODEL")
-    if not binary or not Path(binary).is_file():
-        raise RuntimeError(
-            "Chatterbox n’est pas configuré : définis CHATTERBOX_CPP_BIN vers le binaire tts-cli. "
-            "Les étapes d’installation sont dans le README."
-        )
-    if not t3_model or not Path(t3_model).is_file():
-        raise RuntimeError("Modèle Chatterbox T3 introuvable : définis CHATTERBOX_T3_MODEL vers le GGUF multilingue.")
-    if not s3gen_model or not Path(s3gen_model).is_file():
-        raise RuntimeError("Modèle Chatterbox S3Gen introuvable : définis CHATTERBOX_S3GEN_MODEL vers le GGUF multilingue.")
-    try:
-        threads = int(os.environ.get("CHATTERBOX_CPP_THREADS", os.environ.get("STUDIO_TORCH_THREADS", min(4, os.cpu_count() or 1))))
-    except (TypeError, ValueError):
-        threads = min(4, os.cpu_count() or 1)
-    if threads < 1:
-        raise RuntimeError("CHATTERBOX_CPP_THREADS doit être supérieur ou égal à 1.")
-    return binary, t3_model, s3gen_model, threads
-
-
-def _synthesize_chatterbox_segment(text, voice, destination):
-    binary, t3_model, s3gen_model, threads = _chatterbox_configuration()
-    sample_duration = wav_duration(voice.sample.path)
-    if sample_duration <= 5.0:
-        raise RuntimeError(
-            "Chatterbox exige un échantillon vocal de plus de 5 secondes. "
-            "Pour une meilleure ressemblance, utilise un extrait propre de 10 à 15 secondes."
-        )
-
-    sample_digest = voice.sample_sha256 or hash_file(voice.sample.path)
-    voice_cache = Path(settings.MEDIA_ROOT) / "chatterbox-voice-cache" / CHATTERBOX_MODEL_ID / sample_digest
-    voice_cache.mkdir(parents=True, exist_ok=True)
-    cached_profile = any(voice_cache.glob("*.npy"))
-    command = [
-        binary,
-        "--model", t3_model,
-        "--s3gen-gguf", s3gen_model,
-        "--text", text,
-        "--language", LANGUAGE_CODE,
-        "--threads", str(threads),
-        "--out", str(destination),
-    ]
-    if cached_profile:
-        command.extend(["--ref-dir", str(voice_cache)])
-    else:
-        command.extend(["--reference-audio", voice.sample.path, "--save-voice", str(voice_cache)])
-
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
-    if result.returncode:
-        detail = (result.stderr or result.stdout or "").strip().splitlines()[-1:]
-        raise RuntimeError("Chatterbox n’a pas pu générer ce segment." + (f" {detail[0]}" if detail else ""))
-
-
-def _synthesize_segment(text, voice, destination, engine=NarrationProject.Engine.XTTS):
-    if engine == NarrationProject.Engine.CHATTERBOX:
-        with tempfile.TemporaryDirectory(prefix="petit-studio-chatterbox-") as folder:
-            raw = Path(folder) / "chatterbox.wav"
-            _synthesize_chatterbox_segment(text, voice, raw)
-            if not raw.exists() or raw.stat().st_size < 1000:
-                raise RuntimeError("Chatterbox n’a pas produit de fichier audio pour ce segment.")
-            _normalize_generated_audio(raw, destination)
-        return
-
+def _synthesize_segment(text, voice, destination):
     model = _get_tts()
     with tempfile.TemporaryDirectory(prefix="petit-studio-xtts-") as folder:
         raw = Path(folder) / "xtts.wav"
@@ -345,10 +274,10 @@ def _attach_cached_segment(segment, expected_key, audio_path, captions, duration
     segment.save(update_fields=["audio", "subtitle_data", "duration_seconds", "cache_key", "updated_at"])
 
 
-def _prepare_segment(segment, voice, expected_key, on_progress=None, timings=None, engine=NarrationProject.Engine.XTTS):
+def _prepare_segment(segment, voice, expected_key, on_progress=None, timings=None):
     if _segment_is_cached(segment, expected_key):
         if timings is not None:
-            timings.update({"cached": True, "synthesis_seconds": 0.0, "whisperx_seconds": 0.0})
+            timings.update({"cached": True, "xtts_seconds": 0.0, "whisperx_seconds": 0.0})
         return segment.subtitle_data, segment.duration_seconds, True
     cache_audio, cache_metadata = _persistent_cache_paths(expected_key)
     if cache_audio.is_file() and cache_metadata.is_file() and cache_audio.stat().st_size > 1000:
@@ -359,21 +288,20 @@ def _prepare_segment(segment, voice, expected_key, on_progress=None, timings=Non
             if captions and duration > 0:
                 _attach_cached_segment(segment, expected_key, cache_audio, captions, duration)
                 if timings is not None:
-                    timings.update({"cached": True, "synthesis_seconds": 0.0, "whisperx_seconds": 0.0})
+                    timings.update({"cached": True, "xtts_seconds": 0.0, "whisperx_seconds": 0.0})
                 return captions, duration, True
         except (OSError, ValueError, KeyError, json.JSONDecodeError, TypeError):
             # A damaged local cache is ignored and rebuilt below.
             pass
     with tempfile.TemporaryDirectory(prefix="petit-studio-segment-") as folder:
         audio_path = Path(folder) / "segment.wav"
-        engine_label = "Chatterbox" if engine == NarrationProject.Engine.CHATTERBOX else "XTTS"
         if on_progress:
-            on_progress(f"Synthèse {engine_label}", 0.2)
+            on_progress("Synthèse XTTS", 0.2)
         synthesis_started = time.perf_counter()
-        _synthesize_segment(segment.text, voice, audio_path, engine=engine)
+        _synthesize_segment(segment.text, voice, audio_path)
         synthesis_seconds = time.perf_counter() - synthesis_started
         if on_progress:
-            on_progress(f"Alignement WhisperX · {engine_label} {synthesis_seconds:.1f} s", 0.68)
+            on_progress(f"Alignement WhisperX · XTTS {synthesis_seconds:.1f} s", 0.68)
         alignment_started = time.perf_counter()
         captions = align_audio(audio_path, segment.text)
         alignment_seconds = time.perf_counter() - alignment_started
@@ -381,12 +309,12 @@ def _prepare_segment(segment, voice, expected_key, on_progress=None, timings=Non
         if timings is not None:
             timings.update({
                 "cached": False,
-                "synthesis_seconds": synthesis_seconds,
+                "xtts_seconds": synthesis_seconds,
                 "whisperx_seconds": alignment_seconds,
             })
         logger.info(
-            "Segment %s préparé avec %s : synthèse %.1f s, WhisperX %.1f s.",
-            segment.pk, engine_label, synthesis_seconds, alignment_seconds,
+            "Segment %s préparé : XTTS %.1f s, WhisperX %.1f s.",
+            segment.pk, synthesis_seconds, alignment_seconds,
         )
         cache_audio, cache_metadata = _persistent_cache_paths(expected_key)
         temporary_audio = cache_audio.with_suffix(".wav.tmp")
@@ -459,15 +387,12 @@ def prepare_project(project_id):
             if not segments or any(not item.text.strip() for item in segments):
                 raise RuntimeError("Ajoute un texte à chaque segment avant de préparer la narration.")
             sample_digest = _voice_sample_digest(voice)
-            engine = project.engine
-            engine_label = "Chatterbox" if engine == NarrationProject.Engine.CHATTERBOX else "XTTS"
-            model_id = engine_cache_model_id(engine)
             project.total_segments = len(segments)
             project.current_segment = 0
             project.status_message = "Préparation de la narration…"
             project.save(update_fields=["total_segments", "current_segment", "status_message", "updated_at"])
             paths = []
-            total_synthesis_seconds = 0.0
+            total_xtts_seconds = 0.0
             total_whisperx_seconds = 0.0
             cached_segments = 0
             with tempfile.TemporaryDirectory(prefix=f"petit-studio-project-{project.pk}-") as folder:
@@ -478,9 +403,7 @@ def prepare_project(project_id):
                     project.current_segment = index
                     project.status_message = f"Segment {index}/{len(segments)} · vérification du cache"
                     project.save(update_fields=["current_segment", "status_message", "updated_at"])
-                    expected_key = cache_key_for(
-                        segment.text, voice, model_id=model_id, sample_digest=sample_digest,
-                    )
+                    expected_key = cache_key_for(segment.text, voice, sample_digest=sample_digest)
 
                     def update_progress(stage, fraction, index=index):
                         percent = round(((index - 1 + max(0.0, min(1.0, fraction))) / len(segments)) * 95)
@@ -490,8 +413,8 @@ def prepare_project(project_id):
                         )
 
                     segment_timings = {}
-                    _prepare_segment(segment, voice, expected_key, update_progress, segment_timings, engine=engine)
-                    total_synthesis_seconds += segment_timings.get("synthesis_seconds", 0.0)
+                    _prepare_segment(segment, voice, expected_key, update_progress, segment_timings)
+                    total_xtts_seconds += segment_timings.get("xtts_seconds", 0.0)
                     total_whisperx_seconds += segment_timings.get("whisperx_seconds", 0.0)
                     cached_segments += int(segment_timings.get("cached", False))
                     target = Path(folder) / f"segment-{index:04}.wav"
@@ -513,7 +436,7 @@ def prepare_project(project_id):
                 project.duration_seconds = duration
                 project.status = NarrationProject.Status.READY
                 project.status_message = (
-                    f"Narration prête · {engine_label} {total_synthesis_seconds:.1f} s · "
+                    f"Narration prête · XTTS {total_xtts_seconds:.1f} s · "
                     f"WhisperX {total_whisperx_seconds:.1f} s · cache {cached_segments}/{len(segments)} segment(s)."
                 )
                 project.error_message = ""

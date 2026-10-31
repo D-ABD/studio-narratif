@@ -16,7 +16,7 @@ class VoiceAdmin(admin.ModelAdmin):
 
 @admin.register(NarrationProject)
 class NarrationProjectAdmin(admin.ModelAdmin):
-    list_display = ("title", "voice", "engine", "status", "updated_at")
-    list_filter = ("engine", "status")
+    list_display = ("title", "voice", "status", "updated_at")
+    list_filter = ("status",)
     search_fields = ("title",)
     inlines = (NarrationSegmentInline,)
