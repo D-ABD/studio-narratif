@@ -13,8 +13,9 @@ from django.test import TestCase, override_settings
 
 from .models import NarrationProject, NarrationSegment, Voice
 from .services import (
-    _assemble_wav, _get_speaker_conditioning, _group_words, _prepare_segment, align_audio,
-    cache_key_for, srt_text, wav_duration,
+    _assemble_wav, _get_speaker_conditioning, _group_words, _prepare_segment,
+    _synthesize_chatterbox_segment, align_audio, cache_key_for, engine_cache_model_id,
+    srt_text, wav_duration,
 )
 from . import services
 
@@ -115,6 +116,53 @@ class ProjectViewTests(MediaTestCase):
         self.client.post(f"/projects/{project.pk}/segments/{second.pk}/delete/")
         self.assertEqual(project.segments.count(), 1)
 
+    @patch("studio.views._run_prepare")
+    def test_prepare_can_select_and_persist_chatterbox_engine(self, run_prepare):
+        voice = self.make_voice()
+        project = NarrationProject.objects.create(title="Chatterbox")
+        NarrationSegment.objects.create(project=project, position=0, text="Bonjour.")
+
+        response = self.client.post(f"/projects/{project.pk}/prepare/", {
+            "voice_id": voice.pk,
+            "engine": NarrationProject.Engine.CHATTERBOX,
+        })
+
+        self.assertEqual(response.status_code, 200)
+        project.refresh_from_db()
+        self.assertEqual(project.engine, NarrationProject.Engine.CHATTERBOX)
+        run_prepare.assert_called_once_with(project.pk)
+
+    def test_project_page_offers_both_engines_and_keeps_xtts_default(self):
+        voice = self.make_voice()
+        project = NarrationProject.objects.create(title="Moteurs", voice=voice)
+
+        response = self.client.get(f"/projects/{project.pk}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'value="xtts" selected')
+        self.assertContains(response, "Chatterbox Multilingual · CPU")
+
+    def test_switching_engine_invalidates_full_exports(self):
+        voice = self.make_voice()
+        project = NarrationProject.objects.create(title="Export ancien", voice=voice)
+        project.full_audio.save("old.wav", ContentFile(b"old audio"), save=True)
+        project.subtitles.save("old.srt", ContentFile(b"old subtitles"), save=True)
+        project.status = NarrationProject.Status.READY
+        project.save(update_fields=["status"])
+        NarrationSegment.objects.create(project=project, position=0, text="Bonjour.")
+
+        with patch("studio.views._run_prepare"):
+            response = self.client.post(f"/projects/{project.pk}/prepare/", {
+                "voice_id": voice.pk,
+                "engine": NarrationProject.Engine.CHATTERBOX,
+            })
+
+        self.assertEqual(response.status_code, 200)
+        project.refresh_from_db()
+        self.assertEqual(project.engine, NarrationProject.Engine.CHATTERBOX)
+        self.assertFalse(project.full_audio)
+        self.assertFalse(project.subtitles)
+
 
 class CacheAndCaptionTests(MediaTestCase):
     def test_cache_key_changes_with_text_and_voice_sample(self):
@@ -133,7 +181,7 @@ class CacheAndCaptionTests(MediaTestCase):
         second = NarrationSegment.objects.create(project=NarrationProject.objects.create(title="Second"), text="Bonjour.")
         key = cache_key_for("Bonjour.", voice)
 
-        def write_test_wav(_text, _voice, destination):
+        def write_test_wav(_text, _voice, destination, **_kwargs):
             with wave.open(str(destination), "wb") as stream:
                 stream.setnchannels(1)
                 stream.setsampwidth(2)
@@ -147,6 +195,37 @@ class CacheAndCaptionTests(MediaTestCase):
         self.assertTrue(second.audio.name)
         self.assertEqual(second.cache_key, key)
         self.assertAlmostEqual(second.duration_seconds, 0.5)
+
+    def test_cache_keys_separate_engines(self):
+        voice = self.make_voice()
+        xtts_key = cache_key_for("Bonjour.", voice, model_id=engine_cache_model_id(NarrationProject.Engine.XTTS))
+        chatterbox_key = cache_key_for("Bonjour.", voice, model_id=engine_cache_model_id(NarrationProject.Engine.CHATTERBOX))
+        self.assertNotEqual(xtts_key, chatterbox_key)
+
+    def test_chatterbox_caches_voice_profile_and_uses_reference_only_once(self):
+        voice = self.make_voice()
+        commands = []
+
+        def fake_run(command, **_kwargs):
+            commands.append(command)
+            Path(command[command.index("--out") + 1]).write_bytes(b"wav output")
+            if "--save-voice" in command:
+                Path(command[command.index("--save-voice") + 1], "speaker_emb.npy").write_bytes(b"cached profile")
+            return types.SimpleNamespace(returncode=0, stderr="", stdout="")
+
+        with (
+            patch("studio.services._chatterbox_configuration", return_value=("/tmp/tts-cli", "/tmp/t3.gguf", "/tmp/s3gen.gguf", 2)),
+            patch("studio.services.wav_duration", return_value=10.0),
+            patch("studio.services.subprocess.run", side_effect=fake_run),
+        ):
+            with tempfile.TemporaryDirectory(prefix="studio-chatterbox-test-") as folder:
+                _synthesize_chatterbox_segment("Bonjour.", voice, Path(folder) / "one.wav")
+                _synthesize_chatterbox_segment("Bonsoir.", voice, Path(folder) / "two.wav")
+
+        self.assertIn("--reference-audio", commands[0])
+        self.assertIn("--save-voice", commands[0])
+        self.assertIn("--ref-dir", commands[1])
+        self.assertNotIn("--reference-audio", commands[1])
 
     def test_word_groups_and_project_srt_offsets(self):
         words = [

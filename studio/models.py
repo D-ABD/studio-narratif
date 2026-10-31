@@ -25,6 +25,10 @@ class Voice(models.Model):
 
 
 class NarrationProject(models.Model):
+    class Engine(models.TextChoices):
+        XTTS = "xtts", "XTTS v2"
+        CHATTERBOX = "chatterbox_cpp", "Chatterbox Multilingual · CPU"
+
     class Status(models.TextChoices):
         DRAFT = "draft", "Brouillon"
         PROCESSING = "processing", "En cours"
@@ -33,6 +37,7 @@ class NarrationProject(models.Model):
 
     title = models.CharField("titre", max_length=120, default="Nouvelle narration")
     voice = models.ForeignKey(Voice, null=True, blank=True, on_delete=models.SET_NULL, related_name="projects")
+    engine = models.CharField(max_length=24, choices=Engine.choices, default=Engine.XTTS)
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.DRAFT)
     status_message = models.CharField(max_length=240, blank=True)
     error_message = models.TextField(blank=True)

@@ -11,7 +11,10 @@ from django.utils import timezone
 from django.views.decorators.http import require_POST
 
 from .models import NarrationProject, NarrationSegment, Voice
-from .services import _voice_sample_digest, cache_key_for, hash_file, normalize_voice_sample, prepare_project, srt_text
+from .services import (
+    _voice_sample_digest, cache_key_for, engine_cache_model_id, hash_file,
+    normalize_voice_sample, prepare_project, srt_text,
+)
 
 MAX_SAMPLE_BYTES = 25 * 1024 * 1024
 ALLOWED_SAMPLE_EXTENSIONS = {".wav", ".mp3", ".webm", ".m4a", ".ogg"}
@@ -32,7 +35,7 @@ def _invalidate_export(project):
     project.started_at = None
     project.finished_at = None
     project.save(update_fields=[
-        "voice", "full_audio", "subtitles", "duration_seconds", "status", "status_message", "error_message",
+        "voice", "engine", "full_audio", "subtitles", "duration_seconds", "status", "status_message", "error_message",
         "progress_percent", "started_at", "finished_at", "updated_at",
     ])
 
@@ -141,7 +144,9 @@ def project_detail(request, project_id):
         try:
             segment.ready_for_voice = bool(
                 voice and sample_digest and segment.text.strip()
-                and segment.cache_key == cache_key_for(segment.text, voice, sample_digest=sample_digest)
+                and segment.cache_key == cache_key_for(
+                    segment.text, voice, model_id=engine_cache_model_id(project.engine), sample_digest=sample_digest,
+                )
                 and segment.audio and Path(segment.audio.path).is_file()
                 and segment.subtitle_data
             )
@@ -153,6 +158,7 @@ def project_detail(request, project_id):
         "segments": segments,
         "voices": Voice.objects.all(),
         "categories": Voice.Category.choices,
+        "engine_choices": NarrationProject.Engine.choices,
     })
 
 
@@ -263,13 +269,17 @@ def prepare(request, project_id):
         return JsonResponse({"ok": False, "error": "Un traitement est déjà en cours."}, status=409)
     voice_id = request.POST.get("voice_id") or project.voice_id
     voice = get_object_or_404(Voice, pk=voice_id, consent_confirmed=True) if voice_id else None
+    engine = request.POST.get("engine") or project.engine
+    if engine not in NarrationProject.Engine.values:
+        return JsonResponse({"ok": False, "error": "Choisis un moteur de narration valide."}, status=400)
     segments = list(project.segments.order_by("position", "id"))
     if not voice:
         return JsonResponse({"ok": False, "error": "Choisis une voix autorisée pour ce projet."}, status=400)
     if not segments or any(not segment.text.strip() for segment in segments):
         return JsonResponse({"ok": False, "error": "Ajoute un texte à chaque segment avant de préparer la narration."}, status=400)
-    if project.voice_id != voice.pk:
+    if project.voice_id != voice.pk or project.engine != engine:
         project.voice = voice
+        project.engine = engine
         _invalidate_export(project)
     project.status = NarrationProject.Status.PROCESSING
     project.status_message = "Mise en attente du moteur vocal…"
