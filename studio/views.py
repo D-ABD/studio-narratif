@@ -15,7 +15,9 @@ from .models import NarrationProject, NarrationSegment, Voice
 from .services import _voice_sample_digest, cache_key_for, hash_file, normalize_voice_sample, srt_text
 
 MAX_SAMPLE_BYTES = 25 * 1024 * 1024
+MAX_VIDEO_CLIP_BYTES = 200 * 1024 * 1024
 ALLOWED_SAMPLE_EXTENSIONS = {".wav", ".mp3", ".webm", ".m4a", ".ogg"}
+ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm"}
 
 
 def _invalidate_export(project):
@@ -222,6 +224,10 @@ def project_detail(request, project_id):
         "video_formats": NarrationProject.VideoFormat.choices,
         "motions": NarrationSegment.Motion.choices,
         "has_scenes": bool(segments and any(segment.image for segment in segments)),
+        "has_video_clips": bool(segments and any(segment.video_clip for segment in segments)),
+        "can_assemble_clips": bool(
+            segments and all(segment.video_clip and not segment.image for segment in segments)
+        ),
     })
 
 
@@ -232,12 +238,26 @@ def import_scenes(request, project_id):
         return JsonResponse({"ok": False, "error": "Attends la fin du traitement avant d’ajouter des scènes."}, status=409)
     uploads = request.FILES.getlist("files")
     if not uploads:
-        messages.error(request, "Sélectionne au moins une image ou un PDF.")
+        messages.error(request, "Sélectionne au moins une image, un PDF ou une vidéo.")
         return redirect("project_detail", project_id=project.pk)
     try:
         scenes = []
+        import_kind = None
         for upload in uploads:
-            scenes.extend(_scene_images(upload))
+            suffix = Path(upload.name).suffix.lower()
+            if suffix in ALLOWED_VIDEO_EXTENSIONS:
+                if upload.size <= 0:
+                    raise ValueError(f"La vidéo « {Path(upload.name).name} » est vide.")
+                if upload.size > MAX_VIDEO_CLIP_BYTES:
+                    raise ValueError(f"La vidéo « {Path(upload.name).name} » dépasse la limite de 200 Mo.")
+                kind = "video"
+                scenes.append((kind, Path(upload.name).name, upload.read()))
+            else:
+                kind = "image"
+                scenes.extend((kind, name, content) for name, content in _scene_images(upload))
+            if import_kind and kind != import_kind:
+                raise ValueError("Importe soit des vidéos, soit des images/PDF dans un même projet, sans les mélanger.")
+            import_kind = kind
             if len(scenes) > 30:
                 raise ValueError("Un import est limité à 30 scènes.")
     except ValueError as exc:
@@ -245,22 +265,66 @@ def import_scenes(request, project_id):
         return redirect("project_detail", project_id=project.pk)
 
     existing = list(project.segments.order_by("position", "id"))
-    reusable = next((item for item in existing if not item.image and not item.text.strip()), None)
+    existing_kind = "video" if any(item.video_clip for item in existing) else "image" if any(item.image for item in existing) else None
+    if existing_kind and existing_kind != import_kind:
+        messages.error(request, "Ce projet contient déjà un autre type de média. Crée un projet séparé pour assembler tes vidéos.")
+        return redirect("project_detail", project_id=project.pk)
+    reusable = next((item for item in existing if not item.image and not item.video_clip and not item.text.strip()), None)
     if reusable is None:
-        reusable = next((item for item in existing if not item.image), None)
-    for filename, content in scenes:
+        reusable = next((item for item in existing if not item.image and not item.video_clip), None)
+    for kind, filename, content in scenes:
         segment = reusable
         if reusable:
             reusable = None
         else:
             segment = NarrationSegment.objects.create(project=project, position=project.segments.count())
-        if segment.image:
-            segment.image.delete(save=False)
-        segment.image.save(filename, ContentFile(content), save=False)
-        segment.save(update_fields=["image", "updated_at"])
+        if kind == "video":
+            if segment.image:
+                segment.image.delete(save=False)
+                segment.image = ""
+            if segment.video_clip:
+                segment.video_clip.delete(save=False)
+            segment.video_clip.save(filename, ContentFile(content), save=False)
+            segment.save(update_fields=["image", "video_clip", "updated_at"])
+        else:
+            if segment.video_clip:
+                segment.video_clip.delete(save=False)
+                segment.video_clip = ""
+            if segment.image:
+                segment.image.delete(save=False)
+            segment.image.save(filename, ContentFile(content), save=False)
+            segment.save(update_fields=["image", "video_clip", "updated_at"])
     _invalidate_export(project)
-    messages.success(request, f"{len(scenes)} scène(s) ajoutée(s) au projet.")
+    if import_kind == "video":
+        messages.success(request, f"{len(scenes)} clip(s) vidéo ajouté(s). Réordonne-les puis lance l’assemblage.")
+    else:
+        messages.success(request, f"{len(scenes)} scène(s) ajoutée(s) au projet.")
     return redirect("project_detail", project_id=project.pk)
+
+
+@require_POST
+def assemble_videos(request, project_id):
+    project = get_object_or_404(NarrationProject, pk=project_id)
+    if project.status in {NarrationProject.Status.QUEUED, NarrationProject.Status.PROCESSING}:
+        return JsonResponse({"ok": False, "error": "Ce projet est déjà dans la file ou en cours de traitement."}, status=409)
+    segments = list(project.segments.order_by("position", "id"))
+    if not segments or any(not item.video_clip or item.image for item in segments):
+        return JsonResponse({"ok": False, "error": "Ajoute uniquement des clips vidéo à ce projet avant de les assembler."}, status=400)
+    project.status = NarrationProject.Status.QUEUED
+    project.queued_at = timezone.now()
+    project.job_type = NarrationProject.JobType.ASSEMBLY
+    project.status_message = "Assemblage vidéo ajouté à la file d’attente."
+    project.error_message = ""
+    project.progress_percent = 0
+    project.current_segment = 0
+    project.total_segments = len(segments)
+    project.started_at = None
+    project.finished_at = None
+    project.save(update_fields=[
+        "status", "queued_at", "job_type", "status_message", "error_message", "progress_percent",
+        "current_segment", "total_segments", "started_at", "finished_at", "updated_at",
+    ])
+    return JsonResponse({"ok": True, "status_url": f"/projects/{project.pk}/status/"})
 
 
 @require_POST
@@ -347,11 +411,14 @@ def delete_segment(request, project_id, segment_id):
         return JsonResponse({"ok": False, "error": "Attends la fin du traitement avant de modifier le projet."}, status=409)
     audio = segment.audio
     image = segment.image
+    video_clip = segment.video_clip
     segment.delete()
     if audio:
         audio.delete(save=False)
     if image:
         image.delete(save=False)
+    if video_clip:
+        video_clip.delete(save=False)
     with transaction.atomic():
         for index, item in enumerate(project.segments.order_by("position", "id")):
             if item.position != index:
@@ -387,7 +454,7 @@ def delete_project(request, project_id):
         messages.error(request, "Attends la fin du traitement avant de supprimer le projet.")
         return redirect("project_detail", project_id=project.pk)
     files = [project.full_audio, project.subtitles, project.video_file]
-    files += [file for segment in project.segments.all() for file in (segment.audio, segment.image)]
+    files += [file for segment in project.segments.all() for file in (segment.audio, segment.image, segment.video_clip)]
     project.delete()
     for file in files:
         if file:
@@ -409,6 +476,9 @@ def prepare(request, project_id):
     if not segments or any(not segment.text.strip() for segment in segments):
         return JsonResponse({"ok": False, "error": "Ajoute un texte à chaque segment avant de préparer la narration."}, status=400)
     has_images = any(segment.image for segment in segments)
+    has_video_clips = any(segment.video_clip for segment in segments)
+    if has_video_clips:
+        return JsonResponse({"ok": False, "error": "Pour assembler ces clips avec leur son d’origine, utilise le bouton « Assembler les clips vidéo »."}, status=400)
     if has_images and any(not segment.image for segment in segments):
         return JsonResponse({"ok": False, "error": "Ajoute une image à chaque scène avant de générer la vidéo."}, status=400)
     if project.voice_id != voice.pk:

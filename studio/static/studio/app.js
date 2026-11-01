@@ -28,6 +28,16 @@
         image.src = objectUrl;
         image.alt = `Aperçu de ${file.name}`;
         preview.append(image);
+      } else if (file.type.startsWith('video/') || ['mp4', 'mov', 'm4v', 'webm'].includes(extension)) {
+        const video = document.createElement('video');
+        const objectUrl = URL.createObjectURL(file);
+        importPreviewUrls.push(objectUrl);
+        video.src = objectUrl;
+        video.controls = true;
+        video.muted = true;
+        video.preload = 'metadata';
+        video.setAttribute('aria-label', `Aperçu de ${file.name}`);
+        preview.append(video);
       } else {
         preview.classList.add('pdf-preview');
         preview.textContent = 'PDF';
@@ -37,7 +47,9 @@
       const info = document.createElement('small');
       info.textContent = extension === 'pdf'
         ? 'Document PDF · chaque page deviendra une scène'
-        : `${(file.size / (1024 * 1024)).toFixed(1)} Mo`;
+        : ['mp4', 'mov', 'm4v', 'webm'].includes(extension)
+          ? `Clip vidéo · ${(file.size / (1024 * 1024)).toFixed(1)} Mo`
+          : `${(file.size / (1024 * 1024)).toFixed(1)} Mo`;
       card.append(preview, name, info);
       importPreviewGrid.append(card);
     });
@@ -127,7 +139,7 @@
     let dragged = null;
     list.addEventListener('dragstart', event => {
       const card = event.target.closest('.segment-card');
-      if (!card || event.target.closest('textarea,button,input,a,select')) {
+      if (!card || event.target.closest('textarea,button,input,a,select,video')) {
         event.preventDefault();
         return;
       }
@@ -168,8 +180,9 @@
   });
 
   const prepareForm = document.querySelector('#prepareForm');
-  if (!prepareForm) return;
-  const button = document.querySelector('#prepareButton');
+  const assembleForm = document.querySelector('#assembleForm');
+  if (!prepareForm && !assembleForm) return;
+  const button = document.querySelector('#prepareButton, #assembleButton');
   const status = document.querySelector('#jobStatus');
   const progress = document.querySelector('#jobProgress');
   const details = document.querySelector('#progressDetails');
@@ -187,7 +200,7 @@
     const audio = document.querySelector('#fullAudio');
     const audioDownload = document.querySelector('#fullAudioDownload');
     const srtDownload = document.querySelector('#subtitleDownload');
-    if (!box || !audio) return;
+    if (!audioUrl || !box || !audio) return;
     audio.src = audioUrl;
     audioDownload.href = audioUrl;
     srtDownload.href = subtitlesUrl;
@@ -275,19 +288,21 @@
     }
   };
 
-  prepareForm.addEventListener('submit', async event => {
+  const submitJob = async event => {
     event.preventDefault();
-    if (!voiceIdInput?.value) {
+    const form = event.currentTarget;
+    const isAssembly = form === assembleForm;
+    if (!isAssembly && !voiceIdInput?.value) {
       status.className = 'job-status error';
       status.textContent = 'Choisis d’abord une voix autorisée.';
       return;
     }
     button.disabled = true;
     status.className = 'job-status';
-    status.textContent = 'Enregistrement des textes…';
+    status.textContent = isAssembly ? 'Enregistrement des réglages…' : 'Enregistrement des textes…';
     try {
       await saveDirtySegments();
-      const response = await fetch(prepareForm.action, {method: 'POST', body: new FormData(prepareForm)});
+      const response = await fetch(form.action, {method: 'POST', body: new FormData(form)});
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Le traitement n’a pas pu démarrer.');
       progress.hidden = false;
@@ -300,7 +315,9 @@
       status.textContent = error.message;
       button.disabled = false;
     }
-  });
+  };
+  prepareForm?.addEventListener('submit', submitJob);
+  assembleForm?.addEventListener('submit', submitJob);
 
   if (['processing', 'queued'].includes(document.body.dataset.projectStatus)) {
     button.disabled = true;

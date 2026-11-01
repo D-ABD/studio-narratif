@@ -12,6 +12,7 @@ Les projets, échantillons vocaux, narrations et sous-titres sont stockés dans 
 - Renommage, recatégorisation et suppression confirmée des voix.
 - Projets avec plusieurs segments de texte modifiables, supprimables et réordonnables.
 - Import local d’images JPG/PNG ou de PDF ; chaque page PDF est convertie en une scène image.
+- Import de clips MP4, MOV, M4V ou WebM dans un projet dédié ; réorganisation des clips et assemblage MP4 FFmpeg avec son d’origine conservé, sans synthèse IA.
 - Aperçu des images sélectionnées avant de confirmer leur import dans le projet.
 - Aperçu des scènes, réorganisation par glisser-déposer et mouvements de caméra par scène : image fixe, zoom avant/arrière, panoramique horizontal/vertical, zoom diagonal ou parallaxe 2.5D « profondeur douce » avec sujet détouré localement.
 - Synthèse française XTTS v2 et alignement forcé WhisperX sur l’audio réellement généré.
@@ -27,7 +28,7 @@ Les projets, échantillons vocaux, narrations et sous-titres sont stockés dans 
 ## Prérequis
 
 - Python 3.11 recommandé.
-- FFmpeg pour les exports MP4 et la normalisation audio. Sur macOS : `brew install ffmpeg`. L’incrustation des sous-titres requiert aussi le filtre `subtitles` (libass). Si la version Homebrew installée ne le fournit pas, crée une fois l’environnement Conda dédié : `conda create -n ffmpeg-subs -c conda-forge ffmpeg`. L’application détecte automatiquement cet environnement aux emplacements Conda courants, sans commande `export` à répéter.
+- FFmpeg et ffprobe pour les exports MP4, l’assemblage de clips et la normalisation audio. Sur macOS : `brew install ffmpeg`. L’incrustation des sous-titres requiert aussi le filtre `subtitles` (libass). Si la version Homebrew installée ne le fournit pas, crée une fois l’environnement Conda dédié : `conda create -n ffmpeg-subs -c conda-forge ffmpeg`. L’application détecte automatiquement cet environnement aux emplacements Conda courants, sans commande `export` à répéter.
 - Pillow et PyMuPDF sont installés par `requirements.txt` pour valider les images et convertir les PDF.
 - Le mouvement « Profondeur douce » est facultatif et utilise rembg/ONNX en local : installe `requirements-parallax.txt`. Ses versions sont fixées pour rester compatibles avec XTTS (NumPy 1.26.4, NetworkX 2.8.8) et les Mac Intel. Le modèle U2NetP est téléchargé au premier rendu et réutilisé ensuite localement.
 - Environ 8 à 10 Go libres pour les poids XTTS/WhisperX téléchargés au premier lancement. La synthèse CPU peut être lente ; une carte NVIDIA/CUDA accélère le traitement sur les systèmes compatibles.
@@ -93,10 +94,10 @@ Les tests Django couvrent l’autorisation et la gestion des voix, les imports i
 
 ## Utilisation
 
-1. Crée un projet, puis importe une ou plusieurs images ou un PDF. Chaque page du PDF devient une scène.
+1. Crée un projet. Pour une vidéo narrée, importe des images ou un PDF. Pour réunir des vidéos, importe uniquement des clips MP4, MOV, M4V ou WebM (200 Mo maximum chacun) dans un projet séparé.
 2. Réordonne les scènes par glisser-déposer ; ajoute le texte et choisis une image fixe ou un zoom pour chacune.
 3. Ajoute une voix WAV/MP3 ou enregistre-la au microphone. Écoute-la, nomme-la, classe-la et confirme l’autorisation d’utilisation.
-4. Choisis les sous-titres incrustés et le format 9:16 ou 16:9, puis clique sur **Générer la vidéo MP4**.
+4. Pour les images, choisis les sous-titres et le format 9:16 ou 16:9, puis clique sur **Générer la vidéo MP4**. Pour des clips, réordonne-les, choisis le format et clique sur **Assembler les clips vidéo** ; le son d’origine est conservé.
 5. La file traite les projets dans l’ordre ; la page affiche la position et l’avancement. Les audios dont le texte et la voix n’ont pas changé sont réutilisés depuis le cache. Prévisualise ou télécharge le MP4, le WAV et le SRT.
 
 Si WhisperX échoue à aligner un segment, le projet passe en erreur avec le détail retourné ; aucun horodatage approximatif n’est créé.

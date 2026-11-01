@@ -1,5 +1,6 @@
-"""Local FFmpeg rendering for narrated still-image scenes."""
+"""Local FFmpeg rendering for narrated scenes and imported video clips."""
 import hashlib
+import json
 import shutil
 import subprocess
 import threading
@@ -206,6 +207,131 @@ def _render_parallax_clip(ffmpeg, image_path, audio_path, output_path, subtitle_
         raise RuntimeError(f"FFmpeg a échoué pendant le rendu par parallaxe : {detail}")
     if write_error:
         raise RuntimeError(f"Le flux vidéo par parallaxe a été interrompu : {write_error}")
+
+
+def _ffprobe_path():
+    ffmpeg = Path(_ffmpeg_path())
+    sibling = ffmpeg.with_name("ffprobe" + ffmpeg.suffix)
+    path = str(sibling) if sibling.is_file() else shutil.which("ffprobe")
+    if not path:
+        raise RuntimeError("ffprobe est introuvable. Réinstalle FFmpeg avec ffprobe dans le PATH.")
+    return path
+
+
+def _probe_clip(path):
+    result = subprocess.run(
+        [_ffprobe_path(), "-v", "error", "-show_entries", "stream=codec_type,duration:format=duration",
+         "-of", "json", str(path)],
+        capture_output=True, text=True, check=False,
+    )
+    if result.returncode:
+        detail = (result.stderr or "").strip().splitlines()
+        raise RuntimeError(f"Le clip « {Path(path).name} » est illisible : {detail[-1] if detail else 'format invalide'}")
+    try:
+        info = json.loads(result.stdout)
+        streams = info.get("streams", [])
+        video_streams = [stream for stream in streams if stream.get("codec_type") == "video"]
+        if not video_streams:
+            raise ValueError("aucune piste vidéo")
+        try:
+            duration = float(video_streams[0].get("duration"))
+        except (TypeError, ValueError):
+            duration = 0.0
+        if duration <= 0:
+            duration = float(info.get("format", {}).get("duration") or 0)
+        if duration <= 0:
+            raise ValueError("durée inconnue")
+        has_audio = any(stream.get("codec_type") == "audio" for stream in streams)
+        return duration, has_audio
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Impossible de lire la durée du clip « {Path(path).name} » : {exc}") from exc
+
+
+def render_video_assembly(project_id):
+    """Normalize and concatenate imported clips, retaining their original audio."""
+    close_old_connections()
+    try:
+        project = NarrationProject.objects.get(pk=project_id)
+        scenes = list(project.segments.order_by("position", "id"))
+        if not scenes or any(not scene.video_clip or scene.image for scene in scenes):
+            raise RuntimeError("Ajoute uniquement des clips vidéo avant de lancer l’assemblage.")
+        ffmpeg = _ffmpeg_path()
+        width, height = _dimensions(project.video_format)
+        with tempfile.TemporaryDirectory(prefix=f"petit-studio-assembly-{project.pk}-") as temp:
+            folder = Path(temp)
+            clips = []
+            total_duration = 0.0
+            for index, scene in enumerate(scenes, start=1):
+                project.status_message = f"Préparation du clip {index}/{len(scenes)}"
+                project.current_segment = index
+                project.progress_percent = round(85 * (index - 1) / len(scenes))
+                project.save(update_fields=["status_message", "current_segment", "progress_percent", "updated_at"])
+                source = Path(scene.video_clip.path)
+                duration, has_audio = _probe_clip(source)
+                total_duration += duration
+                clip = folder / f"clip-{index:04}.mp4"
+                command = [ffmpeg, "-y", "-v", "error", "-i", str(source)]
+                if not has_audio:
+                    command.extend([
+                        "-f", "lavfi", "-t", f"{duration:.3f}", "-i",
+                        "anullsrc=channel_layout=stereo:sample_rate=48000",
+                    ])
+                audio_input = "0:a:0" if has_audio else "1:a:0"
+                filters = (
+                    f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+                    f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,fps=24,setsar=1"
+                )
+                command.extend([
+                    "-map", "0:v:0", "-map", audio_input, "-vf", filters,
+                    "-af", "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,apad",
+                    "-t", f"{duration:.3f}", "-r", "24", "-c:v", "libx264", "-preset", "ultrafast",
+                    "-crf", "24", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+                    "-ar", "48000", "-ac", "2", str(clip),
+                ])
+                _run_ffmpeg(command, folder, f"normalisation du clip {index}")
+                if not clip.is_file() or clip.stat().st_size < 1000:
+                    raise RuntimeError(f"FFmpeg n’a pas produit le clip normalisé {index}.")
+                clips.append(clip)
+            concat_list = folder / "clips.txt"
+            concat_list.write_text("".join(f"file '{clip.name}'\\n" for clip in clips), encoding="utf-8")
+            output = folder / "montage.mp4"
+            project.status_message = "Assemblage des clips vidéo…"
+            project.progress_percent = 92
+            project.save(update_fields=["status_message", "progress_percent", "updated_at"])
+            _run_ffmpeg(
+                [ffmpeg, "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(concat_list),
+                 "-c", "copy", "-movflags", "+faststart", str(output)],
+                folder, "assemblage des clips vidéo",
+            )
+            if not output.is_file() or output.stat().st_size < 1000:
+                raise RuntimeError("FFmpeg n’a pas produit de fichier MP4 valide.")
+            project.refresh_from_db()
+            if project.video_file:
+                project.video_file.delete(save=False)
+            with output.open("rb") as stream:
+                project.video_file.save(f"montage-{project.pk}.mp4", File(stream), save=False)
+            project.duration_seconds = total_duration
+            project.status = NarrationProject.Status.READY
+            project.status_message = f"Assemblage prêt · {len(scenes)} clip(s) · son d’origine conservé · {project.video_format}."
+            project.error_message = ""
+            project.progress_percent = 100
+            project.current_segment = len(scenes)
+            project.total_segments = len(scenes)
+            project.finished_at = timezone.now()
+            project.save(update_fields=[
+                "video_file", "duration_seconds", "status", "status_message", "error_message",
+                "progress_percent", "current_segment", "total_segments", "finished_at", "updated_at",
+            ])
+    except Exception as exc:
+        NarrationProject.objects.filter(pk=project_id).update(
+            status=NarrationProject.Status.ERROR,
+            status_message="L’assemblage des clips a échoué.",
+            error_message=str(exc)[:2000],
+            queued_at=None,
+            finished_at=timezone.now(),
+        )
+    finally:
+        close_old_connections()
 
 
 def render_project_video(project_id):
