@@ -1,0 +1,2 @@
+# Optional CPU-only local subject cutout for the 2.5D parallax motion.
+rembg[cpu]>=2.0.80,<3
