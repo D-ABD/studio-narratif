@@ -76,6 +76,7 @@ class NarrationSegment(models.Model):
         PAN_H = "pan_h", "Panoramique gauche → droite"
         PAN_V = "pan_v", "Panoramique haut → bas"
         ZOOM_PAN = "zoom_pan", "Zoom diagonal doux"
+        PARALLAX = "parallax", "Profondeur douce · parallaxe 2.5D"
 
     project = models.ForeignKey(NarrationProject, on_delete=models.CASCADE, related_name="segments")
     position = models.PositiveSmallIntegerField(default=0)
