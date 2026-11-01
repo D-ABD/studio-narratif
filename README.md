@@ -13,11 +13,11 @@ Les projets, échantillons vocaux, narrations et sous-titres sont stockés dans 
 - Projets avec plusieurs segments de texte modifiables, supprimables et réordonnables.
 - Import local d’images JPG/PNG ou de PDF ; chaque page PDF est convertie en une scène image.
 - Aperçu des images sélectionnées avant de confirmer leur import dans le projet.
-- Aperçu des scènes, réorganisation par glisser-déposer et mouvements de caméra par scène : image fixe, zoom avant/arrière, panoramique horizontal/vertical ou zoom diagonal.
+- Aperçu des scènes, réorganisation par glisser-déposer et mouvements de caméra par scène : image fixe, zoom avant/arrière, panoramique horizontal/vertical, zoom diagonal ou parallaxe 2.5D « profondeur douce » avec sujet détouré localement.
 - Synthèse française XTTS v2 et alignement forcé WhisperX sur l’audio réellement généré.
 - Sous-titres synchronisés avec l’audio ; les phrases sont incrustées progressivement dans la vidéo, avec activation/désactivation.
 - Rendu MP4 FFmpeg en 9:16 ou 16:9, proportions conservées, prévisualisation et téléchargement.
-- Mouvements limités à une image fixe ou un zoom lent ; aucun visage, personnage ou mouvement de lèvres n’est généré.
+- La parallaxe crée une impression de profondeur sans animer le visage ni les gestes du sujet.
 - File d’attente persistante des projets : un worker séquentiel garde XTTS et WhisperX chargés en mémoire pendant qu’il traite plusieurs narrations.
 - Cache disque par texte, empreinte SHA-256 de l’échantillon, modèle et langue ; les segments inchangés sont réutilisés.
 - Écoute des segments, plus export WAV/SRT et vidéo MP4.
@@ -29,6 +29,7 @@ Les projets, échantillons vocaux, narrations et sous-titres sont stockés dans 
 - Python 3.11 recommandé.
 - FFmpeg pour les exports MP4 et la normalisation audio. Sur macOS : `brew install ffmpeg`. L’incrustation des sous-titres requiert aussi le filtre `subtitles` (libass). Si la version Homebrew installée ne le fournit pas, crée une fois l’environnement Conda dédié : `conda create -n ffmpeg-subs -c conda-forge ffmpeg`. L’application détecte automatiquement cet environnement aux emplacements Conda courants, sans commande `export` à répéter.
 - Pillow et PyMuPDF sont installés par `requirements.txt` pour valider les images et convertir les PDF.
+- Le mouvement « Profondeur douce » est facultatif et utilise rembg/ONNX en local : installe `requirements-parallax.txt`. Le petit modèle U2NetP est téléchargé au premier rendu et réutilisé ensuite depuis le cache local.
 - Environ 8 à 10 Go libres pour les poids XTTS/WhisperX téléchargés au premier lancement. La synthèse CPU peut être lente ; une carte NVIDIA/CUDA accélère le traitement sur les systèmes compatibles.
 
 ## Installation sur macOS
@@ -42,6 +43,8 @@ source .venv/bin/activate
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install -r requirements.txt
 python -m pip install -r requirements-ai.txt
+# Facultatif, pour activer le mouvement « Profondeur douce »
+python -m pip install -r requirements-parallax.txt
 python manage.py migrate
 python scripts/check_ai_install.py
 ```
