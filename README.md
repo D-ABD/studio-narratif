@@ -29,7 +29,7 @@ Les projets, échantillons vocaux, narrations et sous-titres sont stockés dans 
 - Python 3.11 recommandé.
 - FFmpeg pour les exports MP4 et la normalisation audio. Sur macOS : `brew install ffmpeg`. L’incrustation des sous-titres requiert aussi le filtre `subtitles` (libass). Si la version Homebrew installée ne le fournit pas, crée une fois l’environnement Conda dédié : `conda create -n ffmpeg-subs -c conda-forge ffmpeg`. L’application détecte automatiquement cet environnement aux emplacements Conda courants, sans commande `export` à répéter.
 - Pillow et PyMuPDF sont installés par `requirements.txt` pour valider les images et convertir les PDF.
-- Le mouvement « Profondeur douce » est facultatif et utilise rembg/ONNX en local : installe `requirements-parallax.txt`. Le petit modèle U2NetP est téléchargé au premier rendu et réutilisé ensuite depuis le cache local.
+- Le mouvement « Profondeur douce » est facultatif et utilise rembg/ONNX en local : installe `requirements-parallax.txt`. Ses versions sont fixées pour rester compatibles avec XTTS (NumPy 1.26.4) et les Mac Intel plus anciens. Le modèle U2NetP est téléchargé au premier rendu et réutilisé ensuite localement.
 - Environ 8 à 10 Go libres pour les poids XTTS/WhisperX téléchargés au premier lancement. La synthèse CPU peut être lente ; une carte NVIDIA/CUDA accélère le traitement sur les systèmes compatibles.
 
 ## Installation sur macOS
