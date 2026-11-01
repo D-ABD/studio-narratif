@@ -39,6 +39,7 @@ class NarrationProject(models.Model):
     class JobType(models.TextChoices):
         AUDIO = "audio", "Narration audio"
         VIDEO = "video", "Vidéo"
+        ASSEMBLY = "assembly", "Assemblage de clips"
 
     title = models.CharField("titre", max_length=120, default="Nouvelle narration")
     voice = models.ForeignKey(Voice, null=True, blank=True, on_delete=models.SET_NULL, related_name="projects")
@@ -81,6 +82,7 @@ class NarrationSegment(models.Model):
     project = models.ForeignKey(NarrationProject, on_delete=models.CASCADE, related_name="segments")
     position = models.PositiveSmallIntegerField(default=0)
     image = models.ImageField(upload_to="scenes/", blank=True)
+    video_clip = models.FileField(upload_to="scenes/videos/", blank=True)
     motion = models.CharField(max_length=8, choices=Motion.choices, default=Motion.ZOOM_IN)
     text = models.TextField(blank=True)
     audio = models.FileField(upload_to="segments/audio/", blank=True)
