@@ -1,5 +1,7 @@
-# CPU-only local segmentation, pinned for Python 3.11, Intel macOS, and XTTS NumPy compatibility.
+# CPU-only segmentation pinned for Python 3.11, Intel macOS, and XTTS dependency compatibility.
 rembg==2.0.67
 onnxruntime==1.16.3
 opencv-python-headless==4.10.0.84
+scikit-image==0.24.0
+networkx==2.8.8
 numpy==1.26.4
