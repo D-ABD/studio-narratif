@@ -1,2 +1,5 @@
-# Optional CPU-only local subject cutout for the 2.5D parallax motion.
-rembg[cpu]>=2.0.80,<3
+# CPU-only local segmentation, pinned for Python 3.11, Intel macOS, and XTTS NumPy compatibility.
+rembg==2.0.67
+onnxruntime==1.16.3
+opencv-python-headless==4.10.0.84
+numpy==1.26.4
