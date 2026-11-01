@@ -145,7 +145,7 @@ def _parallax_frames(image_path, width, height, duration):
     layer_size = (width + 2 * extra_x, height + 2 * extra_y)
     with Image.open(image_path) as source_image:
         background = ImageOps.fit(source_image.convert("RGB"), layer_size, method=Image.Resampling.LANCZOS)
-    background = background.filter(ImageFilter.GaussianBlur(radius=max(8, round(min(width, height) * 0.018)))
+    background = background.filter(ImageFilter.GaussianBlur(radius=max(8, round(min(width, height) * 0.018))))
     background = ImageEnhance.Brightness(background).enhance(0.82)
     foreground = ImageOps.fit(foreground, layer_size, method=Image.Resampling.LANCZOS)
 
@@ -158,6 +158,7 @@ def _parallax_frames(image_path, width, height, duration):
         fg_y = extra_y + round(2 * extra_y * 0.82 * progress)
         bg_frame = background.crop((bg_x, bg_y, bg_x + width, bg_y + height))
         fg_frame = foreground.crop((fg_x, fg_y, fg_x + width, fg_y + height))
+        bg_frame = bg_frame.convert("RGBA")
         bg_frame.alpha_composite(fg_frame.convert("RGBA"))
         yield bg_frame.convert("RGB").tobytes()
 
@@ -183,8 +184,12 @@ def _render_parallax_clip(ffmpeg, image_path, audio_path, output_path, subtitle_
             try:
                 for frame in _parallax_frames(image_path, width, height, duration):
                     process.stdin.write(frame)
-            except (BrokenPipeError, OSError) as exc:
+            except Exception as exc:
                 write_error = exc
+                try:
+                    process.terminate()
+                except OSError:
+                    pass
             finally:
                 if process.stdin and not process.stdin.closed:
                     process.stdin.close()
@@ -192,6 +197,8 @@ def _render_parallax_clip(ffmpeg, image_path, audio_path, output_path, subtitle_
         stderr = error_log.read_text(encoding="utf-8", errors="replace").strip()
     except OSError as exc:
         raise RuntimeError(f"Impossible de lancer FFmpeg pour la profondeur douce : {exc}") from exc
+    if write_error and not isinstance(write_error, (BrokenPipeError, OSError)):
+        raise write_error
     if return_code:
         if "No such filter" in stderr and "subtitles" in stderr:
             raise RuntimeError("FFmpeg ne prend pas en charge l’incrustation des sous-titres (filtre libass). Réinstalle FFmpeg avec le support libass.")
