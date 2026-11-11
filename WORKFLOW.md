@@ -24,6 +24,15 @@ Si un lot casse l'application et que les tests échouent :
 5. En local, faire `git sync` pour récupérer l'état sauvegardé.
 
 ## 💻 Lancer l'application
+
+### Le raccourci magique
+Un alias `studio` a été configuré dans le terminal via `~/.zshrc`. Une fois l'environnement virtuel activé, il suffit de taper `studio` pour démarrer l'application.
+
+### ⚠️ Piège Conda
+Si le terminal affiche `(base)` au lieu de `(.venv)`, cela signifie que Conda a pris le dessus. Dans ce cas, la commande `studio` plantera avec l'erreur `ModuleNotFoundError: No module named 'django'`.
+
+La solution est de taper `conda deactivate` jusqu'à ce que `(base)` disparaisse, puis de réactiver l'environnement virtuel avec `source .venv/bin/activate`.
+
 Pour démarrer le serveur et le worker en même temps :
 1. Activer l'environnement virtuel : `source .venv/bin/activate`
 2. Lancer le studio : `python manage.py run_studio`
