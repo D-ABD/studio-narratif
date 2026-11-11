@@ -293,7 +293,7 @@ def render_video_assembly(project_id):
                     raise RuntimeError(f"FFmpeg n’a pas produit le clip normalisé {index}.")
                 clips.append(clip)
             concat_list = folder / "clips.txt"
-            concat_list.write_text("".join(f"file '{clip.name}'\\n" for clip in clips), encoding="utf-8")
+            concat_list.write_text("".join(f"file '{clip.name}'\n" for clip in clips), encoding="utf-8")
             output = folder / "montage.mp4"
             project.status_message = "Assemblage des clips vidéo…"
             project.progress_percent = 92
