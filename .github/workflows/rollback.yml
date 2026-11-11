@@ -23,7 +23,7 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
-          token: ${{ secrets.RELEASE_PAT }}
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Configure Git
         run: |
@@ -54,12 +54,6 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "${REASON:-}" ]; then REASON="Rollback manuel"; fi
-
-          COMMITS_TO_REVERT=$(git rev-list --count "${TAG}"..HEAD)
-          if [ "$COMMITS_TO_REVERT" -eq 0 ]; then
-            echo "✅ Rien à annuler, vous êtes déjà à la version ${TAG}."
-            exit 0
-          fi
 
           if git revert --no-commit "${TAG}..HEAD"; then
             echo "Revert appliqué."
