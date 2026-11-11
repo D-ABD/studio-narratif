@@ -1,30 +1,417 @@
-{% load static %}<!doctype html>
+{% load static %}
+<!doctype html>
 <html lang="fr">
 <head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="theme-color" content="#0b151e">
-  <title>{% block title %}Petit Studio Voix{% endblock %}</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0B0E14">
+  <title>{% block title %}Petit Studio{% endblock %}</title>
   <link rel="stylesheet" href="{% static 'studio/app.css' %}?v=4">
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0B0E14;
+      --sidebar: #10141C;
+      --panel: #151A22;
+      --panel-2: #1B222D;
+      --line: #29313E;
+      --muted: #929BAA;
+      --text: #F2F4F8;
+      --orange: #F59E0B;
+      --orange-deep: #D97706;
+      --green: #78C89A;
+      --red: #F07D77;
+      --radius: 16px;
+      --shadow: 0 22px 60px #0005;
+    }
+    * { box-sizing: border-box; }
+    html { min-height: 100%; scroll-behavior: smooth; }
+    body {
+      min-height: 100vh;
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    a { color: inherit; text-decoration: none; }
+    button, input, textarea, select { font: inherit; }
+    .app-shell {
+      display: grid;
+      grid-template-columns: 280px minmax(0, 1fr);
+      min-height: 100vh;
+      transition: grid-template-columns 0.3s ease;
+    }
+    .sidebar.premium-sidebar {
+      position: sticky;
+      top: 0;
+      width: 280px;
+      height: 100vh;
+      min-height: 560px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      padding: 24px 16px 18px;
+      background: var(--sidebar);
+      border-right: 1px solid #222936;
+      transition: width 0.3s ease, padding 0.3s ease;
+      z-index: 5;
+    }
+    .premium-brand-row {
+      min-height: 48px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 0 7px;
+      margin-bottom: 35px;
+      white-space: nowrap;
+    }
+    .premium-brand-mark {
+      width: 40px;
+      height: 40px;
+      display: grid;
+      place-items: center;
+      flex: 0 0 40px;
+      border-radius: 13px;
+      background: var(--orange);
+      color: #17130A;
+      font-size: 21px;
+      font-weight: 900;
+      box-shadow: 0 7px 24px #F59E0B30;
+    }
+    .premium-wordmark { font-size: 17px; line-height: 1.1; font-weight: 780; letter-spacing: -.55px; }
+    .premium-wordmark small {
+      display: block;
+      margin-top: 5px;
+      color: #778193;
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: 1.55px;
+    }
+    .premium-toggle {
+      width: 34px;
+      height: 34px;
+      display: grid;
+      place-items: center;
+      margin-left: auto;
+      border: 1px solid #2C3543;
+      border-radius: 10px;
+      background: #171D27;
+      color: #AEB7C5;
+      cursor: pointer;
+      transition: background .18s, color .18s, transform .3s;
+    }
+    .premium-toggle:hover { background: #242D3A; color: #fff; }
+    .premium-toggle svg { width: 17px; height: 17px; }
+    .premium-section-title {
+      padding: 0 10px 10px;
+      color: #758092;
+      font-size: 9px;
+      font-weight: 800;
+      letter-spacing: 1.45px;
+      white-space: nowrap;
+      transition: opacity .18s;
+    }
+    .premium-nav { display: grid; gap: 5px; margin-bottom: 30px; }
+    .premium-nav-link, .premium-project-link {
+      min-height: 43px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 0 11px;
+      border: 1px solid transparent;
+      border-radius: 11px;
+      color: #AAB3C1;
+      font-size: 12px;
+      font-weight: 600;
+      white-space: nowrap;
+      transition: color .18s, background .18s, border-color .18s;
+    }
+    .premium-nav-link:hover, .premium-project-link:hover {
+      color: #F5F6F8;
+      background: #1A202B;
+      border-color: #252D39;
+    }
+    .premium-nav-link.active {
+      color: #FFF4DD;
+      background: #2A2113;
+      border-color: #5A3B12;
+    }
+    .premium-icon {
+      width: 22px;
+      flex: 0 0 22px;
+      display: inline-grid;
+      place-items: center;
+      color: var(--orange);
+      font-size: 17px;
+      line-height: 1;
+    }
+    .premium-projects { display: grid; gap: 3px; min-height: 0; }
+    .premium-project-link { min-height: 39px; font-size: 11px; font-weight: 520; }
+    .premium-project-link .premium-icon { color: #8792A3; font-size: 13px; }
+    .premium-sidebar-bottom {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      margin-top: auto;
+      padding: 14px 10px 3px;
+      border-top: 1px solid #252C38;
+      color: #778294;
+      font-size: 10px;
+      white-space: nowrap;
+    }
+    .premium-online-dot {
+      width: 7px;
+      height: 7px;
+      flex: 0 0 7px;
+      border-radius: 50%;
+      background: #69C58C;
+      box-shadow: 0 0 12px #69C58C90;
+    }
+    .main.premium-main {
+      min-width: 0;
+      max-width: none;
+      margin: 0;
+      padding: 28px clamp(22px, 3.2vw, 52px) 26px;
+    }
+    .topbar.premium-topbar {
+      max-width: 1500px;
+      margin: 0 auto 28px;
+      padding-bottom: 22px;
+      border-bottom: 1px solid #202733;
+    }
+    .premium-topbar .eyebrow { color: #7F8999; font-size: 9px; letter-spacing: 1.7px; }
+    .premium-topbar h1 {
+      margin: 5px 0 0;
+      color: #F5F6F8;
+      font-size: clamp(22px, 2.4vw, 31px);
+      font-weight: 760;
+      letter-spacing: -.9px;
+    }
+    .premium-top-pills { display: flex; align-items: center; gap: 8px; }
+    .premium-top-pill {
+      padding: 7px 10px;
+      border: 1px solid #2A3341;
+      border-radius: 9px;
+      color: #A7B0BE;
+      background: #131821;
+      font-size: 10px;
+      white-space: nowrap;
+    }
+    .premium-top-pill.accent { color: #FFC65D; border-color: #5A4016; background: #241D12; }
+    .messages { max-width: 1500px; margin: 0 auto 16px; }
+    .message { margin-bottom: 7px; padding: 11px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+    .footer { max-width: 1500px; margin: 30px auto 0; padding: 12px 0 4px; border-top: 1px solid #202733; color: #667182; text-align: center; font-size: 10px; }
+    .sidebar-collapsed .app-shell { grid-template-columns: 80px minmax(0, 1fr); }
+    .sidebar-collapsed .sidebar.premium-sidebar { width: 80px; padding-right: 10px; padding-left: 10px; }
+    .sidebar-collapsed .premium-brand-row { justify-content: center; padding: 0; }
+    .sidebar-collapsed .premium-wordmark,
+    .sidebar-collapsed .premium-section-title,
+    .sidebar-collapsed .premium-link-label,
+    .sidebar-collapsed .premium-sidebar-bottom > span:not(.premium-online-dot) {
+      display: none;
+      opacity: 0;
+    }
+    .sidebar-collapsed .premium-brand-row { position: relative; margin-bottom: 35px; }
+    .sidebar-collapsed .premium-toggle {
+      position: absolute;
+      top: 49px;
+      left: 13px;
+      margin: 0;
+      transform: rotate(180deg);
+    }
+    .sidebar-collapsed .premium-nav-link,
+    .sidebar-collapsed .premium-project-link { justify-content: center; padding: 0; }
+    .sidebar-collapsed .premium-icon { width: 100%; flex-basis: 100%; }
+    .sidebar-collapsed .premium-sidebar-bottom { justify-content: center; padding-right: 0; padding-left: 0; }
+    .premium-editor { max-width: 1500px; margin: 0 auto; }
+    .editor-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin: 0 0 18px; }
+    .editor-context { display: grid; gap: 3px; }
+    .editor-context strong { color: #E9ECF2; font-size: 12px; }
+    .editor-context span { color: var(--muted); font-size: 10px; }
+    .editor-chip { display: inline-flex; align-items: center; gap: 7px; padding: 7px 10px; border: 1px solid #293241; border-radius: 9px; color: #A8B1BF; background: #121720; font-size: 10px; }
+    .editor-chip i { width: 6px; height: 6px; border-radius: 50%; background: #6BCD91; }
+    .editor-layout { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(290px, .8fr); align-items: start; gap: 17px; }
+    .editor-left, .editor-right { display: grid; gap: 16px; min-width: 0; }
+    .premium-card { overflow: hidden; border: 1px solid #242C38; border-radius: var(--radius); background: var(--panel); box-shadow: var(--shadow); }
+    .premium-card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 17px 19px; border-bottom: 1px solid #252D39; }
+    .premium-card-head h2 { margin: 0; color: #E7EAF0; font-size: 12px; font-weight: 700; }
+    .premium-card-head span { color: #7F8999; font-size: 10px; }
+    .canvas-wrap { padding: 14px; }
+    .canvas-topline { display: flex; justify-content: space-between; align-items: center; padding: 1px 2px 12px; color: #929BAA; font-size: 10px; }
+    .canvas-topline b { color: #CDD2DB; font-weight: 600; }
+    .canvas-preview {
+      position: relative;
+      min-height: 340px;
+      display: grid;
+      place-items: center;
+      overflow: hidden;
+      border: 1px solid #2D3542;
+      border-radius: 12px;
+      background:
+        radial-gradient(ellipse at 50% 110%, #2A3440 0, transparent 52%),
+        linear-gradient(145deg, #1B222D, #10141C 62%, #261E16);
+    }
+    .canvas-preview svg { display: block; width: min(100%, 520px); height: auto; max-height: 450px; }
+    .canvas-overlay { position: absolute; left: 14px; bottom: 13px; padding: 6px 8px; border: 1px solid #FFFFFF20; border-radius: 7px; color: #FFFFFFC9; background: #0B0E1480; font-size: 9px; backdrop-filter: blur(8px); }
+    .script-wrap { padding: 17px 19px 18px; }
+    .field-label { display: flex; align-items: center; justify-content: space-between; margin-bottom: 9px; color: #D7DBE3; font-size: 11px; font-weight: 650; }
+    .field-label small { color: #7B8595; font-size: 9px; font-weight: 500; }
+    .premium-textarea {
+      width: 100%;
+      min-height: 125px;
+      resize: vertical;
+      padding: 13px 14px;
+      border: 1px solid #2B3442;
+      border-radius: 11px;
+      outline: none;
+      color: #E7EAF0;
+      background: #10141C;
+      font-size: 12px;
+      line-height: 1.7;
+      transition: border-color .18s, box-shadow .18s;
+    }
+    .premium-textarea:focus { border-color: #A96B12; box-shadow: 0 0 0 3px #F59E0B18; }
+    .script-foot { display: flex; justify-content: space-between; gap: 12px; margin-top: 8px; color: #737E8E; font-size: 9px; }
+    .settings-body { display: grid; gap: 17px; padding: 18px; }
+    .setting-group { display: grid; gap: 8px; }
+    .setting-label { color: #A8B1BF; font-size: 10px; font-weight: 650; }
+    .setting-select {
+      width: 100%;
+      height: 40px;
+      padding: 0 11px;
+      border: 1px solid #2C3542;
+      border-radius: 9px;
+      color: #E7EAF0;
+      background: #10141C;
+      outline: none;
+      font-size: 11px;
+    }
+    .voice-option { display: flex; align-items: center; gap: 10px; padding: 10px; border: 1px solid #303948; border-radius: 10px; background: #11161F; }
+    .voice-avatar-premium { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 10px; color: #FFC65D; background: #302313; font-size: 15px; }
+    .voice-option div { display: grid; gap: 2px; }
+    .voice-option b { color: #DCE1E9; font-size: 10px; }
+    .voice-option small { color: #7C8797; font-size: 9px; }
+    .motion-options { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; }
+    .motion-choice { min-height: 57px; display: grid; place-items: center; gap: 3px; border: 1px solid #2B3441; border-radius: 9px; color: #939DAD; background: #11161F; font-size: 9px; }
+    .motion-choice span { color: #D7A448; font-size: 16px; }
+    .motion-choice.selected { border-color: #805514; color: #FFD178; background: #241D12; }
+    .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 14px; border-top: 1px solid #272F3B; }
+    .toggle-row div { display: grid; gap: 2px; }
+    .toggle-row b { color: #D5DAE3; font-size: 10px; }
+    .toggle-row small { color: #7D8797; font-size: 9px; }
+    .premium-switch { width: 34px; height: 19px; padding: 2px; border: 0; border-radius: 99px; background: #3D4654; }
+    .premium-switch:after { content: ""; width: 15px; height: 15px; display: block; border-radius: 50%; background: #FFF; }
+    .generate-button {
+      width: 100%;
+      min-height: 45px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 9px;
+      border: 0;
+      border-radius: 10px;
+      color: #201607;
+      background: linear-gradient(135deg, #F8B72E, #F59E0B);
+      box-shadow: 0 9px 25px #F59E0B28;
+      font-size: 11px;
+      font-weight: 800;
+      cursor: pointer;
+      transition: transform .18s, filter .18s;
+    }
+    .generate-button:hover { transform: translateY(-1px); filter: brightness(1.08); }
+    .generate-note { margin: 0; color: #737E8E; text-align: center; font-size: 9px; }
+    @media (max-width: 1050px) {
+      .editor-layout { grid-template-columns: minmax(0, 1.2fr) minmax(270px, .8fr); }
+      .premium-top-pill:first-child { display: none; }
+    }
+    @media (max-width: 820px) {
+      .app-shell, .sidebar-collapsed .app-shell { grid-template-columns: minmax(0, 1fr); }
+      .sidebar.premium-sidebar, .sidebar-collapsed .sidebar.premium-sidebar {
+        position: relative; width: 100%; height: auto; min-height: 0; padding: 12px 16px;
+        border-right: 0; border-bottom: 1px solid #222936;
+      }
+      .premium-brand-row { margin: 0; }
+      .premium-nav { display: flex; flex-wrap: wrap; gap: 5px; margin: 10px 0 0; }
+      .premium-nav-link { min-height: 36px; }
+      .premium-section-title, .premium-projects, .premium-sidebar-bottom { display: none; }
+      .sidebar-collapsed .premium-brand-row { justify-content: flex-start; }
+      .sidebar-collapsed .premium-wordmark { display: block; opacity: 1; }
+      .sidebar-collapsed .premium-toggle { position: static; margin-left: auto; transform: none; }
+      .sidebar-collapsed .premium-nav-link { justify-content: flex-start; padding: 0 11px; }
+      .sidebar-collapsed .premium-link-label { display: inline; opacity: 1; }
+      .main.premium-main { padding: 21px 18px; }
+      .editor-layout { grid-template-columns: minmax(0, 1fr); }
+      .editor-right { grid-row: 1; }
+      .canvas-preview { min-height: 280px; }
+    }
+    @media (max-width: 520px) {
+      .premium-topbar { align-items: flex-start; }
+      .premium-top-pills { display: none; }
+      .editor-toolbar { align-items: flex-start; flex-direction: column; }
+      .canvas-preview { min-height: 230px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; }
+    }
+  </style>
 </head>
 <body {% block body_data %}{% endblock %}>
 <div class="app-shell">
-  <aside class="sidebar">
-    <a class="brand" href="{% url 'home' %}"><span class="brand-mark">✦</span><span>petit studio<small>CRÉATION LOCALE</small></span></a>
-    <div class="side-label">ESPACE AUDIO</div>
-    <nav class="side-nav"><a href="{% url 'home' %}#voices"><span>♫</span> Bibliothèque de voix</a><a href="{% url 'home' %}#projects"><span>▤</span> Mes narrations</a></nav>
-    <div class="side-label project-heading">MES PROJETS <span>{{ projects|length }}</span></div>
-    <nav class="project-list">
-      {% for item in projects %}<a class="project-link {% if project and item.id == project.id %}selected{% endif %}" href="{% url 'project_detail' item.id %}"><span class="project-dot {% if item.status == 'ready' %}done{% elif item.status == 'error' %}failed{% elif item.status == 'queued' %}queued{% endif %}"></span><span class="truncate">{{ item.title }}</span><small>{{ item.updated_at|date:"d/m" }}</small></a>{% empty %}<p class="empty-side">Tes narrations apparaîtront ici.</p>{% endfor %}
+  <aside class="sidebar premium-sidebar" aria-label="Navigation principale">
+    <div class="premium-brand-row">
+      <a class="premium-brand-mark" href="#" aria-label="Petit Studio">✦</a>
+      <a class="premium-wordmark" href="#">Petit Studio<small>STUDIO NARRATIF</small></a>
+      <button class="premium-toggle" id="sidebarToggle" type="button" aria-label="Rabattre la barre latérale" aria-expanded="true" title="Rabattre / déployer la barre latérale">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5h10M8 12h10M8 19h10M4 5v14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      </button>
+    </div>
+    <div class="premium-section-title">ESPACE DE TRAVAIL</div>
+    <nav class="premium-nav">
+      <a class="premium-nav-link active" href="#"><span class="premium-icon" aria-hidden="true">♫</span><span class="premium-link-label">Bibliothèque de voix</span></a>
+      <a class="premium-nav-link" href="#"><span class="premium-icon" aria-hidden="true">▤</span><span class="premium-link-label">Mes narrations</span></a>
     </nav>
-    <form action="{% url 'create_project' %}" method="post" class="new-project-form">{% csrf_token %}<input type="hidden" name="title" value="Nouvelle narration"><button class="button button-secondary full">＋ Nouvelle narration</button></form>
-    <div class="sidebar-bottom"><span class="local-pill"><i></i> Traitement sur cet appareil</span><p>Les échantillons, narrations et projets restent dans le dossier local de l’application.</p></div>
+    <div class="premium-section-title">PROJETS RÉCENTS</div>
+    <nav class="premium-projects" aria-label="Projets récents">
+      <a class="premium-project-link" href="#"><span class="premium-icon" aria-hidden="true">◈</span><span class="premium-link-label">Les aventures de Sky</span></a>
+      <a class="premium-project-link" href="#"><span class="premium-icon" aria-hidden="true">◈</span><span class="premium-link-label">Carnet de voyage</span></a>
+      <a class="premium-project-link" href="#"><span class="premium-icon" aria-hidden="true">◈</span><span class="premium-link-label">Voix et souvenirs</span></a>
+    </nav>
+    <div class="premium-sidebar-bottom"><span class="premium-online-dot"></span><span>Traitement local activé</span></div>
   </aside>
-  <main class="main">
-    <header class="topbar"><div><div class="eyebrow">ATELIER DE NARRATION</div><h1>{% block heading %}Petit Studio Voix{% endblock %}</h1></div><div class="top-pills"><span class="pill">Django · SQLite</span><span class="pill accent">XTTS v2 · français</span></div></header>
+  <main class="main premium-main">
+    <header class="topbar premium-topbar">
+      <div><div class="eyebrow">ATELIER DE CRÉATION AUDIO</div><h1>{% block heading %}Petit Studio{% endblock %}</h1></div>
+      <div class="premium-top-pills"><span class="premium-top-pill">Bibliothèque locale</span><span class="premium-top-pill accent">● IA embarquée</span></div>
+    </header>
     {% if messages %}<div class="messages">{% for message in messages %}<div class="message {{ message.tags }}">{{ message }}</div>{% endfor %}</div>{% endif %}
     {% block content %}{% endblock %}
-    <footer class="footer">Application locale · Pas de comptes · Échantillons et exports stockés sur cet ordinateur</footer>
+    <footer class="footer">PETIT STUDIO · Création locale, vos fichiers restent sur cet appareil</footer>
   </main>
 </div>
+<script>
+(() => {
+  const body = document.body;
+  const button = document.getElementById('sidebarToggle');
+  const storageKey = 'petit-studio-sidebar-collapsed';
+  let collapsed = false;
+  try { collapsed = localStorage.getItem(storageKey) === 'true'; } catch (_) {}
+  if (collapsed) body.classList.add('sidebar-collapsed');
+  const updateButton = () => {
+    if (!button) return;
+    const expanded = !body.classList.contains('sidebar-collapsed');
+    button.setAttribute('aria-expanded', String(expanded));
+    button.setAttribute('aria-label', expanded ? 'Rabattre la barre latérale' : 'Déployer la barre latérale');
+  };
+  updateButton();
+  button?.addEventListener('click', () => {
+    body.classList.toggle('sidebar-collapsed');
+    try { localStorage.setItem(storageKey, String(body.classList.contains('sidebar-collapsed'))); } catch (_) {}
+    updateButton();
+  });
+})();
+</script>
 <script src="{% static 'studio/app.js' %}?v=4" defer></script>
-</body></html>
+</body>
+</html>

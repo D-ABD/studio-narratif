@@ -1,0 +1,69 @@
+{% extends "studio/base.html" %}
+{% block title %}{{ project.title }} · Petit Studio{% endblock %}
+{% block heading %}{{ project.title }}{% endblock %}
+{% block content %}
+<section class="premium-editor">
+  <div class="editor-toolbar">
+    <div class="editor-context"><strong>Éditeur de narration</strong><span>Prépare ta scène, choisis une voix et lance la génération.</span></div>
+    <span class="editor-chip"><i aria-hidden="true"></i> Brouillon enregistré</span>
+  </div>
+  <div class="editor-layout">
+    <div class="editor-left">
+      <section class="premium-card" aria-labelledby="scenePreviewTitle">
+        <div class="premium-card-head"><h2 id="scenePreviewTitle">APERÇU DE LA SCÈNE</h2><span>Scène 01 · image fixe</span></div>
+        <div class="canvas-wrap">
+          <div class="canvas-topline"><b>Image de couverture</b><span>Vertical · 9:16</span></div>
+          <div class="canvas-preview">
+            <svg viewBox="0 0 720 560" role="img" aria-label="Illustration de paysage au coucher du soleil">
+              <defs>
+                <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#373044"/><stop offset=".62" stop-color="#B76B51"/><stop offset="1" stop-color="#E7A95E"/></linearGradient>
+                <linearGradient id="hill" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#555047"/><stop offset="1" stop-color="#252A2B"/></linearGradient>
+              </defs>
+              <rect width="720" height="560" rx="18" fill="url(#sky)"/>
+              <circle cx="492" cy="193" r="72" fill="#F7C878" opacity=".92"/>
+              <path d="M0 345Q125 275 228 330T446 310T720 285V560H0Z" fill="#75604F"/>
+              <path d="M0 405Q156 330 286 390T535 355T720 375V560H0Z" fill="url(#hill)"/>
+              <path d="M0 474Q145 420 287 462T540 432T720 450V560H0Z" fill="#1B2223"/>
+              <path d="M96 393l27-68 25 68m-36-25h22m-13 25v74m434-80 23-62 27 62m-39-21h24m-11 21v63" fill="none" stroke="#252A28" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M0 0h720v560H0Z" fill="none" stroke="#FFFFFF" stroke-opacity=".07" stroke-width="2"/>
+            </svg>
+            <span class="canvas-overlay">Aperçu de la scène</span>
+          </div>
+        </div>
+        <div class="script-wrap">
+          <label class="field-label" for="sceneText">Texte de la narration <small>Un ton naturel et posé fonctionne bien.</small></label>
+          <textarea class="premium-textarea" id="sceneText" placeholder="Écris ici le texte qui sera raconté dans cette scène…"></textarea>
+          <div class="script-foot"><span>Les mots seront synchronisés avec la narration.</span><span>0 mot · environ 0 s</span></div>
+        </div>
+      </section>
+    </div>
+    <aside class="editor-right" aria-label="Réglages de la narration">
+      <section class="premium-card">
+        <div class="premium-card-head"><h2>RÉGLAGES DE LA SCÈNE</h2><span>Personnalisation</span></div>
+        <div class="settings-body">
+          <div class="setting-group">
+            <label class="setting-label" for="voicePreset">Voix de narration</label>
+            <div class="voice-option"><span class="voice-avatar-premium" aria-hidden="true">♫</span><div><b>Voix principale</b><small>Échantillon local · Français</small></div></div>
+            <select class="setting-select" id="voicePreset"><option>Choisir une voix enregistrée…</option></select>
+          </div>
+          <div class="setting-group">
+            <label class="setting-label" for="videoFormat">Format de sortie</label>
+            <select class="setting-select" id="videoFormat"><option>Vertical · 9:16</option><option>Paysage · 16:9</option></select>
+          </div>
+          <div class="setting-group">
+            <span class="setting-label">Mouvement de l’image</span>
+            <div class="motion-options" role="group" aria-label="Mouvement de l’image">
+              <button class="motion-choice selected" type="button"><span>▧</span>Fixe</button>
+              <button class="motion-choice" type="button"><span>↗</span>Zoom doux</button>
+              <button class="motion-choice" type="button"><span>⇢</span>Panoramique</button>
+            </div>
+          </div>
+          <div class="toggle-row"><div><b>Sous-titres synchronisés</b><small>Incrustés dans la vidéo finale</small></div><button class="premium-switch" type="button" aria-label="Sous-titres activés" aria-pressed="true"></button></div>
+          <button class="generate-button" type="button">Générer la narration <span aria-hidden="true">✦</span></button>
+          <p class="generate-note">Le rendu et les fichiers restent sur cet appareil.</p>
+        </div>
+      </section>
+    </aside>
+  </div>
+</section>
+{% endblock %}
