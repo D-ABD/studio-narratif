@@ -114,6 +114,10 @@
       transition: opacity .18s;
     }
     .premium-nav { display: grid; gap: 5px; margin-bottom: 30px; }
+    .premium-create-form { margin: 0; }
+    .premium-create-button { width: 100%; border-color: #3A321F; color: #FFD178; background: #201A11; text-align: left; cursor: pointer; }
+    .premium-create-button:hover { border-color: #805514; background: #2A2113; }
+    .premium-project-empty { padding: 8px 11px; color: #778294; font-size: 10px; }
     .premium-nav-link, .premium-project-link {
       min-height: 43px;
       display: flex;
@@ -361,23 +365,34 @@
 <div class="app-shell">
   <aside class="sidebar premium-sidebar" aria-label="Navigation principale">
     <div class="premium-brand-row">
-      <a class="premium-brand-mark" href="#" aria-label="Petit Studio">✦</a>
-      <a class="premium-wordmark" href="#">Petit Studio<small>STUDIO NARRATIF</small></a>
+      <a class="premium-brand-mark" href="{% url 'home' %}" aria-label="Petit Studio">✦</a>
+      <a class="premium-wordmark" href="{% url 'home' %}">Petit Studio<small>STUDIO NARRATIF</small></a>
       <button class="premium-toggle" id="sidebarToggle" type="button" aria-label="Rabattre la barre latérale" aria-expanded="true" title="Rabattre / déployer la barre latérale">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5h10M8 12h10M8 19h10M4 5v14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
       </button>
     </div>
     <div class="premium-section-title">ESPACE DE TRAVAIL</div>
     <nav class="premium-nav">
-      <a class="premium-nav-link active" href="#"><span class="premium-icon" aria-hidden="true">♫</span><span class="premium-link-label">Bibliothèque de voix</span></a>
-      <a class="premium-nav-link" href="#"><span class="premium-icon" aria-hidden="true">▤</span><span class="premium-link-label">Mes narrations</span></a>
+      <a class="premium-nav-link active" href="{% url 'home' %}#voices"><span class="premium-icon" aria-hidden="true">♫</span><span class="premium-link-label">Bibliothèque de voix</span></a>
+      <a class="premium-nav-link" href="{% url 'home' %}#projects"><span class="premium-icon" aria-hidden="true">▤</span><span class="premium-link-label">Mes narrations</span></a>
+      <form method="post" action="{% url 'create_project' %}" class="premium-create-form">
+        {% csrf_token %}
+        <input type="hidden" name="title" value="Nouvelle narration">
+        <button class="premium-nav-link premium-create-button" type="submit"><span class="premium-icon" aria-hidden="true">＋</span><span class="premium-link-label">Nouvelle narration</span></button>
+      </form>
     </nav>
     <div class="premium-section-title">PROJETS RÉCENTS</div>
+    {% with current_project=project %}
     <nav class="premium-projects" aria-label="Projets récents">
-      <a class="premium-project-link" href="#"><span class="premium-icon" aria-hidden="true">◈</span><span class="premium-link-label">Les aventures de Sky</span></a>
-      <a class="premium-project-link" href="#"><span class="premium-icon" aria-hidden="true">◈</span><span class="premium-link-label">Carnet de voyage</span></a>
-      <a class="premium-project-link" href="#"><span class="premium-icon" aria-hidden="true">◈</span><span class="premium-link-label">Voix et souvenirs</span></a>
+      {% for project in projects %}
+      <a class="premium-project-link{% if current_project and current_project.id == project.id %} selected{% endif %}" href="{% url 'project_detail' project.id %}">
+        <span class="premium-icon" aria-hidden="true">◈</span><span class="premium-link-label">{{ project.title }}</span>
+      </a>
+      {% empty %}
+      <span class="premium-project-empty">Aucun projet pour le moment.</span>
+      {% endfor %}
     </nav>
+    {% endwith %}
     <div class="premium-sidebar-bottom"><span class="premium-online-dot"></span><span>Traitement local activé</span></div>
   </aside>
   <main class="main premium-main">
