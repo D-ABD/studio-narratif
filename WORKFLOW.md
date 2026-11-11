@@ -23,6 +23,12 @@ Si un lot casse l'application et que les tests échouent :
 4. Le robot crée un commit de revert et le pousse sur `main`.
 5. En local, faire `git sync` pour récupérer l'état sauvegardé.
 
+## 💻 Lancer l'application
+Pour démarrer le serveur et le worker en même temps :
+1. Activer l'environnement virtuel : `source .venv/bin/activate`
+2. Lancer le studio : `python manage.py run_studio`
+3. Ouvrir le navigateur sur : http://127.0.0.1:8000
+
 ## 📁 Fichiers importants
 - `.github/workflows/ci.yml` : Lance les tests automatiquement à chaque push.
 - `.github/workflows/rollback.yml` : Le bouton de secours manuel pour revenir à un tag.
