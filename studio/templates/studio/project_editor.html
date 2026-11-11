@@ -1,66 +1,277 @@
 {% extends "studio/base.html" %}
 {% block title %}{{ project.title }} · Petit Studio{% endblock %}
 {% block heading %}{{ project.title }}{% endblock %}
+{% block body_data %}data-project-id="{{ project.id }}" data-project-status="{{ project.status }}" data-progress-percent="{{ project.progress_percent }}"{% endblock %}
 {% block content %}
+<style>
+  .premium-editor { max-width: 1500px; margin: 0 auto; }
+  .editor-toolbar { display:flex; align-items:center; justify-content:space-between; gap:14px; margin:0 0 18px; }
+  .editor-context { display:grid; gap:3px; }
+  .editor-context strong { color:#E9ECF2; font-size:12px; }
+  .editor-context span { color:#929BAA; font-size:10px; }
+  .editor-chip { display:inline-flex; align-items:center; gap:7px; padding:7px 10px; border:1px solid #293241; border-radius:9px; color:#A8B1BF; background:#121720; font-size:10px; }
+  .editor-chip i { width:6px; height:6px; border-radius:50%; background:#6BCD91; }
+  .editor-layout { display:grid; grid-template-columns:minmax(0,1.55fr) minmax(290px,.8fr); align-items:start; gap:17px; }
+  .editor-left,.editor-right { display:grid; gap:16px; min-width:0; }
+  .premium-card { overflow:hidden; border:1px solid #242C38; border-radius:16px; background:#151A22; box-shadow:0 22px 60px #0005; }
+  .premium-card-head { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:16px 18px; border-bottom:1px solid #252D39; }
+  .premium-card-head h2 { margin:0; color:#E7EAF0; font-size:11px; font-weight:750; letter-spacing:.7px; }
+  .premium-card-head span { color:#7F8999; font-size:10px; }
+  .editor-card-body { padding:17px 18px; }
+  .setting-label { display:block; margin:0 0 8px; color:#A8B1BF; font-size:10px; font-weight:650; }
+  .editor-select,.editor-textarea { width:100%; border:1px solid #2B3442; border-radius:10px; outline:none; color:#E7EAF0; background:#10141C; font:inherit; }
+  .editor-select { min-height:39px; padding:0 11px; font-size:11px; }
+  .editor-textarea { min-height:120px; resize:vertical; padding:13px; font-size:12px; line-height:1.65; }
+  .editor-select:focus,.editor-textarea:focus { border-color:#A96B12; box-shadow:0 0 0 3px #F59E0B18; }
+  .editor-form-stack { display:grid; gap:12px; }
+  .editor-toolbar-row { display:flex; align-items:center; justify-content:space-between; gap:10px; }
+  .editor-muted { color:#7F8999; font-size:10px; }
+  .editor-small { color:#858F9F; font-size:9px; }
+  .editor-button { min-height:37px; display:inline-flex; align-items:center; justify-content:center; gap:8px; padding:0 13px; border:1px solid #303A49; border-radius:9px; color:#DDE2EA; background:#1B222D; font-size:10px; font-weight:700; cursor:pointer; }
+  .editor-button:hover { border-color:#526071; background:#232C39; }
+  .editor-button.primary { min-height:44px; border:0; color:#201607; background:linear-gradient(135deg,#F8B72E,#F59E0B); box-shadow:0 9px 25px #F59E0B28; }
+  .editor-button:disabled { opacity:.5; cursor:not-allowed; }
+  .scene-upload { display:grid; gap:13px; }
+  .scene-drop { min-height:110px; display:grid; place-items:center; gap:6px; padding:17px; border:1px dashed #465264; border-radius:12px; color:#AAB3C1; background:#11161F; text-align:center; cursor:pointer; }
+  .scene-drop:hover { border-color:#A96B12; background:#171A20; }
+  .scene-drop strong { color:#E1E5EC; font-size:11px; }
+  .scene-drop span { color:#7F8999; font-size:9px; }
+  .scene-drop .upload-icon { color:#F59E0B; font-size:22px; }
+  .scene-drop input { max-width:100%; color:#929BAA; font-size:10px; }
+  .import-preview { padding:13px; border:1px solid #2B3442; border-radius:11px; background:#10141C; }
+  .import-preview-heading { margin-bottom:10px; color:#DDE2EA; font-size:10px; font-weight:700; }
+  .import-preview-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(100px,1fr)); gap:8px; }
+  .import-preview-item { min-width:0; display:grid; gap:5px; color:#CDD2DB; font-size:9px; }
+  .import-preview-image { aspect-ratio:1.25; display:grid; place-items:center; overflow:hidden; border-radius:7px; color:#F59E0B; background:#1B222D; }
+  .import-preview-image img,.import-preview-image video { width:100%; height:100%; object-fit:cover; }
+  .import-preview-item b,.import-preview-item small { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .import-preview-item small { color:#7F8999; }
+  .scene-list { display:grid; gap:12px; padding:14px; }
+  .scene-card { min-width:0; overflow:hidden; border:1px solid #293241; border-radius:12px; background:#11161F; }
+  .scene-card.dragging { opacity:.55; border-color:#F59E0B; }
+  .scene-preview { height:190px; display:grid; place-items:center; overflow:hidden; background:#0D1118; }
+  .scene-preview img,.scene-preview video { width:100%; height:100%; object-fit:contain; }
+  .scene-empty { display:grid; place-items:center; gap:5px; color:#F59E0B; font-size:23px; }
+  .scene-empty small { color:#818B9B; font-size:9px; }
+  .scene-meta { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:11px 13px; border-bottom:1px solid #252D39; }
+  .scene-meta-title { display:flex; align-items:center; gap:8px; min-width:0; color:#E1E5EC; font-size:10px; font-weight:700; }
+  .scene-grip { color:#7F8999; cursor:grab; font-size:17px; }
+  .scene-badge { padding:4px 7px; border-radius:99px; color:#B8C2D0; background:#202733; font-size:8px; white-space:nowrap; }
+  .scene-delete { border:0; color:#929BAA; background:none; font-size:17px; cursor:pointer; }
+  .scene-delete:hover { color:#F07D77; }
+  .scene-editor-fields { display:grid; gap:12px; padding:13px; }
+  .scene-editor-fields .editor-textarea { min-height:95px; }
+  .scene-scene-settings { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:end; gap:10px; }
+  .scene-save-row { display:flex; justify-content:space-between; align-items:center; gap:10px; }
+  .add-scene-row { display:flex; align-items:center; gap:10px; padding:0 14px 14px; }
+  .voice-option { display:flex; align-items:center; gap:9px; margin-bottom:11px; padding:10px; border:1px solid #303948; border-radius:10px; background:#11161F; }
+  .voice-avatar-premium { width:33px; height:33px; display:grid; place-items:center; border-radius:10px; color:#FFC65D; background:#302313; font-size:15px; }
+  .voice-option div { display:grid; gap:2px; }
+  .voice-option b { color:#DCE1E9; font-size:10px; }
+  .voice-option small { color:#7C8797; font-size:9px; }
+  .settings-stack { display:grid; gap:16px; }
+  .setting-check { display:flex; align-items:center; gap:9px; color:#D5DAE3; font-size:10px; }
+  .setting-check input { accent-color:#F59E0B; }
+  .job-status { margin-top:12px; padding:11px 12px; border:1px solid #293241; border-radius:9px; color:#BDC6D3; background:#11161F; font-size:10px; }
+  .job-status.success { color:#BFE5CB; background:#16271F; }
+  .job-status.error { color:#F0AAA3; background:#2A1B1B; }
+  #jobProgress { width:100%; height:7px; margin-top:10px; accent-color:#F59E0B; }
+  .progress-details { display:flex; justify-content:space-between; gap:8px; margin-top:6px; color:#8993A3; font-size:9px; }
+  .full-export { display:grid; gap:8px; margin-top:13px; padding-top:13px; border-top:1px solid #293241; }
+  .full-export label { color:#DDE2EA; font-size:10px; font-weight:700; }
+  .full-export audio,.full-export video { width:100%; }
+  .editor-actions { display:grid; gap:9px; }
+  .editor-alert { margin:0; color:#7F8999; font-size:9px; line-height:1.55; }
+  .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+  @media(max-width:1000px) { .editor-layout { grid-template-columns:minmax(0,1fr); } .editor-right { grid-row:1; } }
+  @media(max-width:620px) { .scene-preview { height:150px; } .scene-scene-settings { grid-template-columns:1fr; } .editor-toolbar-row,.scene-save-row { align-items:flex-start; flex-direction:column; } }
+</style>
 <section class="premium-editor">
   <div class="editor-toolbar">
-    <div class="editor-context"><strong>Éditeur de narration</strong><span>Prépare ta scène, choisis une voix et lance la génération.</span></div>
-    <span class="editor-chip"><i aria-hidden="true"></i> Brouillon enregistré</span>
+    <div class="editor-context"><strong>Éditeur de narration</strong><span>Prépare tes scènes, choisis une voix et lance le rendu.</span></div>
+    <span class="editor-chip"><i aria-hidden="true"></i> Projet · {{ project.get_status_display }}</span>
   </div>
-  <div class="editor-layout">
+
+  <section class="premium-card" aria-labelledby="importTitle">
+    <div class="premium-card-head"><h2 id="importTitle">IMPORTER DES SCÈNES</h2><span>Images, PDF ou clips vidéo</span></div>
+    <div class="editor-card-body">
+      <form method="post" action="{% url 'import_scenes' project.id %}" enctype="multipart/form-data" class="scene-upload">
+        {% csrf_token %}
+        <label class="scene-drop" for="sceneFiles">
+          <span class="upload-icon" aria-hidden="true">▧</span>
+          <strong>Ajouter des images, un PDF ou des vidéos</strong>
+          <span>JPG, PNG, PDF, MP4, MOV, M4V ou WebM · jusqu’à 30 scènes</span>
+          <input id="sceneFiles" type="file" name="files" accept="image/jpeg,image/png,application/pdf,video/mp4,video/quicktime,video/webm,.jpg,.jpeg,.png,.pdf,.mp4,.mov,.m4v,.webm" multiple required>
+        </label>
+        <div class="import-preview" id="importPreview" aria-live="polite" hidden>
+          <div class="import-preview-heading" id="importPreviewHeading"></div>
+          <div class="import-preview-grid" id="importPreviewGrid"></div>
+          <p class="editor-small">Vérifie les fichiers avant de les importer dans ce projet.</p>
+        </div>
+        <div class="editor-toolbar-row">
+          <span class="editor-muted">Un projet contient soit des images/PDF, soit des clips vidéo.</span>
+          <button class="editor-button" type="submit">Importer les fichiers ↓</button>
+        </div>
+      </form>
+    </div>
+  </section>
+
+  <div class="editor-layout" style="margin-top:16px">
     <div class="editor-left">
-      <section class="premium-card" aria-labelledby="scenePreviewTitle">
-        <div class="premium-card-head"><h2 id="scenePreviewTitle">APERÇU DE LA SCÈNE</h2><span>Scène 01 · image fixe</span></div>
-        <div class="canvas-wrap">
-          <div class="canvas-topline"><b>Image de couverture</b><span>Vertical · 9:16</span></div>
-          <div class="canvas-preview">
-            <svg viewBox="0 0 720 560" role="img" aria-label="Illustration de paysage au coucher du soleil">
-              <defs>
-                <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#373044"/><stop offset=".62" stop-color="#B76B51"/><stop offset="1" stop-color="#E7A95E"/></linearGradient>
-                <linearGradient id="hill" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#555047"/><stop offset="1" stop-color="#252A2B"/></linearGradient>
-              </defs>
-              <rect width="720" height="560" rx="18" fill="url(#sky)"/>
-              <circle cx="492" cy="193" r="72" fill="#F7C878" opacity=".92"/>
-              <path d="M0 345Q125 275 228 330T446 310T720 285V560H0Z" fill="#75604F"/>
-              <path d="M0 405Q156 330 286 390T535 355T720 375V560H0Z" fill="url(#hill)"/>
-              <path d="M0 474Q145 420 287 462T540 432T720 450V560H0Z" fill="#1B2223"/>
-              <path d="M96 393l27-68 25 68m-36-25h22m-13 25v74m434-80 23-62 27 62m-39-21h24m-11 21v63" fill="none" stroke="#252A28" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
-              <path d="M0 0h720v560H0Z" fill="none" stroke="#FFFFFF" stroke-opacity=".07" stroke-width="2"/>
-            </svg>
-            <span class="canvas-overlay">Aperçu de la scène</span>
-          </div>
+      <section class="premium-card" aria-labelledby="scenesTitle">
+        <div class="premium-card-head"><h2 id="scenesTitle">{% if can_assemble_clips %}CLIPS À ASSEMBLER{% else %}SCÈNES DE LA NARRATION{% endif %}</h2><span>Glisse les cartes pour les réordonner</span></div>
+        <div class="scene-list" id="segmentList" data-reorder-url="{% url 'reorder_segments' project.id %}">
+          {% for segment in segments %}
+          <article class="scene-card segment-card" id="segment-{{ segment.id }}" data-id="{{ segment.id }}" draggable="true">
+            <div class="scene-preview">
+              {% if segment.video_clip %}
+                <video controls muted preload="metadata" src="{{ segment.video_clip.url }}" aria-label="Aperçu du clip {{ forloop.counter }}"></video>
+              {% elif segment.image %}
+                <img src="{{ segment.image.url }}" alt="Aperçu de la scène {{ forloop.counter }}">
+              {% else %}
+                <div class="scene-empty">＋<small>Ajoute une image, un PDF ou une vidéo</small></div>
+              {% endif %}
+            </div>
+            <div class="scene-meta">
+              <div class="scene-meta-title"><span class="scene-grip" title="Glisser pour réordonner">⠿</span><span>{{ forloop.counter|stringformat:"02d" }}</span><span>{% if segment.video_clip %}Clip{% else %}Scène{% endif %}</span></div>
+              <div style="display:flex;align-items:center;gap:8px">
+                <span class="scene-badge">{% if segment.video_clip %}Son d’origine{% elif segment.ready_for_voice %}Audio prêt · {{ segment.duration_seconds|floatformat:1 }} s{% else %}À préparer{% endif %}</span>
+                <form method="post" action="{% url 'delete_segment' project.id segment.id %}" onsubmit="return confirm('Supprimer cette scène ?')">
+                  {% csrf_token %}
+                  <button class="scene-delete" type="submit" title="Supprimer la scène" aria-label="Supprimer la scène">×</button>
+                </form>
+              </div>
+            </div>
+            {% if not segment.video_clip %}
+            <form method="post" action="{% url 'save_segment' project.id segment.id %}" class="segment-form scene-editor-fields">
+              {% csrf_token %}
+              <label class="setting-label" for="text-{{ segment.id }}">Texte de la scène</label>
+              <textarea class="editor-textarea" id="text-{{ segment.id }}" name="text" maxlength="12000" rows="4" placeholder="Écris ce que la voix dira pendant cette scène…">{{ segment.text }}</textarea>
+              <div class="scene-scene-settings">
+                <label class="setting-label" for="motion-{{ segment.id }}">Mouvement de l’image
+                  <select class="editor-select" id="motion-{{ segment.id }}" name="motion">
+                    {% for value,label in motions %}<option value="{{ value }}" {% if segment.motion == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
+                  </select>
+                </label>
+                <span class="editor-small"><span class="word-count">{{ segment.text|wordcount }}</span> mots · env. <span class="duration-estimate">0</span> s</span>
+              </div>
+              <div class="scene-save-row">
+                <span class="editor-small">Le texte modifié invalidera l’export existant.</span>
+                <button class="editor-button" type="submit">Enregistrer la scène</button>
+              </div>
+            </form>
+            {% else %}
+            <p class="editor-small" style="padding:0 13px 13px">Clip vidéo avec son d’origine. Les clips sont assemblés selon l’ordre ci-dessus.</p>
+            {% endif %}
+          </article>
+          {% empty %}
+          <p class="editor-muted">Aucune scène pour le moment. Importe des images, un PDF ou des clips vidéo ci-dessus.</p>
+          {% endfor %}
         </div>
-        <div class="script-wrap">
-          <label class="field-label" for="sceneText">Texte de la narration <small>Un ton naturel et posé fonctionne bien.</small></label>
-          <textarea class="premium-textarea" id="sceneText" placeholder="Écris ici le texte qui sera raconté dans cette scène…"></textarea>
-          <div class="script-foot"><span>Les mots seront synchronisés avec la narration.</span><span>0 mot · environ 0 s</span></div>
-        </div>
+        {% if not has_video_clips %}
+        <form method="post" action="{% url 'add_segment' project.id %}" class="add-scene-row">
+          {% csrf_token %}
+          <button class="editor-button" type="submit">＋ Ajouter une scène</button>
+          <span class="editor-muted">Ajoute ensuite son image et son texte.</span>
+        </form>
+        {% endif %}
       </section>
     </div>
+
     <aside class="editor-right" aria-label="Réglages de la narration">
+      {% if not can_assemble_clips %}
       <section class="premium-card">
-        <div class="premium-card-head"><h2>RÉGLAGES DE LA SCÈNE</h2><span>Personnalisation</span></div>
-        <div class="settings-body">
-          <div class="setting-group">
-            <label class="setting-label" for="voicePreset">Voix de narration</label>
-            <div class="voice-option"><span class="voice-avatar-premium" aria-hidden="true">♫</span><div><b>Voix principale</b><small>Échantillon local · Français</small></div></div>
-            <select class="setting-select" id="voicePreset"><option>Choisir une voix enregistrée…</option></select>
+        <div class="premium-card-head"><h2>VOIX DE NARRATION</h2><span>XTTS v2</span></div>
+        <div class="editor-card-body">
+          {% if voices %}
+          <form method="post" action="{% url 'set_project_voice' project.id %}" class="editor-form-stack">
+            {% csrf_token %}
+            <label class="setting-label" for="projectVoice">Sélectionner une voix autorisée</label>
+            <select class="editor-select" id="projectVoice" name="voice_id" required>
+              <option value="">Choisir une voix…</option>
+              {% for voice in voices %}<option value="{{ voice.id }}" {% if project.voice_id == voice.id %}selected{% endif %}>{{ voice.name }} · {{ voice.get_category_display }}</option>{% endfor %}
+            </select>
+            <button class="editor-button" type="submit">Enregistrer la voix</button>
+          </form>
+          {% else %}
+          <p class="editor-muted">Aucune voix disponible. Ajoute d’abord un échantillon dans la bibliothèque.</p>
+          {% endif %}
+          {% if project.voice %}
+          <div class="voice-option" style="margin:14px 0 0">
+            <span class="voice-avatar-premium" aria-hidden="true">♫</span>
+            <div><b>{{ project.voice.name }}</b><small>{{ project.voice.get_category_display }} · autorisation confirmée</small></div>
+            <audio controls preload="none" src="{{ project.voice.sample.url }}" style="width:100%;grid-column:1/-1"></audio>
           </div>
-          <div class="setting-group">
-            <label class="setting-label" for="videoFormat">Format de sortie</label>
-            <select class="setting-select" id="videoFormat"><option>Vertical · 9:16</option><option>Paysage · 16:9</option></select>
+          {% endif %}
+        </div>
+      </section>
+      {% endif %}
+
+      <section class="premium-card">
+        <div class="premium-card-head"><h2>FORMAT ET SOUS-TITRES</h2><span>Réglages vidéo</span></div>
+        <div class="editor-card-body">
+          <form method="post" action="{% url 'save_video_options' project.id %}" id="videoOptionsForm" class="editor-form-stack">
+            {% csrf_token %}
+            <label class="setting-label" for="videoFormat">Format de sortie
+              <select class="editor-select" id="videoFormat" name="video_format">
+                {% for value,label in video_formats %}<option value="{{ value }}" {% if project.video_format == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
+              </select>
+            </label>
+            {% if not can_assemble_clips %}
+            <label class="setting-check"><input type="checkbox" name="subtitles_enabled" {% if project.subtitles_enabled %}checked{% endif %}><span>Sous-titres incrustés et synchronisés</span></label>
+            {% else %}
+            <p class="editor-muted">L’assemblage conserve le son d’origine des clips.</p>
+            {% endif %}
+            <button class="editor-button" type="submit">Enregistrer les réglages</button>
+          </form>
+        </div>
+      </section>
+
+      <section class="premium-card export-card">
+        <div class="premium-card-head"><h2>GÉNÉRER L’EXPORT</h2><span>{% if can_assemble_clips %}Assemblage{% else %}Narration{% endif %}</span></div>
+        <div class="editor-card-body">
+          <div class="editor-actions">
+            {% if can_assemble_clips %}
+            <p class="editor-alert">Les clips seront assemblés dans l’ordre affiché, avec leur son d’origine. Aucun moteur vocal ne sera lancé.</p>
+            <form method="post" action="{% url 'assemble_videos' project.id %}" id="assembleForm">
+              {% csrf_token %}
+              <button class="editor-button primary" type="submit" id="assembleButton" {% if project.status == 'processing' or project.status == 'queued' %}disabled{% endif %}>
+                {% if project.status == 'queued' or project.status == 'processing' %}Dans la file…{% else %}Assembler les clips vidéo ✦{% endif %}
+              </button>
+            </form>
+            {% else %}
+            <p class="editor-alert">Les textes et réglages modifiés sont enregistrés avant l’ajout du projet à la file.</p>
+            <form method="post" action="{% url 'prepare' project.id %}" id="prepareForm">
+              {% csrf_token %}
+              <input type="hidden" name="voice_id" value="{{ project.voice_id|default:'' }}">
+              <button class="editor-button primary" type="submit" id="prepareButton" {% if not voices or project.status == 'processing' or project.status == 'queued' %}disabled{% endif %}>
+                {% if project.status == 'queued' or project.status == 'processing' %}Dans la file…{% elif has_scenes %}Générer la vidéo MP4 ✦{% else %}Générer la narration audio ✦{% endif %}
+              </button>
+            </form>
+            {% endif %}
+            <p class="editor-alert">Le worker doit être lancé avec <code>python manage.py run_studio</code>.</p>
           </div>
-          <div class="setting-group">
-            <span class="setting-label">Mouvement de l’image</span>
-            <div class="motion-options" role="group" aria-label="Mouvement de l’image">
-              <button class="motion-choice selected" type="button"><span>▧</span>Fixe</button>
-              <button class="motion-choice" type="button"><span>↗</span>Zoom doux</button>
-              <button class="motion-choice" type="button"><span>⇢</span>Panoramique</button>
+          <div class="job-status {% if project.status == 'error' %}error{% elif project.status == 'ready' %}success{% endif %}" id="jobStatus" aria-live="polite">
+            {% if project.status == 'ready' %}{{ project.status_message|default:"Export prêt." }}{% elif project.status == 'processing' or project.status == 'queued' %}{{ project.status_message }}{% elif project.status == 'error' %}{{ project.error_message }}{% else %}Le traitement démarre après validation.{% endif %}
+          </div>
+          <progress id="jobProgress" max="100" value="{{ project.progress_percent }}" {% if project.status != 'processing' %}hidden{% endif %}></progress>
+          <div id="progressDetails" class="progress-details" {% if project.status != 'processing' %}hidden{% endif %}>
+            <span id="currentSegment">Scène {{ project.current_segment }}/{{ project.total_segments }}</span>
+            <span id="elapsedTime">00:00 écoulées</span>
+          </div>
+          <div class="full-export video-export" id="videoExport" {% if not project.video_file %}hidden{% endif %}>
+            <label>Vidéo MP4 · {{ project.get_video_format_display }}</label>
+            <video id="projectVideo" controls preload="metadata" {% if project.video_file %}src="{{ project.video_file.url }}"{% endif %}></video>
+            <a class="editor-button" id="videoDownload" {% if project.video_file %}href="{{ project.video_file.url }}"{% endif %} download="{{ project.title|slugify }}.mp4">Télécharger le MP4 ↓</a>
+          </div>
+          <div class="full-export" id="fullExport" {% if not project.full_audio %}hidden{% endif %}>
+            <label id="fullAudioLabel">{% if project.full_audio %}Narration complète · {{ project.duration_seconds|floatformat:1 }} s{% else %}Narration complète{% endif %}</label>
+            <audio id="fullAudio" controls preload="metadata" {% if project.full_audio %}src="{{ project.full_audio.url }}"{% endif %}></audio>
+            <div class="editor-toolbar-row">
+              <a class="editor-button" id="fullAudioDownload" {% if project.full_audio %}href="{{ project.full_audio.url }}"{% endif %} download="{{ project.title|slugify }}.wav">Télécharger le WAV ↓</a>
+              <a class="editor-button" id="subtitleDownload" {% if project.subtitles %}href="{{ project.subtitles.url }}"{% endif %} download="{{ project.title|slugify }}.srt">Télécharger le SRT ↓</a>
             </div>
           </div>
-          <div class="toggle-row"><div><b>Sous-titres synchronisés</b><small>Incrustés dans la vidéo finale</small></div><button class="premium-switch" type="button" aria-label="Sous-titres activés" aria-pressed="true"></button></div>
-          <button class="generate-button" type="button">Générer la narration <span aria-hidden="true">✦</span></button>
-          <p class="generate-note">Le rendu et les fichiers restent sur cet appareil.</p>
         </div>
       </section>
     </aside>
