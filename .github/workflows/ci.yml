@@ -25,9 +25,6 @@ jobs:
       - name: Django system check
         run: python manage.py check --fail-level WARNING
         env: &django-env
-          SECRET_KEY: "test-secret-key-for-ci-not-a-real-one"
-          DEBUG: "False"
-          ALLOWED_HOSTS: "localhost,127.0.0.1,testserver"
           DJANGO_SECRET_KEY: "test-secret-key-for-ci-not-a-real-one"
           DJANGO_DEBUG: "0"
 
