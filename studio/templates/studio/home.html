@@ -2,18 +2,159 @@
 {% block title %}Petit Studio Voix · Bibliothèque{% endblock %}
 {% block heading %}Ta bibliothèque vocale{% endblock %}
 {% block content %}
-<section class="hero-card"><div><span class="eyebrow">TES IMAGES. TA VOIX.</span><h2>Transforme tes idées<br>en vidéos racontées.</h2><p>Importe des images, écris un texte et crée une vidéo MP4 narrée en local.</p></div><a class="button button-primary" href="#new-project">＋ Nouveau projet <span>→</span></a></section>
-<div class="stat-row"><div class="stat-card"><span class="stat-icon">♫</span><div><b>{{ voice_count }}</b><small>voix enregistrées</small></div></div><div class="stat-card"><span class="stat-icon peach">▤</span><div><b>{{ project_count }}</b><small>projets vidéo/audio</small></div></div><div class="stat-card"><span class="stat-icon green">⌂</span><div><b>100 %</b><small>traitement local</small></div></div></div>
-<section class="card" id="voices"><div class="section-title"><div><span class="step-number">01</span><h2>Bibliothèque de voix</h2></div><span class="section-hint">Tes échantillons restent privés sur cet appareil</span></div>
-  <form class="voice-filters" method="get" action="{% url 'home' %}#voices"><label class="search-box"><span>⌕</span><input type="search" name="q" value="{{ query }}" placeholder="Rechercher une voix…" aria-label="Rechercher une voix"></label><label class="filter-select"><span>Catégorie</span><select name="category" onchange="this.form.submit()"><option value="">Toutes les catégories</option>{% for value,label in categories %}<option value="{{ value }}" {% if selected_category == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label><button class="button button-secondary button-small">Filtrer</button></form>
-  <div class="voice-grid">
-  {% for voice in voices %}
-    <article class="voice-card"><div class="voice-card-top"><div class="voice-avatar">♫</div><div class="voice-meta"><h3>{{ voice.name }}</h3><span class="category-tag {{ voice.category }}">{{ voice.get_category_display }}</span></div><span class="consent-dot" title="Autorisation confirmée">✓</span></div><audio controls preload="none" src="{{ voice.sample.url }}"></audio><details class="voice-edit"><summary>Modifier la voix</summary><form method="post" action="{% url 'edit_voice' voice.id %}" class="voice-edit-form">{% csrf_token %}<label>Nom<input class="text-input" name="name" value="{{ voice.name }}" maxlength="80" required></label><label>Catégorie<select class="text-input" name="category">{% for value,label in categories %}<option value="{{ value }}" {% if voice.category == value %}selected{% endif %}>{{ label }}</option>{% endfor %}</select></label><button class="button button-secondary button-small">Enregistrer</button></form><form method="post" action="{% url 'delete_voice' voice.id %}" onsubmit="return confirm('Supprimer définitivement la voix « {{ voice.name|escapejs }} » et son échantillon ?')">{% csrf_token %}<input type="hidden" name="confirm" value="yes"><button class="text-button danger">Supprimer la voix</button></form></details></article>
-  {% empty %}<div class="empty-state"><span>♫</span><h3>Aucune voix trouvée</h3><p>Ajoute une voix ou modifie tes filtres.</p></div>{% endfor %}
+<div class="home-page">
+  <section class="home-hero-premium">
+    <div class="home-hero-copy">
+      <span class="home-eyebrow">TES IMAGES. TA VOIX.</span>
+      <h2>Transforme tes idées<br>en vidéos racontées.</h2>
+      <p>Importe tes images, écris ton texte et crée une vidéo narrée directement sur cet appareil.</p>
+    </div>
+    <a class="home-hero-action" href="#new-project"><span aria-hidden="true">＋</span> Nouveau projet <span aria-hidden="true">→</span></a>
+  </section>
+
+  <div class="home-stat-grid" aria-label="Résumé de ta bibliothèque">
+    <div class="home-stat-card"><span class="home-stat-icon">♫</span><div><b>{{ voice_count }}</b><small>voix enregistrées</small></div></div>
+    <div class="home-stat-card"><span class="home-stat-icon">▤</span><div><b>{{ project_count }}</b><small>projets vidéo ou audio</small></div></div>
+    <div class="home-stat-card"><span class="home-stat-icon">⌂</span><div><b>100 %</b><small>traitement local</small></div></div>
   </div>
-  <details class="add-voice" id="add-voice"><summary>＋ Ajouter ou enregistrer une voix</summary><form action="{% url 'create_voice' %}" method="post" enctype="multipart/form-data" class="voice-form" id="voiceForm">{% csrf_token %}<div class="two-fields"><label>Nom de la voix<input required class="text-input" type="text" name="name" maxlength="80" placeholder="Ex. Ma voix"></label><label>Catégorie<select class="text-input" name="category"><option value="shiba">Shiba</option><option value="homme">Homme</option><option value="femme">Femme</option><option value="autre" selected>Autre</option></select></label></div><label class="file-drop"><span class="upload-icon">↑</span><strong>Choisir un échantillon audio</strong><span>WAV ou MP3 · 25 Mo maximum</span><input type="file" name="sample" id="sampleInput" accept="audio/wav,audio/mpeg,audio/mp3,.wav,.mp3,.webm,.m4a,.ogg" required></label><div class="record-controls"><button type="button" id="recordButton" class="button button-secondary button-small">● Enregistrer avec le micro</button><span id="recordStatus" class="muted small">Écoute l’échantillon avant de l’enregistrer.</span></div><audio id="samplePreview" class="sample-preview" controls hidden></audio><label class="consent"><input type="checkbox" name="voice_consent" required><span>Je confirme être autorisé·e à cloner et utiliser cette voix.</span></label><button class="button button-primary button-small" type="submit">Enregistrer la voix</button></form></details>
-</section>
-<section class="section-projects" id="projects"><div class="section-title"><div><span class="step-number">02</span><h2>Mes projets</h2></div><span class="section-hint">Reprends un projet sauvegardé quand tu veux</span></div><div class="project-grid">
-{% for item in projects %}<a class="project-tile" href="{% url 'project_detail' item.id %}"><span class="project-tile-icon">{% if item.status == 'ready' %}▶{% else %}♫{% endif %}</span><span class="project-tile-info"><b>{{ item.title }}</b><small>{{ item.segments.count }} segment{{ item.segments.count|pluralize }} · {{ item.updated_at|date:"d/m/Y à H:i" }}</small></span><span class="status-tag {{ item.status }}">{{ item.get_status_display }}</span><span class="arrow">→</span></a>{% empty %}<div class="empty-projects"><p>Tu n’as pas encore créé de narration.</p></div>{% endfor %}
-</div><form action="{% url 'create_project' %}" method="post" id="new-project" class="create-project-form">{% csrf_token %}<label for="projectTitle">Créer un projet vidéo ou audio</label><div><input class="text-input" id="projectTitle" name="title" maxlength="120" placeholder="Ex. Message de motivation" required><button class="button button-primary">Créer le projet <span>→</span></button></div></form></section>
+
+  <section class="home-section home-voices-section" id="voices" aria-labelledby="voicesTitle">
+    <div class="home-section-heading">
+      <div>
+        <span class="home-eyebrow">TA BIBLIOTHÈQUE</span>
+        <h2 id="voicesTitle">Bibliothèque de voix</h2>
+        <p>Tes échantillons restent privés sur cet appareil.</p>
+      </div>
+      <span class="home-section-count">{{ voice_count }} voix</span>
+    </div>
+
+    <form class="home-voice-filters" method="get" action="{% url 'home' %}#voices">
+      <label class="home-search-field">
+        <span aria-hidden="true">⌕</span>
+        <input type="search" name="q" value="{{ query }}" placeholder="Rechercher une voix…" aria-label="Rechercher une voix">
+      </label>
+      <label class="home-category-field">
+        <span>Catégorie</span>
+        <select name="category" onchange="this.form.submit()">
+          <option value="">Toutes les catégories</option>
+          {% for value,label in categories %}<option value="{{ value }}" {% if selected_category == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
+        </select>
+      </label>
+      <button class="home-button home-button-secondary" type="submit">Filtrer</button>
+    </form>
+
+    <div class="home-voice-grid">
+      {% for voice in voices %}
+      <article class="home-voice-card">
+        <div class="home-voice-card-top">
+          <span class="home-voice-avatar" aria-hidden="true">♫</span>
+          <div class="home-voice-meta">
+            <h3>{{ voice.name }}</h3>
+            <span class="home-category-badge {{ voice.category }}">{{ voice.get_category_display }}</span>
+          </div>
+          <span class="home-consent-mark" title="Autorisation confirmée" aria-label="Autorisation confirmée">✓</span>
+        </div>
+        <audio class="home-audio-player" controls preload="none" src="{{ voice.sample.url }}">Ton navigateur ne peut pas lire cet échantillon audio.</audio>
+        <details class="home-voice-details">
+          <summary>Modifier la voix <span aria-hidden="true">⌄</span></summary>
+          <form method="post" action="{% url 'edit_voice' voice.id %}" class="home-edit-voice-form">
+            {% csrf_token %}
+            <label>Nom de la voix<input class="home-control" type="text" name="name" value="{{ voice.name }}" maxlength="80" required></label>
+            <label>Catégorie
+              <select class="home-control" name="category">
+                {% for value,label in categories %}<option value="{{ value }}" {% if voice.category == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
+              </select>
+            </label>
+            <button class="home-button home-button-secondary" type="submit">Enregistrer</button>
+          </form>
+          <form method="post" action="{% url 'delete_voice' voice.id %}" onsubmit="return confirm('Supprimer définitivement la voix « {{ voice.name|escapejs }} » et son échantillon ?')">
+            {% csrf_token %}
+            <input type="hidden" name="confirm" value="yes">
+            <button class="home-delete-button" type="submit">Supprimer la voix</button>
+          </form>
+        </details>
+      </article>
+      {% empty %}
+      <div class="home-empty-state">
+        <span aria-hidden="true">♫</span>
+        <h3>Aucune voix trouvée</h3>
+        <p>Ajoute une voix ou modifie tes critères de recherche.</p>
+      </div>
+      {% endfor %}
+    </div>
+
+    <details class="home-add-voice" id="add-voice">
+      <summary><span class="home-add-icon" aria-hidden="true">＋</span><span><b>Ajouter ou enregistrer une voix</b><small>Importe un échantillon ou utilise ton microphone.</small></span><span class="home-disclosure-icon" aria-hidden="true">⌄</span></summary>
+      <form action="{% url 'create_voice' %}" method="post" enctype="multipart/form-data" class="home-voice-form" id="voiceForm">
+        {% csrf_token %}
+        <div class="home-form-fields">
+          <label>Nom de la voix
+            <input required class="home-control" type="text" name="name" maxlength="80" placeholder="Ex. Ma voix">
+          </label>
+          <label>Catégorie
+            <select class="home-control" name="category">
+              {% for value,label in categories %}<option value="{{ value }}" {% if value == "autre" %}selected{% endif %}>{{ label }}</option>{% endfor %}
+            </select>
+          </label>
+        </div>
+        <label class="home-audio-upload">
+          <span class="home-upload-icon" aria-hidden="true">↑</span>
+          <strong>Choisir un échantillon audio</strong>
+          <span>WAV ou MP3 · 25 Mo maximum</span>
+          <input type="file" name="sample" id="sampleInput" accept="audio/wav,audio/mpeg,audio/mp3,.wav,.mp3,.webm,.m4a,.ogg" required>
+        </label>
+        <div class="home-record-controls">
+          <button type="button" id="recordButton" class="home-button home-button-secondary">● Enregistrer avec le micro</button>
+          <span id="recordStatus" class="home-helper-text">Écoute l’échantillon avant de l’enregistrer.</span>
+        </div>
+        <audio id="samplePreview" class="home-sample-preview" controls hidden></audio>
+        <label class="home-consent">
+          <input type="checkbox" name="voice_consent" required>
+          <span>Je confirme être autorisé·e à cloner et utiliser cette voix.</span>
+        </label>
+        <button class="home-button home-button-primary" type="submit">Enregistrer la voix <span aria-hidden="true">→</span></button>
+      </form>
+    </details>
+  </section>
+
+  <section class="home-section home-projects-section" id="projects" aria-labelledby="projectsTitle">
+    <div class="home-section-heading">
+      <div>
+        <span class="home-eyebrow">TES CRÉATIONS</span>
+        <h2 id="projectsTitle">Mes projets</h2>
+        <p>Reprends un projet sauvegardé ou démarre une nouvelle narration.</p>
+      </div>
+      <span class="home-section-count">{{ project_count }} projets</span>
+    </div>
+
+    <div class="home-project-grid">
+      {% for item in projects %}
+      <article class="home-project-card">
+        <div class="home-project-card-top">
+          <span class="home-project-icon" aria-hidden="true">{% if item.status == 'ready' %}▶{% else %}♫{% endif %}</span>
+          <span class="home-status-badge {{ item.status }}">{{ item.get_status_display }}</span>
+        </div>
+        <h3>{{ item.title }}</h3>
+        <p class="home-project-meta">{{ item.segments.count }} segment{{ item.segments.count|pluralize }} <span aria-hidden="true">·</span> Modifié le {{ item.updated_at|date:"d/m/Y à H:i" }}</p>
+        <a class="home-project-open" href="{% url 'project_detail' item.id %}">Ouvrir l’éditeur <span aria-hidden="true">→</span></a>
+      </article>
+      {% empty %}
+      <div class="home-empty-state home-project-empty">
+        <span aria-hidden="true">▤</span>
+        <h3>Pas encore de projet</h3>
+        <p>Crée ton premier projet pour commencer une narration.</p>
+      </div>
+      {% endfor %}
+    </div>
+
+    <form action="{% url 'create_project' %}" method="post" id="new-project" class="home-create-project">
+      {% csrf_token %}
+      <label for="projectTitle">Créer un projet vidéo ou audio</label>
+      <div class="home-create-project-fields">
+        <input class="home-control" id="projectTitle" name="title" maxlength="120" placeholder="Ex. Message de motivation" required>
+        <button class="home-button home-button-primary" type="submit">Créer le projet <span aria-hidden="true">→</span></button>
+      </div>
+    </form>
+  </section>
+</div>
 {% endblock %}
