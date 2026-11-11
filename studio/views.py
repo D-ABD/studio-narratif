@@ -215,7 +215,7 @@ def project_detail(request, project_id):
             )
         except (OSError, ValueError):
             segment.ready_for_voice = False
-    return render(request, "studio/project.html", {
+    return render(request, "studio/project_editor.html", {
         "project": project,
         "projects": NarrationProject.objects.all()[:30],
         "segments": segments,
