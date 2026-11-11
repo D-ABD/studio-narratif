@@ -1,0 +1,86 @@
+name: Rollback to tag
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag cible (ex: v0.1.0-lot1)'
+        required: true
+        type: string
+      reason:
+        description: 'Raison du rollback (optionnel)'
+        required: false
+        type: string
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Vérifier que le tag existe
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if ! git rev-parse --verify "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "❌ Le tag ${TAG} n'existe pas."
+            echo "Tags disponibles :"
+            git tag -l
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "refs/tags/${TAG}" HEAD; then
+            echo "❌ Le tag ${TAG} n'est pas un ancêtre de main. Rollback refusé."
+            exit 1
+          fi
+          echo "✅ Tag ${TAG} trouvé sur l'historique de main."
+
+      - name: Revert vers le tag
+        env:
+          TAG: ${{ inputs.tag }}
+          REASON: ${{ inputs.reason }}
+        run: |
+          set -euo pipefail
+          if [ -z "${REASON:-}" ]; then REASON="Rollback manuel"; fi
+
+          if git revert --no-commit "${TAG}..HEAD"; then
+            echo "Revert appliqué."
+          else
+            git revert --abort || true
+            echo "❌ Conflits lors du revert. Rollback annulé, rien n'a été poussé."
+            exit 1
+          fi
+
+          if git diff --cached --quiet; then
+            echo "Rien à revert : main est déjà au niveau du tag ${TAG}."
+            exit 0
+          fi
+
+          git commit -m "Rollback vers ${TAG} — ${REASON}"
+          git push origin main
+
+      - name: Résumé
+        if: always()
+        env:
+          TAG: ${{ inputs.tag }}
+          REASON: ${{ inputs.reason }}
+        run: |
+          {
+            echo "### Rollback vers \`${TAG}\`"
+            echo ""
+            echo "Raison : ${REASON:-Rollback manuel}"
+            echo ""
+            echo "Lance \`git sync\` en local pour récupérer."
+          } >> $GITHUB_STEP_SUMMARY

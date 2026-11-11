@@ -11,3 +11,24 @@ media/*
 !media/.gitkeep
 staticfiles/
 *.log
+
+# Python
+*.egg-info/
+.python-version
+
+# Django
+db.sqlite3
+db.sqlite3-journal
+local_settings.py
+/media/
+
+# Secrets
+.env.*
+!.env.example
+
+# IDE / OS
+.idea/
+.vscode/
+
+# Keep the existing placeholder file unignored
+!media/.gitkeep
