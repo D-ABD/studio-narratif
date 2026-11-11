@@ -55,6 +55,12 @@ jobs:
           set -euo pipefail
           if [ -z "${REASON:-}" ]; then REASON="Rollback manuel"; fi
 
+          COMMITS_TO_REVERT=$(git rev-list --count "${TAG}"..HEAD)
+          if [ "$COMMITS_TO_REVERT" -eq 0 ]; then
+            echo "✅ Rien à annuler, vous êtes déjà à la version ${TAG}."
+            exit 0
+          fi
+
           if git revert --no-commit "${TAG}..HEAD"; then
             echo "Revert appliqué."
           else
