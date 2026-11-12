@@ -84,7 +84,27 @@
   const recordStatus = document.querySelector('#recordStatus');
   let previewUrl = '';
   let recorder = null;
+  let microphoneStream = null;
+  let discardRecording = false;
   let recordedChunks = [];
+
+  const stopMicrophone = () => {
+    const stream = microphoneStream;
+    microphoneStream = null;
+    stream?.getTracks().forEach(track => {
+      try {
+        track.stop();
+      } catch {
+        // Continue stopping the remaining tracks if one track has already ended.
+      }
+    });
+  };
+
+  window.addEventListener('pagehide', () => {
+    discardRecording = true;
+    recordedChunks = [];
+    stopMicrophone();
+  });
 
   const showSample = file => {
     if (!file || !samplePreview) return;
@@ -98,8 +118,17 @@
   sampleInput?.addEventListener('change', () => showSample(sampleInput.files?.[0]));
   recordButton?.addEventListener('click', async () => {
     if (recorder?.state === 'recording') {
-      recorder.stop();
-      recordButton.textContent = '● Enregistrer avec le micro';
+      try {
+        recorder.stop();
+        recordButton.textContent = '● Enregistrer avec le micro';
+      } catch {
+        discardRecording = true;
+        recordedChunks = [];
+        stopMicrophone();
+        recorder = null;
+        recordButton.textContent = '● Enregistrer avec le micro';
+        recordStatus.textContent = 'Impossible d’arrêter proprement l’enregistrement.';
+      }
       return;
     }
     if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
@@ -107,27 +136,46 @@
       return;
     }
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({audio: true});
+      microphoneStream = await navigator.mediaDevices.getUserMedia({audio: true});
+      discardRecording = false;
       recordedChunks = [];
-      recorder = new MediaRecorder(stream);
+      recorder = new MediaRecorder(microphoneStream);
       recorder.addEventListener('dataavailable', event => {
         if (event.data.size) recordedChunks.push(event.data);
       });
+      recorder.addEventListener('error', () => {
+        discardRecording = true;
+        recordedChunks = [];
+        stopMicrophone();
+        recordButton.textContent = '● Enregistrer avec le micro';
+        recordStatus.textContent = 'Une erreur est survenue pendant l’enregistrement.';
+      });
       recorder.addEventListener('stop', () => {
-        const blob = new Blob(recordedChunks, {type: recorder.mimeType || 'audio/webm'});
-        const extension = blob.type.includes('mp4') ? 'm4a' : 'webm';
-        const file = new File([blob], `voix-enregistree.${extension}`, {type: blob.type});
-        const transfer = new DataTransfer();
-        transfer.items.add(file);
-        sampleInput.files = transfer.files;
-        showSample(file);
-        stream.getTracks().forEach(track => track.stop());
-        recordStatus.textContent = 'Écoute l’enregistrement avant de sauvegarder.';
+        try {
+          if (discardRecording) return;
+          const blob = new Blob(recordedChunks, {type: recorder.mimeType || 'audio/webm'});
+          const extension = blob.type.includes('mp4') ? 'm4a' : 'webm';
+          const file = new File([blob], `voix-enregistree.${extension}`, {type: blob.type});
+          const transfer = new DataTransfer();
+          transfer.items.add(file);
+          sampleInput.files = transfer.files;
+          showSample(file);
+          recordStatus.textContent = 'Écoute l’enregistrement avant de sauvegarder.';
+        } finally {
+          stopMicrophone();
+          recorder = null;
+          discardRecording = false;
+        }
       });
       recorder.start();
       recordButton.textContent = '■ Arrêter l’enregistrement';
       recordStatus.textContent = 'Enregistrement en cours…';
     } catch (error) {
+      discardRecording = true;
+      recordedChunks = [];
+      stopMicrophone();
+      recorder = null;
+      recordButton.textContent = '● Enregistrer avec le micro';
       recordStatus.textContent = error.name === 'NotAllowedError'
         ? 'Autorise le microphone dans ton navigateur puis réessaie.'
         : 'Impossible de démarrer le microphone.';
