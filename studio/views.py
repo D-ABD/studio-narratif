@@ -1,6 +1,8 @@
 import json
+import logging
 from pathlib import Path
 import tempfile
+import uuid
 
 from django.contrib import messages
 from django.core.files import File
@@ -15,6 +17,8 @@ from PIL import Image, UnidentifiedImageError
 from .models import NarrationProject, NarrationSegment, Voice
 from .services import _voice_sample_digest, cache_key_for, hash_file, normalize_voice_sample, srt_text
 
+logger = logging.getLogger(__name__)
+
 MAX_SAMPLE_BYTES = 25 * 1024 * 1024
 MAX_VIDEO_CLIP_BYTES = 200 * 1024 * 1024
 MAX_IMPORT_BYTES = 500 * 1024 * 1024
@@ -23,13 +27,41 @@ ALLOWED_SAMPLE_EXTENSIONS = {".wav", ".mp3", ".webm", ".m4a", ".ogg"}
 ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm"}
 
 
+def _delete_storage_files(files):
+    for storage, name in files:
+        if not name:
+            continue
+        try:
+            storage.delete(name)
+        except Exception:
+            logger.exception("Impossible de supprimer le fichier média %s.", name)
+
+
+def _schedule_storage_cleanup(files):
+    files_to_delete = tuple(files)
+    if files_to_delete:
+        transaction.on_commit(lambda: _delete_storage_files(files_to_delete))
+
+
+def _save_staged_file(field_file, filename, staged_path, created_files):
+    source_name = Path(filename)
+    unique_name = f"{source_name.stem}-{uuid.uuid4().hex}{source_name.suffix}"
+    storage = field_file.storage
+    expected_name = field_file.field.generate_filename(field_file.instance, unique_name)
+    # Track the intended path before writing so a partial storage write can be cleaned too.
+    created_files.append((storage, expected_name))
+    with staged_path.open("rb") as staged_file:
+        field_file.save(unique_name, File(staged_file), save=False)
+    if field_file.name != expected_name:
+        created_files.append((storage, field_file.name))
+
+
 def _invalidate_export(project):
-    if project.full_audio:
-        project.full_audio.delete(save=False)
-    if project.subtitles:
-        project.subtitles.delete(save=False)
-    if project.video_file:
-        project.video_file.delete(save=False)
+    files_to_delete = [
+        (field.storage, field.name)
+        for field in (project.full_audio, project.subtitles, project.video_file)
+        if field and field.name
+    ]
     project.full_audio = ""
     project.subtitles = ""
     project.video_file = ""
@@ -42,10 +74,12 @@ def _invalidate_export(project):
     project.progress_percent = 0
     project.started_at = None
     project.finished_at = None
-    project.save(update_fields=[
-        "voice", "full_audio", "subtitles", "video_file", "duration_seconds", "status", "status_message", "error_message",
-        "progress_percent", "queued_at", "job_type", "started_at", "finished_at", "updated_at",
-    ])
+    with transaction.atomic():
+        project.save(update_fields=[
+            "voice", "full_audio", "subtitles", "video_file", "duration_seconds", "status", "status_message", "error_message",
+            "progress_percent", "queued_at", "job_type", "started_at", "finished_at", "updated_at",
+        ])
+        _schedule_storage_cleanup(files_to_delete)
 
 
 def _invalidate_video(project):
@@ -277,6 +311,7 @@ def import_scenes(request, project_id):
         messages.error(request, "Un import ne peut pas dépasser 500 Mo au total.")
         return redirect("project_detail", project_id=project.pk)
 
+    created_files = []
     try:
         with tempfile.TemporaryDirectory(prefix="petit-studio-import-") as temporary_dir:
             staging_root = Path(temporary_dir)
@@ -344,36 +379,45 @@ def import_scenes(request, project_id):
             if reusable is None:
                 reusable = next((item for item in existing if not item.image and not item.video_clip), None)
 
+            old_files = []
+            planned_segments = []
+            next_position = len(existing)
             for kind, filename, staged_path in scenes:
-                segment = reusable
                 if reusable:
+                    segment = reusable
                     reusable = None
+                    is_new = False
                 else:
-                    segment = NarrationSegment.objects.create(
-                        project=project,
-                        position=project.segments.count(),
-                    )
+                    segment = NarrationSegment(project=project, position=next_position)
+                    next_position += 1
+                    is_new = True
 
                 if kind == "video":
-                    if segment.image:
-                        segment.image.delete(save=False)
-                        segment.image = ""
-                    if segment.video_clip:
-                        segment.video_clip.delete(save=False)
-                    with staged_path.open("rb") as staged_file:
-                        segment.video_clip.save(filename, File(staged_file), save=False)
-                    segment.save(update_fields=["image", "video_clip", "updated_at"])
+                    if segment.image and segment.image.name:
+                        old_files.append((segment.image.storage, segment.image.name))
+                    if segment.video_clip and segment.video_clip.name:
+                        old_files.append((segment.video_clip.storage, segment.video_clip.name))
+                    segment.image = ""
+                    _save_staged_file(segment.video_clip, filename, staged_path, created_files)
                 else:
-                    if segment.video_clip:
-                        segment.video_clip.delete(save=False)
-                        segment.video_clip = ""
-                    if segment.image:
-                        segment.image.delete(save=False)
-                    with staged_path.open("rb") as staged_file:
-                        segment.image.save(filename, File(staged_file), save=False)
-                    segment.save(update_fields=["image", "video_clip", "updated_at"])
+                    if segment.video_clip and segment.video_clip.name:
+                        old_files.append((segment.video_clip.storage, segment.video_clip.name))
+                    if segment.image and segment.image.name:
+                        old_files.append((segment.image.storage, segment.image.name))
+                    segment.video_clip = ""
+                    _save_staged_file(segment.image, filename, staged_path, created_files)
 
-            _invalidate_export(project)
+                planned_segments.append((segment, is_new, ["image", "video_clip", "updated_at"]))
+
+            with transaction.atomic():
+                for segment, is_new, update_fields in planned_segments:
+                    if is_new:
+                        segment.save()
+                    else:
+                        segment.save(update_fields=update_fields)
+                _invalidate_export(project)
+                _schedule_storage_cleanup(old_files)
+
             if import_kind == "video":
                 messages.success(
                     request,
@@ -382,7 +426,13 @@ def import_scenes(request, project_id):
             else:
                 messages.success(request, f"{len(scenes)} scène(s) ajoutée(s) au projet.")
     except ValueError as exc:
+        _delete_storage_files(created_files)
         messages.error(request, str(exc))
+    except Exception:
+        _delete_storage_files(created_files)
+        logger.exception("L’import des scènes a échoué pour le projet %s.", project.pk)
+        messages.error(request, "L’import a échoué ; aucune scène n’a été enregistrée.")
+
     return redirect("project_detail", project_id=project.pk)
 
 
