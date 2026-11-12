@@ -1,8 +1,9 @@
 import json
-from io import BytesIO
 from pathlib import Path
+import tempfile
 
 from django.contrib import messages
+from django.core.files import File
 from django.core.files.base import ContentFile
 from django.db import transaction
 from django.http import HttpResponse, HttpResponseBadRequest, JsonResponse
@@ -16,6 +17,8 @@ from .services import _voice_sample_digest, cache_key_for, hash_file, normalize_
 
 MAX_SAMPLE_BYTES = 25 * 1024 * 1024
 MAX_VIDEO_CLIP_BYTES = 200 * 1024 * 1024
+MAX_IMPORT_BYTES = 500 * 1024 * 1024
+MAX_IMPORT_PIXELS = 100_000_000
 ALLOWED_SAMPLE_EXTENSIONS = {".wav", ".mp3", ".webm", ".m4a", ".ogg"}
 ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm"}
 
@@ -57,49 +60,77 @@ def _invalidate_video(project):
     project.save(update_fields=update_fields)
 
 
-def _scene_images(upload):
+def _stream_upload_to_path(upload, destination):
+    upload.seek(0)
+    with destination.open("wb") as output:
+        for chunk in upload.chunks():
+            output.write(chunk)
+
+
+def _scene_images(upload, staging_dir, max_scenes=30, remaining_pixels=MAX_IMPORT_PIXELS):
     name = Path(upload.name).name
     suffix = Path(name).suffix.lower()
+    if upload.size <= 0:
+        raise ValueError(f"Le fichier « {name} » est vide.")
     if upload.size > 25 * 1024 * 1024:
         raise ValueError(f"« {name} » dépasse la limite de 25 Mo.")
-    raw = upload.read()
+    if max_scenes <= 0:
+        raise ValueError("Un import est limité à 30 scènes.")
+    if suffix not in {".jpg", ".jpeg", ".png", ".pdf"}:
+        raise ValueError(f"Format non accepté pour « {name} » : utilise JPG, PNG ou PDF.")
+
+    source_path = staging_dir / f"source{suffix}"
+    _stream_upload_to_path(upload, source_path)
+
     if suffix == ".pdf":
+        document = None
         try:
             import pymupdf
-            document = pymupdf.open(stream=raw, filetype="pdf")
+            document = pymupdf.open(str(source_path))
             if document.is_encrypted:
                 raise ValueError(f"Le PDF « {name} » est protégé par mot de passe.")
             if document.page_count > 30:
                 raise ValueError(f"Le PDF « {name} » dépasse la limite de 30 pages par import.")
+            if document.page_count > max_scenes:
+                raise ValueError("Un import est limité à 30 scènes.")
+
             output = []
             total_pixels = 0
             for index, page in enumerate(document, start=1):
                 pixmap = page.get_pixmap(matrix=pymupdf.Matrix(1.4, 1.4), alpha=False)
-                total_pixels += pixmap.width * pixmap.height
-                if pixmap.width * pixmap.height > 24_000_000 or total_pixels > 100_000_000:
-                    raise ValueError(f"La page {index} du PDF « {name} » a une résolution trop élevée.")
-                output.append((f"{Path(name).stem}-page-{index:03}.png", pixmap.tobytes("png")))
-            document.close()
+                page_pixels = pixmap.width * pixmap.height
+                total_pixels += page_pixels
+                if page_pixels > 24_000_000 or total_pixels > remaining_pixels:
+                    raise ValueError(f"La page {index} du PDF « {name} » dépasse le budget de résolution de l’import.")
+                page_path = staging_dir / f"page-{index:03}.png"
+                pixmap.save(str(page_path))
+                output.append((f"{Path(name).stem}-page-{index:03}.png", page_path))
+                del pixmap
             if not output:
                 raise ValueError(f"Le PDF « {name} » ne contient aucune page.")
-            return output
+            return output, total_pixels
         except ValueError:
             raise
         except Exception as exc:
             raise ValueError(f"Impossible de lire le PDF « {name} » : {exc}") from exc
-    if suffix not in {".jpg", ".jpeg", ".png"}:
-        raise ValueError(f"Format non accepté pour « {name} » : utilise JPG, PNG ou PDF.")
+        finally:
+            if document is not None:
+                document.close()
+
     try:
-        with Image.open(BytesIO(raw)) as image:
+        with Image.open(source_path) as image:
             image.verify()
-        with Image.open(BytesIO(raw)) as image:
-            if image.width * image.height > 40_000_000:
+        with Image.open(source_path) as image:
+            pixels = image.width * image.height
+            if pixels > 40_000_000:
                 raise ValueError(f"L’image « {name} » a une résolution trop élevée.")
-    except UnidentifiedImageError as exc:
-        raise ValueError(f"Le fichier « {name} » n’est pas une image lisible.") from exc
-    except OSError as exc:
+            if pixels > remaining_pixels:
+                raise ValueError(f"L’image « {name} » dépasse le budget de résolution de l’import.")
+    except ValueError:
+        raise
+    except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as exc:
         raise ValueError(f"Impossible de lire l’image « {name} » : {exc}") from exc
-    return [(name, raw)]
+    return [(name, source_path)], pixels
 
 
 def home(request):
@@ -240,65 +271,118 @@ def import_scenes(request, project_id):
     if not uploads:
         messages.error(request, "Sélectionne au moins une image, un PDF ou une vidéo.")
         return redirect("project_detail", project_id=project.pk)
-    try:
-        scenes = []
-        import_kind = None
-        for upload in uploads:
-            suffix = Path(upload.name).suffix.lower()
-            if suffix in ALLOWED_VIDEO_EXTENSIONS:
-                if upload.size <= 0:
-                    raise ValueError(f"La vidéo « {Path(upload.name).name} » est vide.")
-                if upload.size > MAX_VIDEO_CLIP_BYTES:
-                    raise ValueError(f"La vidéo « {Path(upload.name).name} » dépasse la limite de 200 Mo.")
-                kind = "video"
-                scenes.append((kind, Path(upload.name).name, upload.read()))
-            else:
-                kind = "image"
-                scenes.extend((kind, name, content) for name, content in _scene_images(upload))
-            if import_kind and kind != import_kind:
-                raise ValueError("Importe soit des vidéos, soit des images/PDF dans un même projet, sans les mélanger.")
-            import_kind = kind
-            if len(scenes) > 30:
-                raise ValueError("Un import est limité à 30 scènes.")
-    except ValueError as exc:
-        messages.error(request, str(exc))
+
+    total_upload_bytes = sum(upload.size for upload in uploads)
+    if total_upload_bytes > MAX_IMPORT_BYTES:
+        messages.error(request, "Un import ne peut pas dépasser 500 Mo au total.")
         return redirect("project_detail", project_id=project.pk)
 
-    existing = list(project.segments.order_by("position", "id"))
-    existing_kind = "video" if any(item.video_clip for item in existing) else "image" if any(item.image for item in existing) else None
-    if existing_kind and existing_kind != import_kind:
-        messages.error(request, "Ce projet contient déjà un autre type de média. Crée un projet séparé pour assembler tes vidéos.")
-        return redirect("project_detail", project_id=project.pk)
-    reusable = next((item for item in existing if not item.image and not item.video_clip and not item.text.strip()), None)
-    if reusable is None:
-        reusable = next((item for item in existing if not item.image and not item.video_clip), None)
-    for kind, filename, content in scenes:
-        segment = reusable
-        if reusable:
-            reusable = None
-        else:
-            segment = NarrationSegment.objects.create(project=project, position=project.segments.count())
-        if kind == "video":
-            if segment.image:
-                segment.image.delete(save=False)
-                segment.image = ""
-            if segment.video_clip:
-                segment.video_clip.delete(save=False)
-            segment.video_clip.save(filename, ContentFile(content), save=False)
-            segment.save(update_fields=["image", "video_clip", "updated_at"])
-        else:
-            if segment.video_clip:
-                segment.video_clip.delete(save=False)
-                segment.video_clip = ""
-            if segment.image:
-                segment.image.delete(save=False)
-            segment.image.save(filename, ContentFile(content), save=False)
-            segment.save(update_fields=["image", "video_clip", "updated_at"])
-    _invalidate_export(project)
-    if import_kind == "video":
-        messages.success(request, f"{len(scenes)} clip(s) vidéo ajouté(s). Réordonne-les puis lance l’assemblage.")
-    else:
-        messages.success(request, f"{len(scenes)} scène(s) ajoutée(s) au projet.")
+    try:
+        with tempfile.TemporaryDirectory(prefix="petit-studio-import-") as temporary_dir:
+            staging_root = Path(temporary_dir)
+            scenes = []
+            import_kind = None
+            total_pixels = 0
+
+            for upload_index, upload in enumerate(uploads, start=1):
+                suffix = Path(upload.name).suffix.lower()
+                if suffix in ALLOWED_VIDEO_EXTENSIONS:
+                    kind = "video"
+                elif suffix in {".jpg", ".jpeg", ".png", ".pdf"}:
+                    kind = "image"
+                else:
+                    raise ValueError(
+                        f"Format non accepté pour « {Path(upload.name).name} » : "
+                        "utilise JPG, PNG, PDF ou une vidéo MP4/MOV/WEBM."
+                    )
+
+                if import_kind and kind != import_kind:
+                    raise ValueError("Importe soit des vidéos, soit des images/PDF dans un même projet, sans les mélanger.")
+                import_kind = kind
+
+                upload_dir = staging_root / f"upload-{upload_index:03}"
+                upload_dir.mkdir()
+
+                if kind == "video":
+                    if upload.size <= 0:
+                        raise ValueError(f"La vidéo « {Path(upload.name).name} » est vide.")
+                    if upload.size > MAX_VIDEO_CLIP_BYTES:
+                        raise ValueError(f"La vidéo « {Path(upload.name).name} » dépasse la limite de 200 Mo.")
+                    if len(scenes) >= 30:
+                        raise ValueError("Un import est limité à 30 scènes.")
+                    staged_path = upload_dir / f"source{suffix}"
+                    _stream_upload_to_path(upload, staged_path)
+                    scenes.append((kind, Path(upload.name).name, staged_path))
+                else:
+                    staged_scenes, imported_pixels = _scene_images(
+                        upload,
+                        upload_dir,
+                        max_scenes=30 - len(scenes),
+                        remaining_pixels=MAX_IMPORT_PIXELS - total_pixels,
+                    )
+                    scenes.extend((kind, filename, path) for filename, path in staged_scenes)
+                    total_pixels += imported_pixels
+
+            existing = list(project.segments.order_by("position", "id"))
+            existing_kind = (
+                "video" if any(item.video_clip for item in existing)
+                else "image" if any(item.image for item in existing)
+                else None
+            )
+            if existing_kind and existing_kind != import_kind:
+                messages.error(
+                    request,
+                    "Ce projet contient déjà un autre type de média. "
+                    "Crée un projet séparé pour assembler tes vidéos.",
+                )
+                return redirect("project_detail", project_id=project.pk)
+
+            reusable = next(
+                (item for item in existing if not item.image and not item.video_clip and not item.text.strip()),
+                None,
+            )
+            if reusable is None:
+                reusable = next((item for item in existing if not item.image and not item.video_clip), None)
+
+            for kind, filename, staged_path in scenes:
+                segment = reusable
+                if reusable:
+                    reusable = None
+                else:
+                    segment = NarrationSegment.objects.create(
+                        project=project,
+                        position=project.segments.count(),
+                    )
+
+                if kind == "video":
+                    if segment.image:
+                        segment.image.delete(save=False)
+                        segment.image = ""
+                    if segment.video_clip:
+                        segment.video_clip.delete(save=False)
+                    with staged_path.open("rb") as staged_file:
+                        segment.video_clip.save(filename, File(staged_file), save=False)
+                    segment.save(update_fields=["image", "video_clip", "updated_at"])
+                else:
+                    if segment.video_clip:
+                        segment.video_clip.delete(save=False)
+                        segment.video_clip = ""
+                    if segment.image:
+                        segment.image.delete(save=False)
+                    with staged_path.open("rb") as staged_file:
+                        segment.image.save(filename, File(staged_file), save=False)
+                    segment.save(update_fields=["image", "video_clip", "updated_at"])
+
+            _invalidate_export(project)
+            if import_kind == "video":
+                messages.success(
+                    request,
+                    f"{len(scenes)} clip(s) vidéo ajouté(s). Réordonne-les puis lance l’assemblage.",
+                )
+            else:
+                messages.success(request, f"{len(scenes)} scène(s) ajoutée(s) au projet.")
+    except ValueError as exc:
+        messages.error(request, str(exc))
     return redirect("project_detail", project_id=project.pk)
 
 
