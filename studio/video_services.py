@@ -3,6 +3,7 @@ import hashlib
 import json
 import shutil
 import subprocess
+import sys
 import threading
 import tempfile
 from pathlib import Path
@@ -18,6 +19,89 @@ from .services import _ffmpeg_path, srt_text
 
 FFPROBE_TIMEOUT_SECONDS = 60
 FFMPEG_TIMEOUT_SECONDS = 600
+VIDEO_ENCODER_CHECK_TIMEOUT_SECONDS = 15
+
+_VIDEO_ENCODER_CACHE = {}
+_VIDEO_ENCODER_LOCK = threading.Lock()
+
+
+class _FFmpegCommandError(RuntimeError):
+    """FFmpeg exited unsuccessfully after starting the selected video encoder."""
+
+
+def _video_encoder(ffmpeg):
+    """Use VideoToolbox on macOS when this FFmpeg binary advertises the encoder."""
+    if sys.platform != "darwin":
+        return "libx264"
+
+    with _VIDEO_ENCODER_LOCK:
+        if ffmpeg in _VIDEO_ENCODER_CACHE:
+            return _VIDEO_ENCODER_CACHE[ffmpeg]
+
+        try:
+            result = subprocess.run(
+                [ffmpeg, "-hide_banner", "-encoders"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=VIDEO_ENCODER_CHECK_TIMEOUT_SECONDS,
+            )
+            encoder_list = (result.stdout or "") + "\n" + (result.stderr or "")
+            available = result.returncode == 0 and any(
+                "h264_videotoolbox" in line.split()
+                for line in encoder_list.splitlines()
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            available = False
+
+        encoder = "h264_videotoolbox" if available else "libx264"
+        _VIDEO_ENCODER_CACHE[ffmpeg] = encoder
+        return encoder
+
+
+def _video_encoder_args(ffmpeg, width, height):
+    """Return codec-specific arguments for the selected encoder."""
+    if _video_encoder(ffmpeg) == "h264_videotoolbox":
+        # The app currently renders at 720p in both orientations.
+        bitrate = "10M" if width * height <= 1280 * 720 else "15M"
+        return ["-c:v", "h264_videotoolbox", "-b:v", bitrate]
+    return ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "24"]
+
+
+def _software_fallback_command(command):
+    """Replace VideoToolbox options with the existing libx264 speed/quality settings."""
+    try:
+        codec_index = command.index("-c:v")
+    except ValueError:
+        return None
+    if codec_index + 1 >= len(command) or command[codec_index + 1] != "h264_videotoolbox":
+        return None
+
+    fallback = list(command)
+    bitrate_index = next(
+        (index for index, argument in enumerate(fallback) if argument == "-b:v"),
+        None,
+    )
+    if bitrate_index is not None:
+        del fallback[bitrate_index:bitrate_index + 2]
+        codec_index = fallback.index("-c:v")
+    fallback[codec_index + 1:codec_index + 2] = [
+        "libx264", "-preset", "ultrafast", "-crf", "24",
+    ]
+    return fallback
+
+
+def _remove_partial_output(command, cwd):
+    """Remove a possibly incomplete output before retrying with libx264."""
+    if not command:
+        return
+    output_path = Path(command[-1])
+    if not output_path.is_absolute():
+        output_path = Path(cwd) / output_path
+    try:
+        output_path.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 def _dimensions(video_format):
@@ -54,7 +138,7 @@ def _movement_filters(motion, width, height, duration):
     raise RuntimeError("Le mouvement choisi pour une scène n’est pas reconnu.")
 
 
-def _run_ffmpeg(command, cwd, operation):
+def _run_ffmpeg_once(command, cwd, operation):
     try:
         result = subprocess.run(
             command, cwd=cwd, capture_output=True, text=True, check=False,
@@ -71,7 +155,18 @@ def _run_ffmpeg(command, cwd, operation):
         message = detail[-1] if detail else f"code de sortie {result.returncode}"
         if "No such filter" in (result.stderr or "") and "subtitles" in (result.stderr or ""):
             raise RuntimeError("FFmpeg ne prend pas en charge l’incrustation des sous-titres (filtre libass). Réinstalle FFmpeg avec le support libass.")
-        raise RuntimeError(f"FFmpeg a échoué pendant {operation} : {message}")
+        raise _FFmpegCommandError(f"FFmpeg a échoué pendant {operation} : {message}")
+
+
+def _run_ffmpeg(command, cwd, operation):
+    try:
+        _run_ffmpeg_once(command, cwd, operation)
+    except _FFmpegCommandError:
+        fallback = _software_fallback_command(command)
+        if fallback is None:
+            raise
+        _remove_partial_output(command, cwd)
+        _run_ffmpeg_once(fallback, cwd, operation)
 
 
 def _subtitle_filter(subtitle_file):
@@ -175,19 +270,7 @@ def _parallax_frames(image_path, width, height, duration):
         yield bg_frame.convert("RGB").tobytes()
 
 
-def _render_parallax_clip(ffmpeg, image_path, audio_path, output_path, subtitle_file, width, height, duration, folder):
-    """Encode parallax frames locally; audio and optional aligned subtitles stay on the usual path."""
-    command = [
-        ffmpeg, "-y", "-v", "error",
-        "-f", "rawvideo", "-pixel_format", "rgb24", "-video_size", f"{width}x{height}",
-        "-framerate", "24", "-i", "pipe:0", "-i", str(audio_path), "-t", f"{duration:.3f}",
-    ]
-    if subtitle_file:
-        command.extend(["-vf", _subtitle_filter(subtitle_file)])
-    command.extend([
-        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24", "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2", "-shortest", str(output_path),
-    ])
+def _run_parallax_attempt(command, image_path, output_path, width, height, duration, folder):
     error_log = folder / f"{output_path.stem}-ffmpeg.log"
     try:
         with error_log.open("wb") as log_stream:
@@ -248,10 +331,34 @@ def _render_parallax_clip(ffmpeg, image_path, audio_path, output_path, subtitle_
         if "No such filter" in stderr and "subtitles" in stderr:
             raise RuntimeError("FFmpeg ne prend pas en charge l’incrustation des sous-titres (filtre libass). Réinstalle FFmpeg avec le support libass.")
         detail = stderr.splitlines()[-1] if stderr else f"code de sortie {return_code}"
-        raise RuntimeError(f"FFmpeg a échoué pendant le rendu par parallaxe : {detail}")
+        raise _FFmpegCommandError(f"FFmpeg a échoué pendant le rendu par parallaxe : {detail}")
     if write_error:
         raise RuntimeError(f"Le flux vidéo par parallaxe a été interrompu : {write_error}")
 
+
+def _render_parallax_clip(ffmpeg, image_path, audio_path, output_path, subtitle_file, width, height, duration, folder):
+    """Encode parallax frames locally; audio and optional aligned subtitles stay on the usual path."""
+    command = [
+        ffmpeg, "-y", "-v", "error",
+        "-f", "rawvideo", "-pixel_format", "rgb24", "-video_size", f"{width}x{height}",
+        "-framerate", "24", "-i", "pipe:0", "-i", str(audio_path), "-t", f"{duration:.3f}",
+    ]
+    if subtitle_file:
+        command.extend(["-vf", _subtitle_filter(subtitle_file)])
+    command.extend([
+        *_video_encoder_args(ffmpeg, width, height),
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2", "-shortest", str(output_path),
+    ])
+
+    try:
+        _run_parallax_attempt(command, image_path, output_path, width, height, duration, folder)
+    except _FFmpegCommandError:
+        fallback = _software_fallback_command(command)
+        if fallback is None:
+            raise
+        _remove_partial_output(command, folder)
+        _run_parallax_attempt(fallback, image_path, output_path, width, height, duration, folder)
 
 def _ffprobe_path():
     ffmpeg = Path(_ffmpeg_path())
@@ -334,8 +441,8 @@ def render_video_assembly(project_id):
                 command.extend([
                     "-map", "0:v:0", "-map", audio_input, "-vf", filters,
                     "-af", "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,apad",
-                    "-t", f"{duration:.3f}", "-r", "24", "-c:v", "libx264", "-preset", "ultrafast",
-                    "-crf", "24", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+                    "-t", f"{duration:.3f}", "-r", "24", *_video_encoder_args(ffmpeg, width, height),
+                    "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
                     "-ar", "48000", "-ac", "2", str(clip),
                 ])
                 _run_ffmpeg(command, folder, f"normalisation du clip {index}")
@@ -429,7 +536,7 @@ def render_project_video(project_id):
                     command = [
                         ffmpeg, "-y", "-v", "error", "-loop", "1", "-i", str(scene.image.path),
                         "-i", str(scene.audio.path), "-t", f"{duration:.3f}", "-vf", ",".join(filters),
-                        "-r", "24", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24",
+                        "-r", "24", *_video_encoder_args(ffmpeg, width, height),
                         "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-ar", "48000",
                         "-ac", "2", "-shortest", str(clip),
                     ]
