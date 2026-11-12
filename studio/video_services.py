@@ -16,6 +16,10 @@ from .models import NarrationProject, NarrationSegment
 from .services import _ffmpeg_path, srt_text
 
 
+FFPROBE_TIMEOUT_SECONDS = 60
+FFMPEG_TIMEOUT_SECONDS = 600
+
+
 def _dimensions(video_format):
     return (720, 1280) if video_format == NarrationProject.VideoFormat.VERTICAL else (1280, 720)
 
@@ -52,7 +56,14 @@ def _movement_filters(motion, width, height, duration):
 
 def _run_ffmpeg(command, cwd, operation):
     try:
-        result = subprocess.run(command, cwd=cwd, capture_output=True, text=True, check=False)
+        result = subprocess.run(
+            command, cwd=cwd, capture_output=True, text=True, check=False,
+            timeout=FFMPEG_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"FFmpeg a dépassé le délai de 10 minutes pendant {operation}."
+        ) from exc
     except OSError as exc:
         raise RuntimeError(f"Impossible de lancer FFmpeg pour {operation} : {exc}") from exc
     if result.returncode:
@@ -181,6 +192,18 @@ def _render_parallax_clip(ffmpeg, image_path, audio_path, output_path, subtitle_
     try:
         with error_log.open("wb") as log_stream:
             process = subprocess.Popen(command, cwd=folder, stdin=subprocess.PIPE, stderr=log_stream)
+            timed_out = threading.Event()
+
+            def kill_after_timeout():
+                if process.poll() is None:
+                    timed_out.set()
+                    try:
+                        process.kill()
+                    except OSError:
+                        pass
+
+            timeout_timer = threading.Timer(FFMPEG_TIMEOUT_SECONDS, kill_after_timeout)
+            timeout_timer.start()
             write_error = None
             try:
                 for frame in _parallax_frames(image_path, width, height, duration):
@@ -193,8 +216,29 @@ def _render_parallax_clip(ffmpeg, image_path, audio_path, output_path, subtitle_
                     pass
             finally:
                 if process.stdin and not process.stdin.closed:
-                    process.stdin.close()
-            return_code = process.wait()
+                    try:
+                        process.stdin.close()
+                    except OSError as exc:
+                        if write_error is None:
+                            write_error = exc
+            try:
+                return_code = process.wait(timeout=FFMPEG_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired as exc:
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+                process.wait()
+                timed_out.set()
+                raise RuntimeError(
+                    "FFmpeg a dépassé le délai de 10 minutes pendant le rendu par parallaxe."
+                ) from exc
+            finally:
+                timeout_timer.cancel()
+            if timed_out.is_set():
+                raise RuntimeError(
+                    "FFmpeg a dépassé le délai de 10 minutes pendant le rendu par parallaxe."
+                )
         stderr = error_log.read_text(encoding="utf-8", errors="replace").strip()
     except OSError as exc:
         raise RuntimeError(f"Impossible de lancer FFmpeg pour la profondeur douce : {exc}") from exc
@@ -219,11 +263,17 @@ def _ffprobe_path():
 
 
 def _probe_clip(path):
-    result = subprocess.run(
-        [_ffprobe_path(), "-v", "error", "-show_entries", "stream=codec_type,duration:format=duration",
-         "-of", "json", str(path)],
-        capture_output=True, text=True, check=False,
-    )
+    try:
+        result = subprocess.run(
+            [_ffprobe_path(), "-v", "error", "-show_entries", "stream=codec_type,duration:format=duration",
+             "-of", "json", str(path)],
+            capture_output=True, text=True, check=False,
+            timeout=FFPROBE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"ffprobe a dépassé le délai de 60 secondes pendant l’analyse du clip « {Path(path).name} »."
+        ) from exc
     if result.returncode:
         detail = (result.stderr or "").strip().splitlines()
         raise RuntimeError(f"Le clip « {Path(path).name} » est illisible : {detail[-1] if detail else 'format invalide'}")
