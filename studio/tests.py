@@ -191,6 +191,55 @@ class VideoSceneTests(MediaTestCase):
         self.assertIn("force_original_aspect_ratio=decrease", fixed[0])
         self.assertTrue(any(item.startswith("pad=") for item in fixed))
 
+    def test_animation_settings_defaults_preserve_existing_rendering(self):
+        from .video_services import _movement_filters
+
+        project = NarrationProject.objects.create(title="Animation settings")
+        segment = NarrationSegment.objects.create(project=project, position=0)
+        self.assertEqual(segment.camera_profile, NarrationSegment.CameraProfile.LINEAR)
+        self.assertFalse(segment.light_breathing)
+
+        default_filters = _movement_filters("zoom_in", 720, 1280, 10)
+        self.assertFalse(any(item.startswith("rotate=") for item in default_filters))
+        self.assertFalse(any(item.startswith("eq=") for item in default_filters))
+
+        organic_filters = _movement_filters(
+            "zoom_in", 720, 1280, 10,
+            camera_profile=NarrationSegment.CameraProfile.ORGANIC,
+            light_breathing=True,
+        )
+        self.assertTrue(any(item.startswith("rotate=") for item in organic_filters))
+        self.assertTrue(any(item.startswith("eq=") for item in organic_filters))
+        self.assertTrue(any("cos(PI*" in item for item in organic_filters if item.startswith("zoompan=")))
+
+    def test_visual_settings_invalidate_only_video(self):
+        project = NarrationProject.objects.create(title="Visual settings", status=NarrationProject.Status.READY)
+        project.full_audio.save("voice.wav", ContentFile(b"audio"), save=True)
+        project.subtitles.save("voice.srt", ContentFile(b"1\n"), save=True)
+        project.video_file.save("video.mp4", ContentFile(b"video"), save=True)
+        segment = NarrationSegment.objects.create(
+            project=project, position=0, text="Bonjour.", motion=NarrationSegment.Motion.ZOOM_IN,
+        )
+
+        response = self.client.post(
+            f"/projects/{project.pk}/segments/{segment.pk}/save/",
+            {
+                "text": "Bonjour.",
+                "motion": segment.motion,
+                "camera_profile": NarrationSegment.CameraProfile.ORGANIC,
+                "light_breathing": "on",
+            },
+        )
+
+        self.assertEqual(response.status_code, 302)
+        project.refresh_from_db()
+        segment.refresh_from_db()
+        self.assertEqual(segment.camera_profile, NarrationSegment.CameraProfile.ORGANIC)
+        self.assertTrue(segment.light_breathing)
+        self.assertTrue(project.full_audio.name)
+        self.assertTrue(project.subtitles.name)
+        self.assertFalse(project.video_file.name)
+
     def test_import_image_creates_a_scene_and_reuses_empty_first_segment(self):
         project = NarrationProject.objects.create(title="Images")
         first = NarrationSegment.objects.create(project=project, position=0)

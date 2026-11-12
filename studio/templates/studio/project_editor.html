@@ -153,10 +153,19 @@
                     {% for value,label in motions %}<option value="{{ value }}" {% if segment.motion == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
                   </select>
                 </label>
+                <label class="setting-label" for="camera-profile-{{ segment.id }}">Profil de caméra
+                  <select class="editor-select" id="camera-profile-{{ segment.id }}" name="camera_profile">
+                    {% for value,label in camera_profiles %}<option value="{{ value }}" {% if segment.camera_profile == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
+                  </select>
+                </label>
+                <label class="setting-check">
+                  <input type="checkbox" name="light_breathing" {% if segment.light_breathing %}checked{% endif %}>
+                  Respiration lumineuse
+                </label>
                 <span class="editor-small"><span class="word-count">{{ segment.text|wordcount }}</span> mots · env. <span class="duration-estimate">0</span> s</span>
               </div>
               <div class="scene-save-row">
-                <span class="editor-small">Le texte modifié invalidera l’export existant.</span>
+                <span class="editor-small">Le texte invalide la narration ; les réglages visuels invalident seulement la vidéo.</span>
                 <button class="editor-button" type="submit">Enregistrer la scène</button>
               </div>
             </form>

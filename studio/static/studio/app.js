@@ -66,10 +66,14 @@
     textarea.addEventListener('input', update);
     update();
   });
-  document.querySelectorAll('.segment-form select[name="motion"]').forEach(select => {
-    select.dataset.initialValue = select.value;
-    select.addEventListener('change', () => {
-      select.form.dataset.motionDirty = select.value !== select.dataset.initialValue ? 'true' : 'false';
+  const sceneSettingSelector = 'select[name="motion"], select[name="camera_profile"], input[name="light_breathing"]';
+  document.querySelectorAll(`.segment-form ${sceneSettingSelector}`).forEach(control => {
+    const value = () => control.type === 'checkbox' ? String(control.checked) : control.value;
+    control.dataset.initialValue = value();
+    control.addEventListener('change', () => {
+      const changed = Array.from(control.form.querySelectorAll(sceneSettingSelector))
+        .some(input => (input.type === 'checkbox' ? String(input.checked) : input.value) !== input.dataset.initialValue);
+      control.form.dataset.motionDirty = changed ? 'true' : 'false';
     });
   });
   const videoOptionsForm = document.querySelector('#videoOptionsForm');
@@ -328,6 +332,9 @@
         textarea.dataset.dirty = 'false';
       }
       form.dataset.motionDirty = 'false';
+      form.querySelectorAll(sceneSettingSelector).forEach(control => {
+        control.dataset.initialValue = control.type === 'checkbox' ? String(control.checked) : control.value;
+      });
     }
     if (videoOptionsForm?.dataset.dirty === 'true') {
       const response = await fetch(videoOptionsForm.action, {method: 'POST', body: new FormData(videoOptionsForm)});

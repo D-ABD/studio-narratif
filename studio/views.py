@@ -288,6 +288,7 @@ def project_detail(request, project_id):
         "categories": Voice.Category.choices,
         "video_formats": NarrationProject.VideoFormat.choices,
         "motions": NarrationSegment.Motion.choices,
+        "camera_profiles": NarrationSegment.CameraProfile.choices,
         "has_scenes": bool(segments and any(segment.image for segment in segments)),
         "has_video_clips": bool(segments and any(segment.video_clip for segment in segments)),
         "can_assemble_clips": bool(
@@ -511,10 +512,17 @@ def save_segment(request, project_id, segment_id):
         return JsonResponse({"ok": False, "error": "Attends la fin du traitement avant de modifier le projet."}, status=409)
     text = (request.POST.get("text") or "").strip()[:12000]
     motion = request.POST.get("motion", segment.motion)
+    camera_profile = request.POST.get("camera_profile", segment.camera_profile)
+    light_breathing = request.POST.get("light_breathing") == "on"
     if motion not in NarrationSegment.Motion.values:
         return HttpResponseBadRequest("Mouvement de scène invalide.")
+    if camera_profile not in NarrationSegment.CameraProfile.values:
+        return HttpResponseBadRequest("Profil de caméra invalide.")
     text_changed = text != segment.text
     motion_changed = motion != segment.motion
+    camera_profile_changed = camera_profile != segment.camera_profile
+    light_breathing_changed = light_breathing != segment.light_breathing
+    video_settings_changed = motion_changed or camera_profile_changed or light_breathing_changed
     if text_changed:
         if segment.audio:
             segment.audio.delete(save=False)
@@ -525,13 +533,18 @@ def save_segment(request, project_id, segment_id):
         segment.cache_key = ""
     segment.text = text
     segment.motion = motion
-    segment.save(update_fields=["text", "motion", "audio", "subtitle_data", "duration_seconds", "cache_key", "updated_at"])
+    segment.camera_profile = camera_profile
+    segment.light_breathing = light_breathing
+    segment.save(update_fields=[
+        "text", "motion", "camera_profile", "light_breathing", "audio",
+        "subtitle_data", "duration_seconds", "cache_key", "updated_at",
+    ])
     if text_changed:
         _invalidate_export(project)
         messages.success(request, "Le segment a été enregistré.")
-    elif motion_changed:
+    elif video_settings_changed:
         _invalidate_video(project)
-        messages.success(request, "Le mouvement de la scène a été enregistré.")
+        messages.success(request, "Les réglages visuels de la scène ont été enregistrés.")
     else:
         messages.info(request, "Aucun changement à enregistrer.")
     return redirect(f"/projects/{project.pk}/#segment-{segment.pk}")

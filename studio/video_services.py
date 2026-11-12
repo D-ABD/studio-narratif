@@ -108,34 +108,57 @@ def _dimensions(video_format):
     return (720, 1280) if video_format == NarrationProject.VideoFormat.VERTICAL else (1280, 720)
 
 
-def _movement_filters(motion, width, height, duration):
-    """Create restrained camera motion; the source image and characters stay unchanged."""
+def _light_breathing_filter():
+    """Add a very subtle brightness pulse once per scene."""
+    return "eq=brightness='0.018*sin(2*PI*t/8)':eval=frame"
+
+
+def _movement_filters(motion, width, height, duration, camera_profile="linear", light_breathing=False):
+    """Build camera movement and optional light breathing filters for an image scene."""
+    organic = camera_profile == NarrationSegment.CameraProfile.ORGANIC
     if motion == "still":
-        return [
+        filters = [
             f"scale={width}:{height}:force_original_aspect_ratio=decrease",
             f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black",
             "fps=24",
         ]
-    frames = max(1, round(max(0.1, duration) * 24))
-    progress = f"min(on/{frames},1)"
-    base = [f"scale={width}:{height}:force_original_aspect_ratio=increase", f"crop={width}:{height}"]
-    if motion == "zoom_in":
-        return base + [f"zoompan=z='min(zoom+0.00010,1.08)':d=1:s={width}x{height}:fps=24"]
-    if motion == "zoom_out":
-        return base + [f"zoompan=z='if(eq(on,1),1.08,max(zoom-0.00010,1.0))':d=1:s={width}x{height}:fps=24"]
-    if motion == "pan_h":
-        return base + [
-            f"zoompan=z='1.08':x='(iw-iw/zoom)*{progress}':y='(ih-ih/zoom)/2':d=1:s={width}x{height}:fps=24"
-        ]
-    if motion == "pan_v":
-        return base + [
-            f"zoompan=z='1.08':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)*{progress}':d=1:s={width}x{height}:fps=24"
-        ]
-    if motion == "zoom_pan":
-        return base + [
-            f"zoompan=z='1+0.08*{progress}':x='(iw-iw/zoom)*{progress}':y='(ih-ih/zoom)*{progress}':d=1:s={width}x{height}:fps=24"
-        ]
-    raise RuntimeError("Le mouvement choisi pour une scène n’est pas reconnu.")
+    else:
+        frames = max(1, round(max(0.1, duration) * 24))
+        linear_progress = f"min(on/{frames},1)"
+        progress = f"(0.5-0.5*cos(PI*{linear_progress}))" if organic else linear_progress
+        base = [f"scale={width}:{height}:force_original_aspect_ratio=increase", f"crop={width}:{height}"]
+
+        if motion == "zoom_in":
+            zoom = f"1.02+0.06*{progress}" if organic else "min(zoom+0.00010,1.08)"
+            filters = base + [f"zoompan=z='{zoom}':d=1:s={width}x{height}:fps=24"]
+        elif motion == "zoom_out":
+            zoom = f"1.08-0.06*{progress}" if organic else "if(eq(on,1),1.08,max(zoom-0.00010,1.0))"
+            filters = base + [f"zoompan=z='{zoom}':d=1:s={width}x{height}:fps=24"]
+        elif motion == "pan_h":
+            filters = base + [
+                f"zoompan=z='1.08':x='(iw-iw/zoom)*{progress}':y='(ih-ih/zoom)/2':d=1:s={width}x{height}:fps=24"
+            ]
+        elif motion == "pan_v":
+            filters = base + [
+                f"zoompan=z='1.08':x='(iw-iw/zoom)/2':y='(ih-ih/zoom)*{progress}':d=1:s={width}x{height}:fps=24"
+            ]
+        elif motion == "zoom_pan":
+            zoom = f"1.02+0.06*{progress}" if organic else f"1+0.08*{progress}"
+            filters = base + [
+                f"zoompan=z='{zoom}':x='(iw-iw/zoom)*{progress}':y='(ih-ih/zoom)*{progress}':d=1:s={width}x{height}:fps=24"
+            ]
+        else:
+            raise RuntimeError("Le mouvement choisi pour une scène n’est pas reconnu.")
+
+        if organic:
+            filters.extend([
+                "rotate=angle='0.0035*sin(2*PI*t/8)':ow=rotw(iw):oh=roth(ih):c=black",
+                f"crop={width}:{height}",
+            ])
+
+    if light_breathing:
+        filters.append(_light_breathing_filter())
+    return filters
 
 
 def _run_ffmpeg_once(command, cwd, operation):
@@ -336,15 +359,23 @@ def _run_parallax_attempt(command, image_path, output_path, width, height, durat
         raise RuntimeError(f"Le flux vidéo par parallaxe a été interrompu : {write_error}")
 
 
-def _render_parallax_clip(ffmpeg, image_path, audio_path, output_path, subtitle_file, width, height, duration, folder):
-    """Encode parallax frames locally; audio and optional aligned subtitles stay on the usual path."""
+def _render_parallax_clip(
+    ffmpeg, image_path, audio_path, output_path, subtitle_file, width, height, duration, folder,
+    light_breathing=False,
+):
+    """Encode parallax frames locally; keep its camera motion separate from image-scene movement."""
     command = [
         ffmpeg, "-y", "-v", "error",
         "-f", "rawvideo", "-pixel_format", "rgb24", "-video_size", f"{width}x{height}",
         "-framerate", "24", "-i", "pipe:0", "-i", str(audio_path), "-t", f"{duration:.3f}",
     ]
+    video_filters = []
     if subtitle_file:
-        command.extend(["-vf", _subtitle_filter(subtitle_file)])
+        video_filters.append(_subtitle_filter(subtitle_file))
+    if light_breathing:
+        video_filters.append(_light_breathing_filter())
+    if video_filters:
+        command.extend(["-vf", ",".join(video_filters)])
     command.extend([
         *_video_encoder_args(ffmpeg, width, height),
         "-pix_fmt", "yuv420p",
@@ -527,10 +558,14 @@ def render_project_video(project_id):
                     project.save(update_fields=["status_message", "updated_at"])
                     _render_parallax_clip(
                         ffmpeg, scene.image.path, scene.audio.path, clip, subtitle_file,
-                        width, height, duration, folder,
+                        width, height, duration, folder, light_breathing=scene.light_breathing,
                     )
                 else:
-                    filters = _movement_filters(scene.motion, width, height, duration)
+                    filters = _movement_filters(
+                        scene.motion, width, height, duration,
+                        camera_profile=scene.camera_profile,
+                        light_breathing=scene.light_breathing,
+                    )
                     if subtitle_file:
                         filters.append(_subtitle_filter(subtitle_file))
                     command = [
