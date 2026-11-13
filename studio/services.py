@@ -198,8 +198,12 @@ def _group_words(words, max_words=7):
     if current:
         groups.append(current)
     return [
-        {"start": group[0]["start"], "end": group[-1]["end"],
-         "text": " ".join(item["word"] for item in group)}
+        {
+            "start": group[0]["start"],
+            "end": group[-1]["end"],
+            "text": " ".join(item["word"] for item in group),
+            "words": group,
+        }
         for group in groups if group[-1]["end"] > group[0]["start"]
     ]
 

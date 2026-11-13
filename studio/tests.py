@@ -191,6 +191,79 @@ class VideoSceneTests(MediaTestCase):
         self.assertIn("force_original_aspect_ratio=decrease", fixed[0])
         self.assertTrue(any(item.startswith("pad=") for item in fixed))
 
+    def test_vertical_dimensions_and_video_encoder_fallback(self):
+        from .video_services import (
+            _dimensions, _software_fallback_command, _video_encoder_args,
+        )
+
+        self.assertEqual(_dimensions(NarrationProject.VideoFormat.VERTICAL), (1080, 1920))
+        self.assertEqual(_dimensions(NarrationProject.VideoFormat.HORIZONTAL), (1280, 720))
+        with patch("studio.video_services._video_encoder", return_value="h264_videotoolbox"):
+            self.assertEqual(_video_encoder_args("ffmpeg", 1080, 1920), [
+                "-c:v", "h264_videotoolbox", "-b:v", "15M",
+            ])
+        with patch("studio.video_services._video_encoder", return_value="libx264"):
+            self.assertEqual(_video_encoder_args("ffmpeg", 1080, 1920), [
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "24",
+            ])
+
+        command = [
+            "ffmpeg", "-vf", "null", "-c:v", "h264_videotoolbox", "-b:v", "15M",
+            "-pix_fmt", "yuv420p", "output.mp4",
+        ]
+        self.assertEqual(_software_fallback_command(command), [
+            "ffmpeg", "-vf", "null", "-c:v", "libx264", "-preset", "ultrafast",
+            "-crf", "24", "-pix_fmt", "yuv420p", "output.mp4",
+        ])
+
+    def test_ass_captions_highlight_words_and_keep_legacy_phrases(self):
+        from .video_services import _ass_text
+
+        word_segment = types.SimpleNamespace(subtitle_data=[{
+            "start": 0.1,
+            "end": 1.0,
+            "text": "Choisis une petite action.",
+            "words": [
+                {"word": "Choisis", "start": 0.1, "end": 0.35},
+                {"word": "une", "start": 0.38, "end": 0.48},
+                {"word": "petite", "start": 0.5, "end": 0.72},
+                {"word": "action.", "start": 0.74, "end": 1.0},
+            ],
+        }])
+        ass = _ass_text(word_segment)
+        self.assertIn("PlayResX: 1080", ass)
+        self.assertIn("PlayResY: 1920", ass)
+        self.assertIn(r"{\c&H000B9EF5&}Choisis{\c&H00FFFFFF&}", ass)
+        self.assertIn(r"{\c&H000B9EF5&}une{\c&H00FFFFFF&}", ass)
+        dialogue_lines = [line for line in ass.splitlines() if line.startswith("Dialogue:")]
+        self.assertEqual(len(dialogue_lines), 4)
+        self.assertTrue(all(line.count(r"\N") <= 1 for line in dialogue_lines))
+        long_words = [
+            {"word": word, "start": index * 0.2, "end": index * 0.2 + 0.15}
+            for index, word in enumerate([
+                "Extraordinaire", "progressivement", "resolument", "attention",
+                "transformation", "magnifique", "aujourdhui",
+            ])
+        ]
+        long_ass = _ass_text(types.SimpleNamespace(subtitle_data=[{
+            "start": 0.0, "end": 1.5, "text": " ".join(item["word"] for item in long_words),
+            "words": long_words,
+        }]))
+        long_dialogues = [line for line in long_ass.splitlines() if line.startswith("Dialogue:")]
+        self.assertGreater(len(long_dialogues), 1)
+        self.assertTrue(all(line.count(r"\N") <= 1 for line in long_dialogues))
+        horizontal_ass = _ass_text(word_segment, 1280, 720)
+        self.assertIn("PlayResX: 1280", horizontal_ass)
+        self.assertIn("PlayResY: 720", horizontal_ass)
+
+        legacy_segment = types.SimpleNamespace(subtitle_data=[{
+            "start": 0.2, "end": 1.1, "text": "Une phrase complète.",
+        }])
+        legacy_ass = _ass_text(legacy_segment)
+        self.assertIn("Dialogue: 0,0:00:00.20,0:00:01.10,Default", legacy_ass)
+        self.assertIn("Une phrase complète.", legacy_ass)
+        self.assertNotIn( r"{\c&H000B9EF5&}", legacy_ass)
+
     def test_animation_settings_defaults_preserve_existing_rendering(self):
         from .video_services import _movement_filters
 
@@ -315,7 +388,10 @@ class VideoSceneTests(MediaTestCase):
         self.assertTrue(Path(project.video_file.path).is_file())
         self.assertEqual(run_ffmpeg.call_count, 2)
         scene_command = run_ffmpeg.call_args_list[0].args[0]
-        self.assertIn("subtitles=filename=scene-0001.srt", scene_command[scene_command.index("-vf") + 1])
+        filters = scene_command[scene_command.index("-vf") + 1]
+        self.assertIn("subtitles=filename=scene-0001.ass", filters)
+        self.assertLess(filters.index("vignette="), filters.index("subtitles="))
+        self.assertEqual(scene_command[scene_command.index("-video_size") + 1], "1080x1920")
 
 
 class CacheAndCaptionTests(MediaTestCase):
@@ -356,7 +432,9 @@ class CacheAndCaptionTests(MediaTestCase):
             {"word": "à", "start": 0.55, "end": 0.65},
             {"word": "tous.", "start": 0.7, "end": 1.0},
         ]
-        self.assertEqual(_group_words(words)[0]["text"], "Bonjour à tous.")
+        grouped = _group_words(words)[0]
+        self.assertEqual(grouped["text"], "Bonjour à tous.")
+        self.assertEqual(grouped["words"], words)
         first = types.SimpleNamespace(
             subtitle_data=[{"start": 0.1, "end": 1.0, "text": "Bonjour à tous."}], duration_seconds=2.0,
         )

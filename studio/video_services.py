@@ -14,7 +14,7 @@ from django.db import close_old_connections
 from django.utils import timezone
 
 from .models import NarrationProject, NarrationSegment
-from .services import _ffmpeg_path, srt_text
+from .services import _ffmpeg_path
 
 
 FFPROBE_TIMEOUT_SECONDS = 60
@@ -62,7 +62,7 @@ def _video_encoder(ffmpeg):
 def _video_encoder_args(ffmpeg, width, height):
     """Return codec-specific arguments for the selected encoder."""
     if _video_encoder(ffmpeg) == "h264_videotoolbox":
-        # The app currently renders at 720p in both orientations.
+        # 1080p outputs use the higher target bitrate; smaller outputs stay at 10 Mbps.
         bitrate = "10M" if width * height <= 1280 * 720 else "15M"
         return ["-c:v", "h264_videotoolbox", "-b:v", bitrate]
     return ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "24"]
@@ -105,12 +105,17 @@ def _remove_partial_output(command, cwd):
 
 
 def _dimensions(video_format):
-    return (720, 1280) if video_format == NarrationProject.VideoFormat.VERTICAL else (1280, 720)
+    return (1080, 1920) if video_format == NarrationProject.VideoFormat.VERTICAL else (1280, 720)
 
 
 def _light_breathing_filter():
     """Add a very subtle brightness pulse once per scene."""
     return "eq=brightness='0.018*sin(2*PI*t/8)':eval=frame"
+
+
+def _color_grading_filters():
+    """Apply a restrained contrast/saturation lift and a subtle edge vignette."""
+    return ["eq=contrast=1.04:saturation=1.05", "vignette=angle=PI/16"]
 
 
 def _movement_filters(motion, width, height, duration, camera_profile="linear", light_breathing=False):
@@ -192,13 +197,178 @@ def _run_ffmpeg(command, cwd, operation):
         _run_ffmpeg_once(fallback, cwd, operation)
 
 
-def _subtitle_filter(subtitle_file):
-    return (
-        "subtitles=filename=" + subtitle_file.name
-        + ":force_style='FontName=Arial,FontSize=24,PrimaryColour=&H00FFFFFF,"
-        + "BackColour=&H99000000,BorderStyle=3,Outline=0,Shadow=0,Alignment=2,MarginV=55'"
-    )
+ASS_PLAY_RES_X = 1080
+ASS_PLAY_RES_Y = 1920
+ASS_MAX_LINE_CHARS = 30
+ASS_WHITE = "&H00FFFFFF&"
+ASS_ORANGE = "&H000B9EF5&"
 
+
+def _ass_time(seconds):
+    centiseconds = max(0, round(float(seconds) * 100))
+    total_seconds, fraction = divmod(centiseconds, 100)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, whole_seconds = divmod(remainder, 60)
+    return f"{hours}:{minutes:02}:{whole_seconds:02}.{fraction:02}"
+
+
+def _ass_escape_text(value):
+    # Keep generated subtitle text from being parsed as ASS override syntax.
+    return str(value).replace("\\", "／").replace("{", "｛").replace("}", "｝")
+
+
+def _ass_word_groups(words):
+    """Split aligned words into chunks that fit in no more than two display lines."""
+    groups, current, line_length, lines = [], [], 0, 1
+    for item in words:
+        word = (item.get("word") or "").strip()
+        if not word or item.get("start") is None or item.get("end") is None:
+            continue
+        try:
+            start, end = float(item["start"]), float(item["end"])
+        except (TypeError, ValueError):
+            continue
+        if end <= start:
+            continue
+        item = {"word": word, "start": start, "end": end}
+        token_length = len(_ass_escape_text(word))
+        next_lines = lines + int(bool(current) and line_length + 1 + token_length > ASS_MAX_LINE_CHARS)
+        if current and next_lines > 2:
+            groups.append(current)
+            current, line_length, lines = [item], token_length, 1
+        else:
+            current.append(item)
+            if len(current) == 1 or line_length + 1 + token_length > ASS_MAX_LINE_CHARS:
+                lines += int(len(current) > 1)
+                line_length = token_length
+            else:
+                line_length += 1 + token_length
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _ass_text_lines(words, active_index=None):
+    lines = [[]]
+    line_length = 0
+    for index, item in enumerate(words):
+        word = _ass_escape_text(item["word"])
+        if lines[-1] and line_length + 1 + len(word) > ASS_MAX_LINE_CHARS and len(lines) < 2:
+            lines.append([])
+            line_length = 0
+        if lines[-1]:
+            lines[-1].append(" ")
+            line_length += 1
+        if active_index == index:
+            lines[-1].append(r"{\c" + ASS_ORANGE + "}" + word + r"{\c" + ASS_WHITE + "}")
+        else:
+            lines[-1].append(word)
+        line_length += len(word)
+    return r"\N".join("".join(line) for line in lines)
+
+
+def _ass_phrase_groups(text):
+    words = [{"word": word} for word in str(text).split() if word]
+    groups, current, line_length, lines = [], [], 0, 1
+    for item in words:
+        token_length = len(_ass_escape_text(item["word"]))
+        next_lines = lines + int(bool(current) and line_length + 1 + token_length > ASS_MAX_LINE_CHARS)
+        if current and next_lines > 2:
+            groups.append(current)
+            current, line_length, lines = [item], token_length, 1
+        else:
+            current.append(item)
+            if len(current) == 1 or line_length + 1 + token_length > ASS_MAX_LINE_CHARS:
+                lines += int(len(current) > 1)
+                line_length = token_length
+            else:
+                line_length += 1 + token_length
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _ass_text(segment, width=ASS_PLAY_RES_X, height=ASS_PLAY_RES_Y):
+    """Create a TikTok-style ASS track; old phrase-only data stays renderable."""
+    font_size = max(34, round(66 * height / ASS_PLAY_RES_Y))
+    outline = max(3, round(5 * height / ASS_PLAY_RES_Y))
+    margin_x = round(150 * width / ASS_PLAY_RES_X)
+    margin_y = round(360 * height / ASS_PLAY_RES_Y)
+    dialogue = []
+    for caption in segment.subtitle_data or []:
+        words = caption.get("words") or []
+        groups = _ass_word_groups(words) if words else []
+        if groups:
+            for group in groups:
+                for index, word in enumerate(group):
+                    start = word["start"]
+                    end = group[index + 1]["start"] if index + 1 < len(group) else word["end"]
+                    if end <= start:
+                        end = word["end"]
+                    if end <= start:
+                        continue
+                    dialogue.append(
+                        "Dialogue: 0,"
+                        + _ass_time(start) + "," + _ass_time(end)
+                        + ",Default,,0,0,0,,"
+                        + _ass_text_lines(group, active_index=index)
+                    )
+            continue
+
+        # Older projects contain only phrase start/end/text. Render those as
+        # static, two-line captions instead of failing or inventing word timing.
+        try:
+            start, end = float(caption["start"]), float(caption["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if end <= start:
+            continue
+        phrase_groups = _ass_phrase_groups(caption.get("text", ""))
+        if not phrase_groups:
+            continue
+        if len(phrase_groups) == 1:
+            dialogue.append(
+                "Dialogue: 0,"
+                + _ass_time(start) + "," + _ass_time(end)
+                + ",Default,,0,0,0,,"
+                + _ass_text_lines(phrase_groups[0])
+            )
+        else:
+            total_chars = sum(len(item["word"]) for group in phrase_groups for item in group)
+            elapsed = start
+            for index, group in enumerate(phrase_groups):
+                group_chars = sum(len(item["word"]) for item in group)
+                group_end = end if index == len(phrase_groups) - 1 else (
+                    elapsed + (end - start) * group_chars / max(1, total_chars)
+                )
+                dialogue.append(
+                    "Dialogue: 0,"
+                    + _ass_time(elapsed) + "," + _ass_time(group_end)
+                    + ",Default,,0,0,0,,"
+                    + _ass_text_lines(group)
+                )
+                elapsed = group_end
+
+    header = [
+        "[Script Info]",
+        "ScriptType: v4.00+",
+        f"PlayResX: {width}",
+        f"PlayResY: {height}",
+        "WrapStyle: 2",
+        "ScaledBorderAndShadow: yes",
+        "",
+        "[V4+ Styles]",
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+        "Style: Default,Arial," + str(font_size) + ",&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1," + str(outline) + ",1,2," + str(margin_x) + "," + str(margin_x) + "," + str(margin_y) + ",1",
+        "",
+        "[Events]",
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+    ]
+    return "\n".join(header + dialogue) + "\n"
+
+
+def _subtitle_filter(subtitle_file):
+    return "subtitles=filename=" + subtitle_file.name
 
 _REMBG_SESSION = None
 _REMBG_SESSION_LOCK = threading.Lock()
@@ -370,10 +540,11 @@ def _render_parallax_clip(
         "-framerate", "24", "-i", "pipe:0", "-i", str(audio_path), "-t", f"{duration:.3f}",
     ]
     video_filters = []
-    if subtitle_file:
-        video_filters.append(_subtitle_filter(subtitle_file))
     if light_breathing:
         video_filters.append(_light_breathing_filter())
+    video_filters.extend(_color_grading_filters())
+    if subtitle_file:
+        video_filters.append(_subtitle_filter(subtitle_file))
     if video_filters:
         command.extend(["-vf", ",".join(video_filters)])
     command.extend([
@@ -548,10 +719,11 @@ def render_project_video(project_id):
                 duration = max(0.1, float(scene.duration_seconds))
                 subtitle_file = None
                 if project.subtitles_enabled:
-                    subtitle_file = folder / f"scene-{index:04}.srt"
-                    subtitle_file.write_text(srt_text([scene]), encoding="utf-8")
-                    if not subtitle_file.read_text(encoding="utf-8").strip():
+                    subtitle_file = folder / f"scene-{index:04}.ass"
+                    subtitle_content = _ass_text(scene, width, height)
+                    if "Dialogue:" not in subtitle_content:
                         raise RuntimeError(f"Aucun sous-titre synchronisé n’est disponible pour la scène {index}.")
+                    subtitle_file.write_text(subtitle_content, encoding="utf-8")
 
                 if scene.motion == NarrationSegment.Motion.PARALLAX:
                     project.status_message = f"Rendu vidéo · scène {index}/{len(scenes)} · profondeur douce"
@@ -566,6 +738,7 @@ def render_project_video(project_id):
                         camera_profile=scene.camera_profile,
                         light_breathing=scene.light_breathing,
                     )
+                    filters.extend(_color_grading_filters())
                     if subtitle_file:
                         filters.append(_subtitle_filter(subtitle_file))
                     command = [
