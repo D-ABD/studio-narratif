@@ -391,7 +391,7 @@ class VideoSceneTests(MediaTestCase):
         filters = scene_command[scene_command.index("-vf") + 1]
         self.assertIn("subtitles=filename=scene-0001.ass", filters)
         self.assertLess(filters.index("vignette="), filters.index("subtitles="))
-        self.assertEqual(scene_command[scene_command.index("-video_size") + 1], "1080x1920")
+        self.assertIn("scale=1080:1920", filters)
 
 
 class CacheAndCaptionTests(MediaTestCase):
