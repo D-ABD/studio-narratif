@@ -473,7 +473,7 @@ def _ass_text(segment, width=ASS_PLAY_RES_X, height=ASS_PLAY_RES_Y):
 
 
 def _subtitle_filter(subtitle_file):
-    return "subtitles=filename=" + subtitle_file.name
+    return "subtitles=filename=" + Path(subtitle_file).name
 
 _REMBG_SESSION = None
 _REMBG_SESSION_LOCK = threading.Lock()
