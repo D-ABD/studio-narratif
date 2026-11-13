@@ -61,7 +61,12 @@
   .scene-delete:hover { color:#F07D77; }
   .scene-editor-fields { display:grid; gap:12px; padding:13px; }
   .scene-editor-fields .editor-textarea { min-height:95px; }
-  .scene-scene-settings { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:end; gap:10px; }
+  .scene-scene-settings { display:grid; gap:10px; }
+  .animation-toolbar { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+  .animation-effect { display:grid; grid-template-columns:minmax(120px,1fr) minmax(100px,auto); align-items:center; gap:8px; padding:8px; border:1px solid #293241; border-radius:9px; background:#11161F; }
+  .animation-effect label { display:flex; align-items:center; gap:7px; color:#D5DAE3; font-size:10px; }
+  .animation-effect input[type="checkbox"] { accent-color:#F59E0B; }
+  .animation-effect .editor-select { min-width:0; padding:7px; }
   .scene-save-row { display:flex; justify-content:space-between; align-items:center; gap:10px; }
   .add-scene-row { display:flex; align-items:center; gap:10px; padding:0 14px 14px; }
   .voice-option { display:flex; align-items:center; gap:9px; margin-bottom:11px; padding:10px; border:1px solid #303948; border-radius:10px; background:#11161F; }
@@ -84,7 +89,7 @@
   .editor-alert { margin:0; color:#7F8999; font-size:9px; line-height:1.55; }
   .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
   @media(max-width:1000px) { .editor-layout { grid-template-columns:minmax(0,1fr); } .editor-right { grid-row:1; } }
-  @media(max-width:620px) { .scene-preview { height:150px; } .scene-scene-settings { grid-template-columns:1fr; } .editor-toolbar-row,.scene-save-row { align-items:flex-start; flex-direction:column; } }
+  @media(max-width:620px) { .scene-preview { height:150px; } .scene-scene-settings { grid-template-columns:1fr; } .animation-toolbar { grid-template-columns:1fr; } .editor-toolbar-row,.scene-save-row { align-items:flex-start; flex-direction:column; } }
 </style>
 <section class="premium-editor">
   <div class="editor-toolbar">
@@ -147,21 +152,31 @@
               {% csrf_token %}
               <label class="setting-label" for="text-{{ segment.id }}">Texte de la scène</label>
               <textarea class="editor-textarea" id="text-{{ segment.id }}" name="text" maxlength="12000" rows="4" placeholder="Écris ce que la voix dira pendant cette scène…">{{ segment.text }}</textarea>
+              <input type="hidden" name="animation_settings" value="{{ segment.animation_settings_json|escape }}">
               <div class="scene-scene-settings">
-                <label class="setting-label" for="motion-{{ segment.id }}">Mouvement de l’image
-                  <select class="editor-select" id="motion-{{ segment.id }}" name="motion">
-                    {% for value,label in motions %}<option value="{{ value }}" {% if segment.motion == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
-                  </select>
-                </label>
                 <label class="setting-label" for="camera-profile-{{ segment.id }}">Profil de caméra
-                  <select class="editor-select" id="camera-profile-{{ segment.id }}" name="camera_profile">
-                    {% for value,label in camera_profiles %}<option value="{{ value }}" {% if segment.camera_profile == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
+                  <select class="editor-select" id="camera-profile-{{ segment.id }}" name="camera_profile" data-animation-setting>
+                    {% for value,label in camera_profiles %}<option value="{{ value }}" {% if segment.animation_settings.camera_profile == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
                   </select>
                 </label>
-                <label class="setting-check">
-                  <input type="checkbox" name="light_breathing" {% if segment.light_breathing %}checked{% endif %}>
-                  Respiration lumineuse
-                </label>
+                <div class="animation-toolbar">
+                  {% for control in segment.animation_controls %}
+                  <div class="animation-effect">
+                    <label>
+                      <input type="checkbox" data-animation-setting data-effect-name="{{ control.key }}" data-effect-field="enabled" {% if control.enabled %}checked{% endif %}>
+                      {{ control.label }}
+                    </label>
+                    <select class="editor-select" aria-label="Intensité {{ control.label }}" data-animation-setting data-effect-name="{{ control.key }}" data-effect-field="level">
+                      {% for value,label in animation_levels %}<option value="{{ value }}" {% if control.level == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
+                    </select>
+                    {% if control.directions %}
+                    <select class="editor-select" aria-label="Direction {{ control.label }}" data-animation-setting data-effect-name="{{ control.key }}" data-effect-field="direction">
+                      {% for value,label in control.directions %}<option value="{{ value }}" {% if control.direction == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
+                    </select>
+                    {% endif %}
+                  </div>
+                  {% endfor %}
+                </div>
                 <span class="editor-small"><span class="word-count">{{ segment.text|wordcount }}</span> mots · env. <span class="duration-estimate">0</span> s</span>
               </div>
               <div class="scene-save-row">

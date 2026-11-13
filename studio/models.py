@@ -2,6 +2,56 @@ from django.db import models
 from django.utils import timezone
 
 
+ANIMATION_LEVEL_CHOICES = (
+    ("slow", "Lent"),
+    ("medium", "Moyen"),
+    ("fast", "Rapide"),
+)
+ANIMATION_EFFECTS = ("zoom", "pan", "parallax", "handheld", "light_breathing", "light_leak")
+
+
+def default_animation_settings():
+    return {
+        "version": 1,
+        "camera_profile": "linear",
+        "effects": {
+            "zoom": {"enabled": True, "level": "medium", "direction": "in"},
+            "pan": {"enabled": False, "level": "medium", "direction": "horizontal"},
+            "parallax": {"enabled": False, "level": "medium"},
+            "handheld": {"enabled": False, "level": "medium"},
+            "light_breathing": {"enabled": False, "level": "medium"},
+            "light_leak": {"enabled": False, "level": "medium"},
+        },
+    }
+
+
+def legacy_animation_settings(motion, camera_profile="linear", light_breathing=False):
+    """Translate the former single-motion fields into the multi-effect schema."""
+    settings = default_animation_settings()
+    effects = settings["effects"]
+    for effect in effects.values():
+        effect["enabled"] = False
+
+    if motion == "zoom_in":
+        effects["zoom"].update(enabled=True, direction="in")
+    elif motion == "zoom_out":
+        effects["zoom"].update(enabled=True, direction="out")
+    elif motion == "pan_h":
+        effects["pan"].update(enabled=True, direction="horizontal")
+    elif motion == "pan_v":
+        effects["pan"].update(enabled=True, direction="vertical")
+    elif motion == "zoom_pan":
+        effects["zoom"].update(enabled=True, direction="in")
+        effects["pan"].update(enabled=True, direction="diagonal")
+    elif motion == "parallax":
+        effects["parallax"]["enabled"] = True
+
+    if camera_profile in {"linear", "organic"}:
+        settings["camera_profile"] = camera_profile
+    effects["light_breathing"]["enabled"] = bool(light_breathing)
+    return settings
+
+
 class Voice(models.Model):
     class Category(models.TextChoices):
         SHIBA = "shiba", "Shiba"
@@ -92,6 +142,7 @@ class NarrationSegment(models.Model):
         max_length=8, choices=CameraProfile.choices, default=CameraProfile.LINEAR,
     )
     light_breathing = models.BooleanField(default=False)
+    animation_settings = models.JSONField(default=default_animation_settings, blank=True)
     text = models.TextField(blank=True)
     audio = models.FileField(upload_to="segments/audio/", blank=True)
     subtitle_data = models.JSONField(default=list, blank=True)

@@ -543,3 +543,81 @@ class WavExportTests(MediaTestCase):
             with wave.open(str(output), "rb") as stream:
                 self.assertEqual(stream.getnchannels(), 1)
                 self.assertEqual(stream.getframerate(), 24000)
+
+
+class MultiEffectAnimationTests(MediaTestCase):
+    def test_legacy_motion_conversion_keeps_old_effect_combinations(self):
+        from .models import legacy_animation_settings
+
+        zoom_pan = legacy_animation_settings("zoom_pan", "organic", True)
+        self.assertEqual(zoom_pan["camera_profile"], "organic")
+        self.assertTrue(zoom_pan["effects"]["zoom"]["enabled"])
+        self.assertTrue(zoom_pan["effects"]["pan"]["enabled"])
+        self.assertEqual(zoom_pan["effects"]["pan"]["direction"], "diagonal")
+        self.assertTrue(zoom_pan["effects"]["light_breathing"]["enabled"])
+
+        parallax = legacy_animation_settings("parallax")
+        self.assertTrue(parallax["effects"]["parallax"]["enabled"])
+        self.assertFalse(parallax["effects"]["zoom"]["enabled"])
+
+    def test_animation_filters_combine_camera_light_grading_and_subtitles_in_order(self):
+        from .video_services import _animation_filter_chain
+
+        settings = {
+            "camera_profile": "organic",
+            "effects": {
+                "zoom": {"enabled": True, "level": "fast", "direction": "in"},
+                "pan": {"enabled": True, "level": "slow", "direction": "horizontal"},
+                "parallax": {"enabled": True, "level": "medium"},
+                "handheld": {"enabled": True, "level": "slow"},
+                "light_breathing": {"enabled": True, "level": "medium"},
+                "light_leak": {"enabled": True, "level": "slow"},
+            },
+        }
+        filters = _animation_filter_chain(settings, 1080, 1920, 10, "captions.ass")
+        zoom_index = next(i for i, item in enumerate(filters) if item.startswith("zoompan="))
+        rotate_index = next(i for i, item in enumerate(filters) if item.startswith("rotate="))
+        breathing_index = next(i for i, item in enumerate(filters) if item.startswith("eq="))
+        leak_index = next(i for i, item in enumerate(filters) if item.startswith("format=rgb24,geq="))
+        grade_index = filters.index("eq=contrast=1.04:saturation=1.05")
+        subtitle_index = next(i for i, item in enumerate(filters) if item.startswith("subtitles="))
+        self.assertLess(zoom_index, rotate_index)
+        self.assertLess(rotate_index, breathing_index)
+        self.assertLess(breathing_index, leak_index)
+        self.assertLess(leak_index, grade_index)
+        self.assertLess(grade_index, subtitle_index)
+
+    def test_animation_settings_post_rejects_unknown_values_and_persists_unchecked_boxes(self):
+        import json
+
+        project = NarrationProject.objects.create(title="Effets")
+        segment = NarrationSegment.objects.create(project=project, position=0, text="Salut.")
+        settings = {
+            "version": 1,
+            "camera_profile": "linear",
+            "effects": {
+                "zoom": {"enabled": False, "level": "medium", "direction": "in"},
+                "pan": {"enabled": False, "level": "medium", "direction": "horizontal"},
+                "parallax": {"enabled": False, "level": "medium"},
+                "handheld": {"enabled": False, "level": "medium"},
+                "light_breathing": {"enabled": False, "level": "medium"},
+                "light_leak": {"enabled": False, "level": "medium"},
+            },
+        }
+        response = self.client.post(
+            f"/projects/{project.pk}/segments/{segment.pk}/save/",
+            {"text": "Salut.", "animation_settings": json.dumps(settings)},
+        )
+        self.assertEqual(response.status_code, 302)
+        segment.refresh_from_db()
+        self.assertFalse(any(effect["enabled"] for effect in segment.animation_settings["effects"].values()))
+        self.assertEqual(segment.motion, NarrationSegment.Motion.STILL)
+
+        settings["effects"]["zoom"]["level"] = ["fast"]
+        response = self.client.post(
+            f"/projects/{project.pk}/segments/{segment.pk}/save/",
+            {"text": "Salut.", "animation_settings": json.dumps(settings)},
+        )
+        self.assertEqual(response.status_code, 400)
+        segment.refresh_from_db()
+        self.assertFalse(segment.animation_settings["effects"]["zoom"]["enabled"])

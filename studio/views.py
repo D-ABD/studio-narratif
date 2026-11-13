@@ -14,7 +14,10 @@ from django.utils import timezone
 from django.views.decorators.http import require_POST
 from PIL import Image, UnidentifiedImageError
 
-from .models import NarrationProject, NarrationSegment, Voice
+from .models import (
+    ANIMATION_EFFECTS, ANIMATION_LEVEL_CHOICES, NarrationProject, NarrationSegment, Voice,
+    default_animation_settings, legacy_animation_settings,
+)
 from .services import _voice_sample_digest, cache_key_for, hash_file, normalize_voice_sample, srt_text
 
 logger = logging.getLogger(__name__)
@@ -25,6 +28,98 @@ MAX_IMPORT_BYTES = 500 * 1024 * 1024
 MAX_IMPORT_PIXELS = 100_000_000
 ALLOWED_SAMPLE_EXTENSIONS = {".wav", ".mp3", ".webm", ".m4a", ".ogg"}
 ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm"}
+ANIMATION_EFFECT_DEFINITIONS = (
+    {"key": "zoom", "label": "Zoom", "directions": (("in", "Avant"), ("out", "Arrière"))},
+    {"key": "pan", "label": "Panoramique", "directions": (
+        ("horizontal", "Horizontal"), ("vertical", "Vertical"), ("diagonal", "Diagonal"),
+    )},
+    {"key": "parallax", "label": "Parallaxe 2.5D", "directions": ()},
+    {"key": "handheld", "label": "Caméra à main levée", "directions": ()},
+    {"key": "light_breathing", "label": "Respiration lumineuse", "directions": ()},
+    {"key": "light_leak", "label": "Fuite lumineuse", "directions": ()},
+)
+
+
+def _validate_animation_settings_json(raw_value):
+    if not isinstance(raw_value, str) or len(raw_value) > 8000:
+        raise ValueError("Réglages d’animation absents ou trop volumineux.")
+    try:
+        settings = json.loads(raw_value)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ValueError("Le JSON des réglages d’animation est invalide.") from exc
+    if not isinstance(settings, dict) or set(settings) != {"version", "camera_profile", "effects"}:
+        raise ValueError("La structure des réglages d’animation est invalide.")
+    if type(settings["version"]) is not int or settings["version"] != 1:
+        raise ValueError("La version des réglages d’animation n’est pas prise en charge.")
+    if not isinstance(settings["camera_profile"], str) or settings["camera_profile"] not in NarrationSegment.CameraProfile.values:
+        raise ValueError("Profil de caméra invalide.")
+    effects = settings["effects"]
+    if not isinstance(effects, dict) or set(effects) != set(ANIMATION_EFFECTS):
+        raise ValueError("La liste des effets d’animation est invalide.")
+
+    levels = {value for value, _label in ANIMATION_LEVEL_CHOICES}
+    expected_fields = {
+        "zoom": {"enabled", "level", "direction"},
+        "pan": {"enabled", "level", "direction"},
+        "parallax": {"enabled", "level"},
+        "handheld": {"enabled", "level"},
+        "light_breathing": {"enabled", "level"},
+        "light_leak": {"enabled", "level"},
+    }
+    allowed_directions = {
+        "zoom": {"in", "out"},
+        "pan": {"horizontal", "vertical", "diagonal"},
+    }
+    for key, required_fields in expected_fields.items():
+        config = effects[key]
+        if not isinstance(config, dict) or set(config) != required_fields:
+            raise ValueError(f"Réglages invalides pour l’effet {key}.")
+        if (type(config["enabled"]) is not bool or not isinstance(config["level"], str)
+                or config["level"] not in levels):
+            raise ValueError(f"Activation ou niveau invalide pour l’effet {key}.")
+        if key in allowed_directions and (
+            not isinstance(config["direction"], str)
+            or config["direction"] not in allowed_directions[key]
+        ):
+            raise ValueError(f"Direction invalide pour l’effet {key}.")
+    return settings
+
+
+def _legacy_motion_from_animation(settings):
+    effects = settings["effects"]
+    if effects["parallax"]["enabled"]:
+        return NarrationSegment.Motion.PARALLAX
+    zoom = effects["zoom"]
+    pan = effects["pan"]
+    if zoom["enabled"] and pan["enabled"]:
+        return NarrationSegment.Motion.ZOOM_PAN
+    if pan["enabled"]:
+        return (
+            NarrationSegment.Motion.PAN_V
+            if pan["direction"] == "vertical"
+            else NarrationSegment.Motion.PAN_H
+        )
+    if zoom["enabled"]:
+        return (
+            NarrationSegment.Motion.ZOOM_OUT
+            if zoom["direction"] == "out"
+            else NarrationSegment.Motion.ZOOM_IN
+        )
+    return NarrationSegment.Motion.STILL
+
+
+def _settings_for_legacy_post(request, segment):
+    motion = request.POST.get("motion", segment.motion)
+    camera_profile = request.POST.get("camera_profile", segment.camera_profile)
+    if motion not in NarrationSegment.Motion.values:
+        raise ValueError("Mouvement de scène invalide.")
+    if camera_profile not in NarrationSegment.CameraProfile.values:
+        raise ValueError("Profil de caméra invalide.")
+    return legacy_animation_settings(
+        motion,
+        camera_profile,
+        request.POST.get("light_breathing") == "on",
+    )
 
 
 def _delete_storage_files(files):
@@ -280,6 +375,17 @@ def project_detail(request, project_id):
             )
         except (OSError, ValueError):
             segment.ready_for_voice = False
+        animation = segment.animation_settings or default_animation_settings()
+        segment.animation_settings_json = json.dumps(animation, ensure_ascii=False, separators=(",", ":"))
+        segment.animation_controls = []
+        for definition in ANIMATION_EFFECT_DEFINITIONS:
+            config = animation["effects"][definition["key"]]
+            segment.animation_controls.append({
+                **definition,
+                "enabled": config["enabled"],
+                "level": config["level"],
+                "direction": config.get("direction", ""),
+            })
     return render(request, "studio/project_editor.html", {
         "project": project,
         "projects": NarrationProject.objects.all()[:30],
@@ -289,6 +395,7 @@ def project_detail(request, project_id):
         "video_formats": NarrationProject.VideoFormat.choices,
         "motions": NarrationSegment.Motion.choices,
         "camera_profiles": NarrationSegment.CameraProfile.choices,
+        "animation_levels": ANIMATION_LEVEL_CHOICES,
         "has_scenes": bool(segments and any(segment.image for segment in segments)),
         "has_video_clips": bool(segments and any(segment.video_clip for segment in segments)),
         "can_assemble_clips": bool(
@@ -510,19 +617,25 @@ def save_segment(request, project_id, segment_id):
     segment = get_object_or_404(NarrationSegment, pk=segment_id, project=project)
     if project.status in {NarrationProject.Status.QUEUED, NarrationProject.Status.PROCESSING}:
         return JsonResponse({"ok": False, "error": "Attends la fin du traitement avant de modifier le projet."}, status=409)
+
+    try:
+        raw_settings = request.POST.get("animation_settings")
+        if raw_settings is None:
+            # Compatibility for an already-open page from the previous editor.
+            animation_settings = _settings_for_legacy_post(request, segment)
+        else:
+            animation_settings = _validate_animation_settings_json(raw_settings)
+    except ValueError as exc:
+        return HttpResponseBadRequest(str(exc))
+
     text = (request.POST.get("text") or "").strip()[:12000]
-    motion = request.POST.get("motion", segment.motion)
-    camera_profile = request.POST.get("camera_profile", segment.camera_profile)
-    light_breathing = request.POST.get("light_breathing") == "on"
-    if motion not in NarrationSegment.Motion.values:
-        return HttpResponseBadRequest("Mouvement de scène invalide.")
-    if camera_profile not in NarrationSegment.CameraProfile.values:
-        return HttpResponseBadRequest("Profil de caméra invalide.")
+    animation_changed = animation_settings != (segment.animation_settings or default_animation_settings())
     text_changed = text != segment.text
-    motion_changed = motion != segment.motion
-    camera_profile_changed = camera_profile != segment.camera_profile
-    light_breathing_changed = light_breathing != segment.light_breathing
-    video_settings_changed = motion_changed or camera_profile_changed or light_breathing_changed
+    effects = animation_settings["effects"]
+    legacy_motion = _legacy_motion_from_animation(animation_settings)
+    camera_profile = animation_settings["camera_profile"]
+    light_breathing = effects["light_breathing"]["enabled"]
+
     if text_changed:
         if segment.audio:
             segment.audio.delete(save=False)
@@ -532,19 +645,21 @@ def save_segment(request, project_id, segment_id):
         segment.duration_seconds = 0
         segment.cache_key = ""
     segment.text = text
-    segment.motion = motion
+    segment.animation_settings = animation_settings
+    # Keep the previous columns populated for compatibility and safe rollback.
+    segment.motion = legacy_motion
     segment.camera_profile = camera_profile
     segment.light_breathing = light_breathing
     segment.save(update_fields=[
-        "text", "motion", "camera_profile", "light_breathing", "audio",
+        "text", "animation_settings", "motion", "camera_profile", "light_breathing", "audio",
         "subtitle_data", "duration_seconds", "cache_key", "updated_at",
     ])
     if text_changed:
         _invalidate_export(project)
         messages.success(request, "Le segment a été enregistré.")
-    elif video_settings_changed:
+    elif animation_changed:
         _invalidate_video(project)
-        messages.success(request, "Les réglages visuels de la scène ont été enregistrés.")
+        messages.success(request, "Les réglages d’animation ont été enregistrés.")
     else:
         messages.info(request, "Aucun changement à enregistrer.")
     return redirect(f"/projects/{project.pk}/#segment-{segment.pk}")

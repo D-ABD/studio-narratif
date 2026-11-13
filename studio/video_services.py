@@ -166,6 +166,111 @@ def _movement_filters(motion, width, height, duration, camera_profile="linear", 
     return filters
 
 
+
+
+ANIMATION_LEVELS = {
+    "slow": {"zoom": 0.035, "pan": 0.035, "handheld": 0.0015, "light": 0.025, "period": 8},
+    "medium": {"zoom": 0.065, "pan": 0.065, "handheld": 0.0030, "light": 0.045, "period": 6},
+    "fast": {"zoom": 0.10, "pan": 0.10, "handheld": 0.0050, "light": 0.065, "period": 4},
+}
+
+
+def _camera_effect_filters(settings, width, height, duration):
+    """Build a shared camera chain for image and parallax base frames."""
+    effects = (settings or {}).get("effects", {})
+    profile = (settings or {}).get("camera_profile", "linear")
+    zoom = effects.get("zoom", {})
+    pan = effects.get("pan", {})
+    handheld = effects.get("handheld", {})
+    active_camera = zoom.get("enabled") or pan.get("enabled") or handheld.get("enabled")
+    filters = []
+    if active_camera:
+        filters.extend([
+            f"scale={round(width * 1.12)}:{round(height * 1.12)}:force_original_aspect_ratio=increase",
+            f"crop={round(width * 1.12)}:{round(height * 1.12)}",
+        ])
+        frames = max(1, round(max(0.1, duration) * 24))
+        progress = f"min(on/{frames},1)"
+        if profile == "organic":
+            progress = f"(0.5-0.5*cos(PI*{progress}))"
+        zoom_on = zoom.get("enabled", False)
+        pan_on = pan.get("enabled", False)
+        zoom_level = ANIMATION_LEVELS.get(zoom.get("level"), ANIMATION_LEVELS["medium"])["zoom"]
+        pan_level = ANIMATION_LEVELS.get(pan.get("level"), ANIMATION_LEVELS["medium"])["pan"]
+        baseline = 1.12 / (1.0 + (zoom_level if zoom_on else pan_level if pan_on else 0.0))
+        if zoom_on and zoom.get("direction") == "out":
+            zoom_expr = f"{baseline + zoom_level:.5f}-{zoom_level:.5f}*{progress}"
+        elif zoom_on:
+            zoom_expr = f"{baseline:.5f}+{zoom_level:.5f}*{progress}"
+        elif pan_on:
+            zoom_expr = f"{baseline + pan_level:.5f}"
+        else:
+            zoom_expr = "1.04"
+        x_expr = "iw/2-(iw/zoom/2)"
+        y_expr = "ih/2-(ih/zoom/2)"
+        if pan_on:
+            direction = pan.get("direction")
+            if direction in {"horizontal", "diagonal"}:
+                x_expr = f"(iw-iw/zoom)*{progress}"
+            if direction in {"vertical", "diagonal"}:
+                y_expr = f"(ih-ih/zoom)*{progress}"
+        filters.append(
+            f"zoompan=z='{zoom_expr}':x='{x_expr}':y='{y_expr}':d=1:s={width}x{height}:fps=24"
+        )
+    else:
+        filters.extend([
+            f"scale={width}:{height}:force_original_aspect_ratio=decrease",
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black",
+            "fps=24",
+        ])
+    if handheld.get("enabled"):
+        level = ANIMATION_LEVELS.get(handheld.get("level"), ANIMATION_LEVELS["medium"])
+        # Rotate inside an enlarged canvas and crop back to the output dimensions.
+        filters.extend([
+            f"scale={round(width * 1.08)}:{round(height * 1.08)}",
+            f"rotate=angle='{level['handheld']:.5f}*sin(2*PI*t/2.7)+{level['handheld'] * 0.45:.5f}*sin(2*PI*t/1.3)':ow=rotw(iw):oh=roth(ih):c=black",
+            f"crop={width}:{height}",
+        ])
+    return filters
+
+
+def _light_effect_filters(settings):
+    effects = (settings or {}).get("effects", {})
+    filters = []
+    breathing = effects.get("light_breathing", {})
+    if breathing.get("enabled"):
+        level = ANIMATION_LEVELS.get(breathing.get("level"), ANIMATION_LEVELS["medium"])
+        filters.append(
+            f"eq=brightness='{level['light']:.4f}*sin(2*PI*t/{level['period']})'"
+        )
+    leak = effects.get("light_leak", {})
+    if leak.get("enabled"):
+        level = ANIMATION_LEVELS.get(leak.get("level"), ANIMATION_LEVELS["medium"])
+        period = level["period"] * 1.7
+        # A warm, feathered band drifts across the frame without external overlay assets.
+        mask = (
+            f"exp(-pow((X-W*(0.18+0.64*(0.5+0.5*sin(2*PI*T/{period:.1f}))))/(W*0.22),2)"
+            f"-pow((Y-H*0.38)/(H*0.72),2))"
+        )
+        strength = 16 + round(level["light"] * 180)
+        filters.append(
+            "format=rgb24,"
+            f"geq=r='clip(r(X,Y)+{strength}*{mask},0,255)':"
+            f"g='clip(g(X,Y)+{round(strength * 0.58)}*{mask},0,255)':"
+            f"b='clip(b(X,Y)+{round(strength * 0.20)}*{mask},0,255)'"
+        )
+    return filters
+
+
+def _animation_filter_chain(settings, width, height, duration, subtitle_file=None):
+    filters = _camera_effect_filters(settings, width, height, duration)
+    filters.extend(_light_effect_filters(settings))
+    filters.extend(_color_grading_filters())
+    if subtitle_file:
+        filters.append(_subtitle_filter(subtitle_file))
+    return filters
+
+
 def _run_ffmpeg_once(command, cwd, operation):
     try:
         result = subprocess.run(
@@ -440,8 +545,9 @@ def _parallax_frames(image_path, width, height, duration):
     except Exception as exc:
         raise RuntimeError(f"Impossible de préparer la profondeur douce : {exc}") from exc
 
-    extra_x = max(12, round(width * 0.04))
-    extra_y = max(12, round(height * 0.04))
+    # Overscan leaves room for the later zoom/rotation crop without exposing black edges.
+    extra_x = max(24, round(width * 0.10))
+    extra_y = max(24, round(height * 0.10))
     layer_size = (width + 2 * extra_x, height + 2 * extra_y)
     with Image.open(image_path) as source_image:
         background = ImageOps.fit(source_image.convert("RGB"), layer_size, method=Image.Resampling.LANCZOS)
@@ -531,20 +637,15 @@ def _run_parallax_attempt(command, image_path, output_path, width, height, durat
 
 def _render_parallax_clip(
     ffmpeg, image_path, audio_path, output_path, subtitle_file, width, height, duration, folder,
-    light_breathing=False,
+    animation_settings=None,
 ):
-    """Encode parallax frames locally; keep its camera motion separate from image-scene movement."""
+    """Encode parallax base frames, then apply the shared camera/light/grade/subtitle chain."""
     command = [
         ffmpeg, "-y", "-v", "error",
         "-f", "rawvideo", "-pixel_format", "rgb24", "-video_size", f"{width}x{height}",
         "-framerate", "24", "-i", "pipe:0", "-i", str(audio_path), "-t", f"{duration:.3f}",
     ]
-    video_filters = []
-    if light_breathing:
-        video_filters.append(_light_breathing_filter())
-    video_filters.extend(_color_grading_filters())
-    if subtitle_file:
-        video_filters.append(_subtitle_filter(subtitle_file))
+    video_filters = _animation_filter_chain(animation_settings, width, height, duration, subtitle_file)
     if video_filters:
         command.extend(["-vf", ",".join(video_filters)])
     command.extend([
@@ -725,22 +826,17 @@ def render_project_video(project_id):
                         raise RuntimeError(f"Aucun sous-titre synchronisé n’est disponible pour la scène {index}.")
                     subtitle_file.write_text(subtitle_content, encoding="utf-8")
 
-                if scene.motion == NarrationSegment.Motion.PARALLAX:
+                animation_settings = scene.animation_settings or {}
+                effects = animation_settings.get("effects", {})
+                if effects.get("parallax", {}).get("enabled") or scene.motion == NarrationSegment.Motion.PARALLAX:
                     project.status_message = f"Rendu vidéo · scène {index}/{len(scenes)} · profondeur douce"
                     project.save(update_fields=["status_message", "updated_at"])
                     _render_parallax_clip(
                         ffmpeg, scene.image.path, scene.audio.path, clip, subtitle_file,
-                        width, height, duration, folder, light_breathing=scene.light_breathing,
+                        width, height, duration, folder, animation_settings=animation_settings,
                     )
                 else:
-                    filters = _movement_filters(
-                        scene.motion, width, height, duration,
-                        camera_profile=scene.camera_profile,
-                        light_breathing=scene.light_breathing,
-                    )
-                    filters.extend(_color_grading_filters())
-                    if subtitle_file:
-                        filters.append(_subtitle_filter(subtitle_file))
+                    filters = _animation_filter_chain(animation_settings, width, height, duration, subtitle_file)
                     command = [
                         ffmpeg, "-y", "-v", "error", "-loop", "1", "-i", str(scene.image.path),
                         "-i", str(scene.audio.path), "-t", f"{duration:.3f}", "-vf", ",".join(filters),

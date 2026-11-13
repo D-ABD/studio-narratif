@@ -66,15 +66,40 @@
     textarea.addEventListener('input', update);
     update();
   });
-  const sceneSettingSelector = 'select[name="motion"], select[name="camera_profile"], input[name="light_breathing"]';
-  document.querySelectorAll(`.segment-form ${sceneSettingSelector}`).forEach(control => {
-    const value = () => control.type === 'checkbox' ? String(control.checked) : control.value;
-    control.dataset.initialValue = value();
-    control.addEventListener('change', () => {
-      const changed = Array.from(control.form.querySelectorAll(sceneSettingSelector))
-        .some(input => (input.type === 'checkbox' ? String(input.checked) : input.value) !== input.dataset.initialValue);
-      control.form.dataset.motionDirty = changed ? 'true' : 'false';
+  const sceneSettingSelector = '[data-animation-setting]';
+  const animationDefaults = {
+    zoom: {enabled:false, level:'medium', direction:'in'},
+    pan: {enabled:false, level:'medium', direction:'horizontal'},
+    parallax: {enabled:false, level:'medium'},
+    handheld: {enabled:false, level:'medium'},
+    light_breathing: {enabled:false, level:'medium'},
+    light_leak: {enabled:false, level:'medium'}
+  };
+  const syncAnimationSettings = form => {
+    const effects = JSON.parse(JSON.stringify(animationDefaults));
+    form.querySelectorAll('[data-effect-name]').forEach(control => {
+      const effect = effects[control.dataset.effectName];
+      if (!effect) return;
+      const field = control.dataset.effectField;
+      effect[field] = field === 'enabled' ? control.checked : control.value;
     });
+    const hidden = form.querySelector('[name="animation_settings"]');
+    const profile = form.querySelector('[name="camera_profile"]')?.value || 'linear';
+    if (hidden) hidden.value = JSON.stringify({version:1, camera_profile:profile, effects});
+  };
+  const controlValue = control => control.type === 'checkbox' ? String(control.checked) : control.value;
+  document.querySelectorAll('.segment-form').forEach(form => {
+    const controls = [...form.querySelectorAll(sceneSettingSelector)];
+    controls.forEach(control => {
+      control.dataset.initialValue = controlValue(control);
+      control.addEventListener('change', () => {
+        syncAnimationSettings(form);
+        const changed = controls.some(input => controlValue(input) !== input.dataset.initialValue);
+        form.dataset.motionDirty = changed ? 'true' : 'false';
+      });
+    });
+    syncAnimationSettings(form);
+    form.addEventListener('submit', () => syncAnimationSettings(form));
   });
   const videoOptionsForm = document.querySelector('#videoOptionsForm');
   videoOptionsForm?.querySelectorAll('select,input').forEach(input => {
@@ -325,6 +350,7 @@
     for (const form of document.querySelectorAll('.segment-form')) {
       const textarea = form.querySelector('textarea');
       if (textarea?.dataset.dirty !== 'true' && form.dataset.motionDirty !== 'true') continue;
+      syncAnimationSettings(form);
       const response = await fetch(form.action, {method: 'POST', body: new FormData(form)});
       if (!response.ok) throw new Error('Impossible d’enregistrer un segment modifié.');
       if (textarea) {
