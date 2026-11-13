@@ -124,7 +124,7 @@
   <div class="editor-layout" style="margin-top:16px">
     <div class="editor-left">
       <section class="premium-card" aria-labelledby="scenesTitle">
-        <div class="premium-card-head"><h2 id="scenesTitle">{% if can_assemble_clips %}CLIPS À ASSEMBLER{% else %}SCÈNES DE LA NARRATION{% endif %}</h2><span>Glisse les cartes pour les réordonner</span></div>
+        <div class="premium-card-head"><h2 id="scenesTitle">{% if can_assemble_clips %}CLIPS VIDÉO{% else %}SCÈNES DE LA NARRATION{% endif %}</h2><span>Glisse les cartes pour les réordonner</span></div>
         <div class="scene-list" id="segmentList" data-reorder-url="{% url 'reorder_segments' project.id %}">
           {% for segment in segments %}
           <article class="scene-card segment-card" id="segment-{{ segment.id }}" data-id="{{ segment.id }}" draggable="true">
@@ -140,19 +140,19 @@
             <div class="scene-meta">
               <div class="scene-meta-title"><span class="scene-grip" title="Glisser pour réordonner">⠿</span><span>{{ forloop.counter|stringformat:"02d" }}</span><span>{% if segment.video_clip %}Clip{% else %}Scène{% endif %}</span></div>
               <div style="display:flex;align-items:center;gap:8px">
-                <span class="scene-badge">{% if segment.video_clip %}Son d’origine{% elif segment.ready_for_voice %}Audio prêt · {{ segment.duration_seconds|floatformat:1 }} s{% else %}À préparer{% endif %}</span>
+                <span class="scene-badge">{% if segment.ready_for_voice %}XTTS prêt · {{ segment.duration_seconds|floatformat:1 }} s{% elif segment.video_clip %}Clip importé{% else %}À préparer{% endif %}</span>
                 <form method="post" action="{% url 'delete_segment' project.id segment.id %}" onsubmit="return confirm('Supprimer cette scène ?')">
                   {% csrf_token %}
                   <button class="scene-delete" type="submit" title="Supprimer la scène" aria-label="Supprimer la scène">×</button>
                 </form>
               </div>
             </div>
-            {% if not segment.video_clip %}
             <form method="post" action="{% url 'save_segment' project.id segment.id %}" class="segment-form scene-editor-fields">
               {% csrf_token %}
               <label class="setting-label" for="text-{{ segment.id }}">Texte de la scène</label>
-              <textarea class="editor-textarea" id="text-{{ segment.id }}" name="text" maxlength="12000" rows="4" placeholder="Écris ce que la voix dira pendant cette scène…">{{ segment.text }}</textarea>
+              <textarea class="editor-textarea" id="text-{{ segment.id }}" name="text" maxlength="12000" rows="4" placeholder="{% if segment.video_clip %}Écris le texte qui sera prononcé sur ce clip…{% else %}Écris ce que la voix dira pendant cette scène…{% endif %}">{{ segment.text }}</textarea>
               <input type="hidden" name="animation_settings" value="{{ segment.animation_settings_json|escape }}">
+              {% if not segment.video_clip %}
               <div class="scene-scene-settings">
                 <label class="setting-label" for="camera-profile-{{ segment.id }}">Profil de caméra
                   <select class="editor-select" id="camera-profile-{{ segment.id }}" name="camera_profile" data-animation-setting>
@@ -179,14 +179,12 @@
                 </div>
                 <span class="editor-small"><span class="word-count">{{ segment.text|wordcount }}</span> mots · env. <span class="duration-estimate">0</span> s</span>
               </div>
+              {% else %}<p class="editor-small">Le clip sert de support visuel ; son audio d’origine sera remplacé par la voix XTTS.</p>{% endif %}
               <div class="scene-save-row">
-                <span class="editor-small">Le texte invalide la narration ; les réglages visuels invalident seulement la vidéo.</span>
+                <span class="editor-small">{% if segment.video_clip %}Enregistre le texte à prononcer sur ce clip.{% else %}Le texte invalide la narration ; les réglages visuels invalident seulement la vidéo.{% endif %}</span>
                 <button class="editor-button" type="submit">Enregistrer la scène</button>
               </div>
             </form>
-            {% else %}
-            <p class="editor-small" style="padding:0 13px 13px">Clip vidéo avec son d’origine. Les clips sont assemblés selon l’ordre ci-dessus.</p>
-            {% endif %}
           </article>
           {% empty %}
           <p class="editor-muted">Aucune scène pour le moment. Importe des images, un PDF ou des clips vidéo ci-dessus.</p>
@@ -203,7 +201,6 @@
     </div>
 
     <aside class="editor-right" aria-label="Réglages de la narration">
-      {% if not can_assemble_clips %}
       <section class="premium-card">
         <div class="premium-card-head"><h2>VOIX DE NARRATION</h2><span>XTTS v2</span></div>
         <div class="editor-card-body">
@@ -229,7 +226,6 @@
           {% endif %}
         </div>
       </section>
-      {% endif %}
 
       <section class="premium-card">
         <div class="premium-card-head"><h2>FORMAT ET SOUS-TITRES</h2><span>Réglages vidéo</span></div>
@@ -241,28 +237,37 @@
                 {% for value,label in video_formats %}<option value="{{ value }}" {% if project.video_format == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
               </select>
             </label>
-            {% if not can_assemble_clips %}
             <label class="setting-check"><input type="checkbox" name="subtitles_enabled" {% if project.subtitles_enabled %}checked{% endif %}><span>Sous-titres incrustés et synchronisés</span></label>
-            {% else %}
-            <p class="editor-muted">L’assemblage conserve le son d’origine des clips.</p>
-            {% endif %}
+            {% if can_assemble_clips %}<p class="editor-muted">Ce réglage s’applique à la Narration vidéo ; l’assemblage classique conserve le son et l’image d’origine.</p>{% endif %}
             <button class="editor-button" type="submit">Enregistrer les réglages</button>
           </form>
         </div>
       </section>
 
       <section class="premium-card export-card">
-        <div class="premium-card-head"><h2>GÉNÉRER L’EXPORT</h2><span>{% if can_assemble_clips %}Assemblage{% else %}Narration{% endif %}</span></div>
+        <div class="premium-card-head"><h2>GÉNÉRER L’EXPORT</h2><span>{% if can_assemble_clips %}Clips{% else %}Narration{% endif %}</span></div>
         <div class="editor-card-body">
           <div class="editor-actions">
             {% if can_assemble_clips %}
-            <p class="editor-alert">Les clips seront assemblés dans l’ordre affiché, avec leur son d’origine. Aucun moteur vocal ne sera lancé.</p>
+            <p class="editor-alert">Choisis l’assemblage avec le son d’origine ou la narration vidéo avec ta voix XTTS.</p>
             <form method="post" action="{% url 'assemble_videos' project.id %}" id="assembleForm">
               {% csrf_token %}
-              <button class="editor-button primary" type="submit" id="assembleButton" {% if project.status == 'processing' or project.status == 'queued' %}disabled{% endif %}>
-                {% if project.status == 'queued' or project.status == 'processing' %}Dans la file…{% else %}Assembler les clips vidéo ✦{% endif %}
+              <button class="editor-button" type="submit" id="assembleButton" {% if project.status == 'processing' or project.status == 'queued' %}disabled{% endif %}>
+                {% if project.status == 'queued' or project.status == 'processing' %}Dans la file…{% else %}Assembler avec le son d’origine{% endif %}
               </button>
             </form>
+            {% if can_narrate_video %}
+            <form method="post" action="{% url 'prepare' project.id %}" id="prepareForm">
+              {% csrf_token %}
+              <input type="hidden" name="voice_id" value="{{ project.voice_id|default:'' }}">
+              <input type="hidden" name="mode" value="video_narration">
+              <button class="editor-button primary" type="submit" id="prepareButton" {% if not voices or project.status == 'processing' or project.status == 'queued' %}disabled{% endif %}>
+                {% if project.status == 'queued' or project.status == 'processing' %}Dans la file…{% else %}Générer la narration vidéo XTTS ✦{% endif %}
+              </button>
+            </form>
+            {% else %}
+            <p class="editor-muted">Saisis un texte pour chaque clip afin d’activer la narration vidéo.</p>
+            {% endif %}
             {% else %}
             <p class="editor-alert">Les textes et réglages modifiés sont enregistrés avant l’ajout du projet à la file.</p>
             <form method="post" action="{% url 'prepare' project.id %}" id="prepareForm">

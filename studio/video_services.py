@@ -14,7 +14,7 @@ from django.db import close_old_connections
 from django.utils import timezone
 
 from .models import NarrationProject, NarrationSegment
-from .services import _ffmpeg_path
+from .services import _ffmpeg_path, wav_duration
 
 
 FFPROBE_TIMEOUT_SECONDS = 60
@@ -793,6 +793,127 @@ def render_video_assembly(project_id):
     finally:
         close_old_connections()
 
+
+
+
+
+
+def _video_narration_command(
+    ffmpeg, source, voice_path, output, width, height, video_duration, voice_duration, subtitle_file=None,
+):
+    """Build a clip render command that maps video only from the source and audio only from XTTS."""
+    filters = [
+        f"scale={width}:{height}:force_original_aspect_ratio=increase",
+        f"crop={width}:{height}",
+        "fps=24",
+        "setsar=1",
+    ]
+    stop_duration = max(0.0, voice_duration - video_duration)
+    if stop_duration > 0.01:
+        filters.append(f"tpad=stop_mode=clone:stop_duration={stop_duration:.3f}")
+    if subtitle_file:
+        filters.append(_subtitle_filter(subtitle_file))
+    return [
+        ffmpeg, "-y", "-v", "error",
+        "-i", str(source), "-i", str(voice_path),
+        "-map", "0:v:0", "-map", "1:a:0",
+        "-vf", ",".join(filters),
+        "-af", "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo",
+        "-t", f"{voice_duration:.3f}", "-r", "24",
+        *_video_encoder_args(ffmpeg, width, height),
+        "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+        "-ar", "48000", "-ac", "2", "-shortest", str(output),
+    ]
+
+
+def render_video_narration(project_id):
+    """Replace imported clip audio with XTTS WAVs and burn WhisperX-aligned ASS captions."""
+    close_old_connections()
+    try:
+        project = NarrationProject.objects.get(pk=project_id)
+        scenes = list(project.segments.order_by("position", "id"))
+        if not scenes or any(not scene.video_clip or scene.image for scene in scenes):
+            raise RuntimeError("Ajoute uniquement des clips vidéo pour créer une narration vidéo.")
+        if any(not scene.audio or not Path(scene.audio.path).is_file() for scene in scenes):
+            raise RuntimeError("La voix XTTS de certaines scènes n’est pas prête. Relance la préparation.")
+        if any(not scene.text.strip() for scene in scenes):
+            raise RuntimeError("Ajoute un texte à chaque clip avant de lancer la narration vidéo.")
+
+        ffmpeg = _ffmpeg_path()
+        width, height = _dimensions(project.video_format)
+        with tempfile.TemporaryDirectory(prefix=f"petit-studio-video-narration-{project.pk}-") as temp:
+            folder = Path(temp)
+            clips = []
+            total_voice_duration = 0.0
+            for index, scene in enumerate(scenes, start=1):
+                project.status_message = f"Narration vidéo · scène {index}/{len(scenes)}"
+                project.current_segment = index
+                project.progress_percent = 5 + round(85 * (index - 1) / len(scenes))
+                project.save(update_fields=["status_message", "current_segment", "progress_percent", "updated_at"])
+
+                source = Path(scene.video_clip.path)
+                voice_path = Path(scene.audio.path)
+                video_duration, _has_source_audio = _probe_clip(source)
+                voice_duration = wav_duration(voice_path)
+                total_voice_duration += voice_duration
+                subtitle_file = None
+                if project.subtitles_enabled:
+                    subtitle_file = folder / f"scene-{index:04}.ass"
+                    subtitle_content = _ass_text(scene, width, height)
+                    if "Dialogue:" not in subtitle_content:
+                        raise RuntimeError(f"Aucun sous-titre synchronisé n’est disponible pour la scène {index}.")
+                    subtitle_file.write_text(subtitle_content, encoding="utf-8")
+
+                clip = folder / f"scene-{index:04}.mp4"
+                command = _video_narration_command(
+                    ffmpeg, source, voice_path, clip, width, height,
+                    video_duration, voice_duration, subtitle_file,
+                )
+                _run_ffmpeg(command, folder, f"narration vidéo de la scène {index}")
+                if not clip.is_file() or clip.stat().st_size < 1000:
+                    raise RuntimeError(f"FFmpeg n’a pas produit la vidéo narrée de la scène {index}.")
+                clips.append(clip)
+
+            concat_list = folder / "scenes.txt"
+            concat_list.write_text("".join(f"file '{clip.name}'\n" for clip in clips), encoding="utf-8")
+            output = folder / "narration-video.mp4"
+            project.status_message = "Assemblage de la narration vidéo…"
+            project.progress_percent = 93
+            project.save(update_fields=["status_message", "progress_percent", "updated_at"])
+            _run_ffmpeg(
+                [ffmpeg, "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(concat_list),
+                 "-c", "copy", "-movflags", "+faststart", str(output)],
+                folder, "assemblage de la narration vidéo",
+            )
+            if not output.is_file() or output.stat().st_size < 1000:
+                raise RuntimeError("FFmpeg n’a pas produit de fichier MP4 valide.")
+            project.refresh_from_db()
+            if project.video_file:
+                project.video_file.delete(save=False)
+            with output.open("rb") as stream:
+                project.video_file.save(f"narration-video-{project.pk}.mp4", File(stream), save=False)
+            project.duration_seconds = total_voice_duration
+            project.status = NarrationProject.Status.READY
+            project.status_message = f"Narration vidéo prête · {len(scenes)} clip(s) · {project.video_format}."
+            project.error_message = ""
+            project.progress_percent = 100
+            project.current_segment = len(scenes)
+            project.total_segments = len(scenes)
+            project.finished_at = timezone.now()
+            project.save(update_fields=[
+                "video_file", "duration_seconds", "status", "status_message", "error_message",
+                "progress_percent", "current_segment", "total_segments", "finished_at", "updated_at",
+            ])
+    except Exception as exc:
+        NarrationProject.objects.filter(pk=project_id).update(
+            status=NarrationProject.Status.ERROR,
+            status_message="La narration vidéo a échoué.",
+            error_message=str(exc)[:2000],
+            queued_at=None,
+            finished_at=timezone.now(),
+        )
+    finally:
+        close_old_connections()
 
 def render_project_video(project_id):
     """Render each image/audio scene, optionally burn aligned captions, then concatenate MP4 clips."""

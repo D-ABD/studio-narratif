@@ -621,3 +621,95 @@ class MultiEffectAnimationTests(MediaTestCase):
         self.assertEqual(response.status_code, 400)
         segment.refresh_from_db()
         self.assertFalse(segment.animation_settings["effects"]["zoom"]["enabled"])
+
+
+class VideoNarrationModeTests(MediaTestCase):
+    def add_video_segment(self, project, text="Bonjour, le Shiba arrive."):
+        segment = NarrationSegment(project=project, position=0, text=text)
+        segment.video_clip.save("heygen.mp4", ContentFile(b"video bytes"), save=True)
+        return segment
+
+    def test_prepare_offers_and_queues_video_narration_for_clips_with_text(self):
+        voice = self.make_voice()
+        project = NarrationProject.objects.create(title="Clip narré", voice=voice)
+        segment = self.add_video_segment(project)
+
+        page = self.client.get(f"/projects/{project.pk}/")
+        self.assertContains(page, "Générer la narration vidéo XTTS")
+        self.assertContains(page, "Assembler avec le son d’origine")
+
+        response = self.client.post(f"/projects/{project.pk}/prepare/", {
+            "voice_id": voice.pk, "mode": NarrationProject.JobType.VIDEO_NARRATION,
+        })
+        self.assertEqual(response.status_code, 200)
+        project.refresh_from_db()
+        self.assertEqual(project.status, NarrationProject.Status.QUEUED)
+        self.assertEqual(project.job_type, NarrationProject.JobType.VIDEO_NARRATION)
+        self.assertEqual(segment.text, "Bonjour, le Shiba arrive.")
+
+    def test_classic_assembly_still_queues_assembly_job_for_video_clips(self):
+        project = NarrationProject.objects.create(title="Assemblage classique")
+        self.add_video_segment(project, text="")
+
+        response = self.client.post(f"/projects/{project.pk}/assemble-videos/")
+        self.assertEqual(response.status_code, 200)
+        project.refresh_from_db()
+        self.assertEqual(project.status, NarrationProject.Status.QUEUED)
+        self.assertEqual(project.job_type, NarrationProject.JobType.ASSEMBLY)
+
+    def test_video_narration_command_replaces_source_audio_and_handles_duration(self):
+        from .video_services import _video_narration_command
+
+        command = _video_narration_command(
+            "ffmpeg", "clip.mp4", "voice.wav", "out.mp4", 1080, 1920,
+            video_duration=10.0, voice_duration=12.0, subtitle_file="captions.ass",
+        )
+        self.assertEqual(command[command.index("-map") + 1], "0:v:0")
+        self.assertEqual(command[command.index("-map") + 3], "1:a:0")
+        self.assertIn("tpad=stop_mode=clone:stop_duration=2.000", command[command.index("-vf") + 1])
+        self.assertIn("subtitles=filename=captions.ass", command[command.index("-vf") + 1])
+        self.assertIn("-shortest", command)
+        self.assertNotIn("zoompan=", command[command.index("-vf") + 1])
+        self.assertNotIn("0:a", command)
+
+        shorter_video_chain = _video_narration_command(
+            "ffmpeg", "clip.mp4", "voice.wav", "out.mp4", 1080, 1920,
+            video_duration=12.0, voice_duration=10.0,
+        )
+        self.assertNotIn("tpad=", shorter_video_chain[shorter_video_chain.index("-vf") + 1])
+
+    def test_worker_keeps_classic_assembly_routed_to_existing_renderer(self):
+        from .management.commands.run_narration_worker import Command
+
+        project = NarrationProject.objects.create(
+            title="Assemblage worker",
+            status=NarrationProject.Status.QUEUED,
+            queued_at=timezone.now(),
+            job_type=NarrationProject.JobType.ASSEMBLY,
+        )
+        with override_settings(MEDIA_ROOT=Path(self.media_dir.name)):
+            with patch("studio.management.commands.run_narration_worker.render_video_assembly") as assemble:
+                with patch("studio.management.commands.run_narration_worker.prepare_project") as prepare:
+                    Command().handle(once=True, poll_seconds=0.25)
+        prepare.assert_not_called()
+        assemble.assert_called_once_with(project.pk)
+
+    def test_worker_runs_xtts_before_rendering_video_narration(self):
+        from .management.commands.run_narration_worker import Command
+
+        project = NarrationProject.objects.create(
+            title="Narration vidéo worker",
+            status=NarrationProject.Status.QUEUED,
+            queued_at=timezone.now(),
+            job_type=NarrationProject.JobType.VIDEO_NARRATION,
+        )
+
+        def prepare_project(project_id):
+            NarrationProject.objects.filter(pk=project_id).update(status=NarrationProject.Status.PROCESSING)
+
+        with override_settings(MEDIA_ROOT=Path(self.media_dir.name)):
+            with patch("studio.management.commands.run_narration_worker.prepare_project", side_effect=prepare_project) as prepare:
+                with patch("studio.management.commands.run_narration_worker.render_video_narration") as render:
+                    Command().handle(once=True, poll_seconds=0.25)
+        prepare.assert_called_once_with(project.pk)
+        render.assert_called_once_with(project.pk)

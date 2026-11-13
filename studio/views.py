@@ -401,6 +401,12 @@ def project_detail(request, project_id):
         "can_assemble_clips": bool(
             segments and all(segment.video_clip and not segment.image for segment in segments)
         ),
+        "can_narrate_video": bool(
+            segments and all(
+                segment.video_clip and not segment.image and segment.text.strip()
+                for segment in segments
+            )
+        ),
     })
 
 
@@ -529,7 +535,8 @@ def import_scenes(request, project_id):
             if import_kind == "video":
                 messages.success(
                     request,
-                    f"{len(scenes)} clip(s) vidéo ajouté(s). Réordonne-les puis lance l’assemblage.",
+                    f"{len(scenes)} clip(s) vidéo ajouté(s). Tu peux les assembler avec leur son d’origine "
+                    "ou saisir un texte sur chaque clip pour créer une narration vidéo.",
                 )
             else:
                 messages.success(request, f"{len(scenes)} scène(s) ajoutée(s) au projet.")
@@ -739,17 +746,32 @@ def prepare(request, project_id):
         return JsonResponse({"ok": False, "error": "Ajoute un texte à chaque segment avant de préparer la narration."}, status=400)
     has_images = any(segment.image for segment in segments)
     has_video_clips = any(segment.video_clip for segment in segments)
+    requested_mode = request.POST.get("mode", "")
     if has_video_clips:
-        return JsonResponse({"ok": False, "error": "Pour assembler ces clips avec leur son d’origine, utilise le bouton « Assembler les clips vidéo »."}, status=400)
-    if has_images and any(not segment.image for segment in segments):
-        return JsonResponse({"ok": False, "error": "Ajoute une image à chaque scène avant de générer la vidéo."}, status=400)
+        if requested_mode != NarrationProject.JobType.VIDEO_NARRATION:
+            return JsonResponse({"ok": False, "error": "Choisis « Narration vidéo » pour remplacer le son des clips par la voix XTTS, ou utilise l’assemblage classique."}, status=400)
+        if any(not segment.video_clip or segment.image for segment in segments):
+            return JsonResponse({"ok": False, "error": "La narration vidéo accepte uniquement des clips vidéo, sans images mélangées."}, status=400)
+        job_type = NarrationProject.JobType.VIDEO_NARRATION
+    else:
+        if requested_mode == NarrationProject.JobType.VIDEO_NARRATION:
+            return JsonResponse({"ok": False, "error": "Ajoute des clips vidéo pour utiliser le mode Narration vidéo."}, status=400)
+        if has_images and any(not segment.image for segment in segments):
+            return JsonResponse({"ok": False, "error": "Ajoute une image à chaque scène avant de générer la vidéo."}, status=400)
+        job_type = NarrationProject.JobType.VIDEO if has_images else NarrationProject.JobType.AUDIO
     if project.voice_id != voice.pk:
         project.voice = voice
         _invalidate_export(project)
     project.status = NarrationProject.Status.QUEUED
     project.queued_at = timezone.now()
-    project.job_type = NarrationProject.JobType.VIDEO if has_images else NarrationProject.JobType.AUDIO
-    project.status_message = "Vidéo ajoutée à la file d’attente." if has_images else "Narration ajoutée à la file d’attente."
+    project.job_type = job_type
+    project.status_message = (
+        "Narration vidéo ajoutée à la file d’attente."
+        if job_type == NarrationProject.JobType.VIDEO_NARRATION
+        else "Vidéo ajoutée à la file d’attente."
+        if has_images
+        else "Narration ajoutée à la file d’attente."
+    )
     project.error_message = ""
     project.progress_percent = 0
     project.current_segment = 0

@@ -76,6 +76,7 @@
     light_leak: {enabled:false, level:'medium'}
   };
   const syncAnimationSettings = form => {
+    if (!form.querySelector(sceneSettingSelector)) return;
     const effects = JSON.parse(JSON.stringify(animationDefaults));
     form.querySelectorAll('[data-effect-name]').forEach(control => {
       const effect = effects[control.dataset.effectName];

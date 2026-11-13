@@ -8,7 +8,7 @@ from django.utils import timezone
 
 from studio.models import NarrationProject
 from studio.services import prepare_project
-from studio.video_services import render_project_video, render_video_assembly
+from studio.video_services import render_project_video, render_video_assembly, render_video_narration
 
 
 class Command(BaseCommand):
@@ -45,7 +45,11 @@ class Command(BaseCommand):
                     render_video_assembly(project_id)
                 else:
                     prepare_project(project_id)
-                if job_type == NarrationProject.JobType.VIDEO:
+                if job_type == NarrationProject.JobType.VIDEO_NARRATION:
+                    project = NarrationProject.objects.filter(pk=project_id).first()
+                    if project and project.status == NarrationProject.Status.PROCESSING:
+                        render_video_narration(project_id)
+                elif job_type == NarrationProject.JobType.VIDEO:
                     project = NarrationProject.objects.filter(pk=project_id).first()
                     if project and project.status == NarrationProject.Status.PROCESSING:
                         render_project_video(project_id)

@@ -478,7 +478,10 @@ def prepare_project(project_id):
                     project.full_audio.save(f"narration-{project.pk}.wav", File(stream), save=False)
                 project.subtitles.save(f"narration-{project.pk}.srt", ContentFile(srt.encode("utf-8")), save=False)
                 project.duration_seconds = duration
-                generating_video = project.job_type == NarrationProject.JobType.VIDEO
+                generating_video = project.job_type in {
+                    NarrationProject.JobType.VIDEO,
+                    NarrationProject.JobType.VIDEO_NARRATION,
+                }
                 project.status = NarrationProject.Status.PROCESSING if generating_video else NarrationProject.Status.READY
                 project.queued_at = None
                 timings_message = (

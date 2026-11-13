@@ -90,12 +90,13 @@ class NarrationProject(models.Model):
         AUDIO = "audio", "Narration audio"
         VIDEO = "video", "Vidéo"
         ASSEMBLY = "assembly", "Assemblage de clips"
+        VIDEO_NARRATION = "video_narration", "Narration vidéo"
 
     title = models.CharField("titre", max_length=120, default="Nouvelle narration")
     voice = models.ForeignKey(Voice, null=True, blank=True, on_delete=models.SET_NULL, related_name="projects")
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.DRAFT)
     queued_at = models.DateTimeField(null=True, blank=True, db_index=True)
-    job_type = models.CharField(max_length=8, choices=JobType.choices, default=JobType.AUDIO)
+    job_type = models.CharField(max_length=16, choices=JobType.choices, default=JobType.AUDIO)
     video_format = models.CharField(max_length=5, choices=VideoFormat.choices, default=VideoFormat.VERTICAL)
     subtitles_enabled = models.BooleanField(default=True)
     status_message = models.CharField(max_length=240, blank=True)
