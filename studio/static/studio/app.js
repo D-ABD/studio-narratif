@@ -252,15 +252,19 @@
   }
 
   const projectVoice = document.querySelector('#projectVoice');
-  const voiceIdInput = document.querySelector('#prepareForm input[name=voice_id]');
+  const prepareForm = document.querySelector('#prepareForm');
+  const audioOnlyForm = document.querySelector('#audioOnlyForm');
+  const assembleForm = document.querySelector('#assembleForm');
+  const voiceIdInputs = [prepareForm, audioOnlyForm]
+    .filter(Boolean)
+    .map(form => form.querySelector('input[name="voice_id"]'))
+    .filter(Boolean);
   projectVoice?.addEventListener('change', () => {
-    if (voiceIdInput) voiceIdInput.value = projectVoice.value;
+    voiceIdInputs.forEach(input => { input.value = projectVoice.value; });
   });
 
-  const prepareForm = document.querySelector('#prepareForm');
-  const assembleForm = document.querySelector('#assembleForm');
-  if (!prepareForm && !assembleForm) return;
-  const jobButtons = [prepareForm, assembleForm]
+  if (!prepareForm && !audioOnlyForm && !assembleForm) return;
+  const jobButtons = [prepareForm, audioOnlyForm, assembleForm]
     .filter(Boolean)
     .map(form => form.querySelector('button[type="submit"]'))
     .filter(Boolean);
@@ -419,6 +423,8 @@
     const button = form.querySelector('button[type="submit"]');
     if (!button) return;
     const isAssembly = form === assembleForm;
+    const isAudioOnly = form === audioOnlyForm;
+    const voiceIdInput = form.querySelector('input[name="voice_id"]');
     if (!isAssembly && !voiceIdInput?.value) {
       status.className = 'job-status error';
       status.textContent = 'Choisis d’abord une voix autorisée.';
@@ -427,7 +433,11 @@
     button.disabled = true;
     setJobButtonsDisabled(true);
     status.className = 'job-status';
-    status.textContent = isAssembly ? 'Enregistrement des réglages…' : 'Enregistrement des textes…';
+    status.textContent = isAssembly
+      ? 'Enregistrement des réglages…'
+      : isAudioOnly
+        ? 'Pré-génération audio XTTS et WhisperX…'
+        : 'Enregistrement des textes…';
     try {
       await saveDirtySegments();
       const response = await fetch(form.action, {method: 'POST', body: new FormData(form)});
@@ -435,7 +445,9 @@
       if (!response.ok) throw new Error(data.error || 'Le traitement n’a pas pu démarrer.');
       progress.hidden = false;
       details.hidden = false;
-      status.textContent = 'Ajout du projet à la file…';
+      status.textContent = isAudioOnly
+        ? 'Pré-génération audio ajoutée à la file…'
+        : 'Ajout du projet à la file…';
       polling = false;
       poll();
     } catch (error) {
@@ -445,6 +457,7 @@
     }
   };
   prepareForm?.addEventListener('submit', submitJob);
+  audioOnlyForm?.addEventListener('submit', submitJob);
   assembleForm?.addEventListener('submit', submitJob);
 
   if (['processing', 'queued'].includes(document.body.dataset.projectStatus)) {

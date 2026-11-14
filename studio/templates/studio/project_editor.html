@@ -9,6 +9,15 @@
   .editor-context { display:grid; gap:3px; }
   .editor-context strong { color:#E9ECF2; font-size:12px; }
   .editor-context span { color:#929BAA; font-size:10px; }
+  .editor-audio-cache { width:max-content; display:inline-flex; align-items:center; gap:7px; margin-top:7px; padding:5px 9px; border:1px solid; border-radius:99px; font-size:9px; font-weight:750; }
+  .editor-audio-cache i { width:7px; height:7px; border-radius:50%; background:currentColor; }
+  .editor-audio-cache.ready { color:#9DD8AA; border-color:#315A3B; background:#17291C; }
+  .editor-audio-cache.pending { color:#F5BE78; border-color:#5D4728; background:#2A2115; }
+  .editor-generation-pair { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+  .editor-generation-pair form { margin:0; min-width:0; }
+  .editor-generation-pair .editor-button { width:100%; min-height:44px; padding:5px 9px; }
+  .editor-button.audio-only { border-color:#31513A; color:#B7D9BF; background:#17251B; }
+  @media(max-width:620px) { .editor-generation-pair { grid-template-columns:minmax(0,1fr); } }
   .editor-chip { display:inline-flex; align-items:center; gap:7px; padding:7px 10px; border:1px solid #293241; border-radius:9px; color:#A8B1BF; background:#121720; font-size:10px; }
   .editor-chip i { width:6px; height:6px; border-radius:50%; background:#6BCD91; }
   .editor-layout { display:grid; grid-template-columns:minmax(0,1.55fr) minmax(290px,.8fr); align-items:start; gap:17px; }
@@ -96,6 +105,9 @@
     <div class="editor-context">
       <strong>{{ project.title }}</strong>
       <span>Prépare tes scènes, choisis une voix et lance le rendu.</span>
+      <div class="editor-audio-cache {% if audio_ready %}ready{% else %}pending{% endif %}" id="audioCacheBadge" aria-live="polite">
+        <i aria-hidden="true"></i>{% if audio_ready %}Audio en cache{% else %}Audio à générer{% endif %}
+      </div>
       <form method="post" action="{% url 'rename_project' project.id %}" class="editor-project-title-form">
         {% csrf_token %}
         <label class="sr-only" for="projectTitle">Nom du projet</label>
@@ -272,14 +284,24 @@
               </button>
             </form>
             {% if can_narrate_video %}
-            <form method="post" action="{% url 'prepare' project.id %}" id="prepareForm">
-              {% csrf_token %}
-              <input type="hidden" name="voice_id" value="{{ project.voice_id|default:'' }}">
-              <input type="hidden" name="mode" value="video_narration">
-              <button class="editor-button primary" type="submit" id="prepareButton" {% if not voices or project.status == 'processing' or project.status == 'queued' %}disabled{% endif %}>
-                {% if project.status == 'queued' or project.status == 'processing' %}Dans la file…{% else %}Générer la narration vidéo XTTS ✦{% endif %}
-              </button>
-            </form>
+            <div class="editor-generation-pair">
+              <form method="post" action="{% url 'prepare' project.id %}" id="prepareForm">
+                {% csrf_token %}
+                <input type="hidden" name="voice_id" value="{{ project.voice_id|default:'' }}">
+                <input type="hidden" name="mode" value="video_narration">
+                <button class="editor-button primary" type="submit" id="prepareButton" {% if not voices or project.status == 'processing' or project.status == 'queued' %}disabled{% endif %}>
+                  {% if project.status == 'queued' or project.status == 'processing' %}Dans la file…{% else %}Générer la narration vidéo XTTS ✦{% endif %}
+                </button>
+              </form>
+              <form method="post" action="{% url 'prepare' project.id %}" id="audioOnlyForm">
+                {% csrf_token %}
+                <input type="hidden" name="voice_id" value="{{ project.voice_id|default:'' }}">
+                <input type="hidden" name="audio_only" value="1">
+                <button class="editor-button audio-only" type="submit" {% if not voices or project.status == 'processing' or project.status == 'queued' %}disabled{% endif %}>
+                  Pré-générer l'audio seul
+                </button>
+              </form>
+            </div>
             {% else %}
             <p class="editor-muted">Saisis un texte pour chaque clip afin d’activer la narration vidéo.</p>
             {% endif %}

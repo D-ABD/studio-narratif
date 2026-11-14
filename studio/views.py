@@ -450,6 +450,7 @@ def project_detail(request, project_id):
         "project": project,
         "projects": NarrationProject.objects.all()[:30],
         "segments": segments,
+        "audio_ready": bool(segments and all(segment.ready_for_voice for segment in segments)),
         "voices": Voice.objects.all(),
         "categories": Voice.Category.choices,
         "video_formats": NarrationProject.VideoFormat.choices,
@@ -866,7 +867,12 @@ def prepare(request, project_id):
     has_images = any(segment.image for segment in segments)
     has_video_clips = any(segment.video_clip for segment in segments)
     requested_mode = request.POST.get("mode", "")
-    if has_video_clips:
+    audio_only = request.POST.get("audio_only") == "1"
+    if audio_only:
+        if has_video_clips and any(not segment.video_clip or segment.image for segment in segments):
+            return JsonResponse({"ok": False, "error": "La pré-génération audio accepte uniquement des clips vidéo, sans images mélangées."}, status=400)
+        job_type = NarrationProject.JobType.AUDIO
+    elif has_video_clips:
         if requested_mode != NarrationProject.JobType.VIDEO_NARRATION:
             return JsonResponse({"ok": False, "error": "Choisis « Narration vidéo » pour remplacer le son des clips par la voix XTTS, ou utilise l’assemblage classique."}, status=400)
         if any(not segment.video_clip or segment.image for segment in segments):
@@ -886,7 +892,9 @@ def prepare(request, project_id):
     project.job_type = job_type
     project.cancel_requested = False
     project.status_message = (
-        "Narration vidéo ajoutée à la file d’attente."
+        "Pré-génération audio XTTS/WhisperX ajoutée à la file d’attente."
+        if audio_only
+        else "Narration vidéo ajoutée à la file d’attente."
         if job_type == NarrationProject.JobType.VIDEO_NARRATION
         else "Vidéo ajoutée à la file d’attente."
         if has_images

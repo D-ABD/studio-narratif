@@ -628,6 +628,69 @@ class MultiEffectAnimationTests(MediaTestCase):
 
 
 class VideoNarrationModeTests(MediaTestCase):
+
+    def test_audio_only_action_queues_audio_job_for_video_clips(self):
+        voice = self.make_voice()
+        project = NarrationProject.objects.create(title="Audio d'abord", voice=voice)
+        self.add_video_segment(project)
+
+        page = self.client.get(f"/projects/{project.pk}/")
+        self.assertContains(page, "Pré-générer l'audio seul")
+        self.assertContains(page, "Audio à générer")
+        self.assertContains(page, 'class="editor-audio-cache pending"')
+
+        response = self.client.post(f"/projects/{project.pk}/prepare/", {
+            "voice_id": voice.pk,
+            "audio_only": "1",
+        })
+        self.assertEqual(response.status_code, 200)
+        project.refresh_from_db()
+        self.assertEqual(project.status, NarrationProject.Status.QUEUED)
+        self.assertEqual(project.job_type, NarrationProject.JobType.AUDIO)
+        self.assertIn("Pré-génération audio", project.status_message)
+
+    def test_audio_cache_badge_turns_green_when_every_segment_is_current(self):
+        from .services import _voice_sample_digest, cache_key_for
+
+        voice = self.make_voice()
+        project = NarrationProject.objects.create(title="Audio déjà prêt", voice=voice)
+        segment = self.add_video_segment(project)
+        segment.audio.save("segment-ready.wav", ContentFile(b"audio bytes"), save=False)
+        segment.subtitle_data = [{"start": 0.0, "end": 1.0, "text": "Bonjour"}]
+        segment.cache_key = cache_key_for(
+            segment.text, voice, sample_digest=_voice_sample_digest(voice),
+        )
+        segment.save()
+
+        page = self.client.get(f"/projects/{project.pk}/")
+        self.assertContains(page, "Audio en cache")
+        self.assertContains(page, 'class="editor-audio-cache ready"')
+
+    def test_audio_worker_stops_after_prepare_without_running_video_renderers(self):
+        from .management.commands.run_narration_worker import Command
+
+        project = NarrationProject.objects.create(
+            title="Pré-génération seule",
+            status=NarrationProject.Status.QUEUED,
+            queued_at=timezone.now(),
+            job_type=NarrationProject.JobType.AUDIO,
+        )
+
+        def prepare_audio(project_id):
+            NarrationProject.objects.filter(pk=project_id).update(status=NarrationProject.Status.READY)
+
+        with override_settings(MEDIA_ROOT=Path(self.media_dir.name)):
+            with (
+                patch("studio.management.commands.run_narration_worker.prepare_project", side_effect=prepare_audio) as prepare,
+                patch("studio.management.commands.run_narration_worker.render_video_narration") as video_narration,
+                patch("studio.management.commands.run_narration_worker.render_project_video") as render_video,
+            ):
+                Command().handle(once=True, poll_seconds=0.25)
+
+        prepare.assert_called_once_with(project.pk)
+        video_narration.assert_not_called()
+        render_video.assert_not_called()
+
     def test_probe_clip_extracts_source_video_metadata(self):
         from .video_services import _probe_clip
 
