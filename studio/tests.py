@@ -164,7 +164,9 @@ class AudioAssetModelTests(MediaTestCase):
 
     def test_audio_source_data_migration_sets_every_existing_project_to_xtts(self):
         from django.apps import apps as django_apps
+        from django.db import connection
         from importlib import import_module
+        from types import SimpleNamespace
 
         projects = [
             NarrationProject.objects.create(user=self.user, title=f"Projet historique {index}")
@@ -173,7 +175,7 @@ class AudioAssetModelTests(MediaTestCase):
         NarrationProject.objects.filter(pk__in=[project.pk for project in projects]).update(audio_source="imported")
 
         migration = import_module("studio.migrations.0016_audioasset_audio_source")
-        migration.set_existing_projects_to_xtts(django_apps, None)
+        migration.set_existing_projects_to_xtts(django_apps, SimpleNamespace(connection=connection))
 
         self.assertFalse(
             NarrationProject.objects.filter(pk__in=[project.pk for project in projects])
