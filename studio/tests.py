@@ -1,5 +1,5 @@
 import importlib.util
-from io import BytesIO
+from io import BytesIO, StringIO
 import sys
 import tempfile
 import types
@@ -18,8 +18,8 @@ from PIL import Image
 
 from .models import AudioAsset, BackgroundTrack, NarrationProject, NarrationSegment, Voice
 from .services import (
-    _assemble_wav, _get_speaker_conditioning, _group_words, _prepare_segment, _scene_timing_map,
-    align_audio, cache_key_for, prepare_imported_audio, srt_text, wav_duration,
+    _assemble_wav, _get_speaker_conditioning, _group_words, _prepare_segment, align_audio,
+    cache_key_for, srt_text, wav_duration,
 )
 from . import services
 
@@ -138,244 +138,52 @@ class BackgroundMusicLibraryTests(MediaTestCase):
         probe.assert_not_called()
 
 
-class AudioAssetModelTests(MediaTestCase):
-    def test_audio_asset_uses_user_scoped_uuid_path_and_project_defaults_to_xtts(self):
-        project = NarrationProject.objects.create(user=self.user, title="Ancien projet")
-        asset = AudioAsset(user=self.user, name="Narration importée", duration=12.5)
-        asset.audio_file.save("narration.m4a", ContentFile(b"audio data"), save=True)
-
-        self.assertEqual(project.audio_source, NarrationProject.AudioSource.XTTS)
-        self.assertTrue(asset.audio_file.name.startswith(f"audios/user_{self.user.pk}/"))
-        self.assertEqual(Path(asset.audio_file.name).suffix, ".m4a")
-        self.assertEqual(len(Path(asset.audio_file.name).stem), 32)
-
-    def test_audio_asset_cannot_be_deleted_while_a_project_references_it(self):
-        from django.db.models.deletion import ProtectedError
-
-        asset = AudioAsset(user=self.user, name="Narration", duration=12.5)
-        asset.audio_file.save("narration.wav", ContentFile(b"audio data"), save=True)
-        NarrationProject.objects.create(
-            user=self.user, title="Projet protégé", imported_audio=asset,
-            audio_source=NarrationProject.AudioSource.IMPORTED,
-        )
-
-        with self.assertRaises(ProtectedError):
-            asset.delete()
-
-    def test_audio_source_data_migration_sets_every_existing_project_to_xtts(self):
-        from django.apps import apps as django_apps
-        from django.db import connection
-        from importlib import import_module
-        from types import SimpleNamespace
-
-        projects = [
-            NarrationProject.objects.create(user=self.user, title=f"Projet historique {index}")
-            for index in range(3)
-        ]
-        NarrationProject.objects.filter(pk__in=[project.pk for project in projects]).update(audio_source="imported")
-
-        migration = import_module("studio.migrations.0016_audioasset_audio_source")
-        migration.set_existing_projects_to_xtts(django_apps, SimpleNamespace(connection=connection))
-
-        self.assertFalse(
-            NarrationProject.objects.filter(pk__in=[project.pk for project in projects])
-            .exclude(audio_source=NarrationProject.AudioSource.XTTS).exists()
-        )
-
-
-class ProjectAudioSourceViewTests(MediaTestCase):
-    def make_project(self, **kwargs):
-        return NarrationProject.objects.create(user=self.user, title="Source audio", **kwargs)
-
-    def make_asset(self, *, user=None, project=None, name="Audio existant"):
-        asset = AudioAsset(user=user or self.user, name=name, duration=18.75, project=project)
-        asset.audio_file.save("existing.m4a", ContentFile(b"valid audio bytes"), save=True)
+class AudioAssetLibraryPlaceholderTests(MediaTestCase):
+    def make_asset(self, user, name):
+        asset = AudioAsset(user=user, name=name, duration=12.5, source=AudioAsset.Source.UPLOAD)
+        asset.audio_file.save("future-library.mp3", ContentFile(b"audio bytes"), save=True)
         return asset
 
-    @patch("studio.views._probe_music_duration", return_value=32.5)
-    def test_upload_creates_owned_audio_asset_and_invalidates_only_project_render(self, probe):
-        project = self.make_project(status=NarrationProject.Status.READY)
-        project.full_audio.save("xtts.wav", ContentFile(b"cached XTTS"), save=True)
-        segment = NarrationSegment.objects.create(project=project, position=0, text="Texte XTTS")
-        segment.audio.save("scene.wav", ContentFile(b"scene XTTS cache"), save=True)
-        segment.cache_key = "xtts-cache"
-        segment.subtitle_data = [{"start": 0, "end": 1, "text": "Texte XTTS"}]
-        segment.save(update_fields=["cache_key", "subtitle_data"])
-        project.imported_audio_alignment = {"captions": [{"start": 0, "end": 1, "text": "old"}]}
-        project.imported_audio_cache_key = "a" * 64
-        project.save(update_fields=["imported_audio_alignment", "imported_audio_cache_key"])
-        project.video_file.save("old.mp4", ContentFile(b"old video"), save=True)
-        project.subtitles.save("old.srt", ContentFile(b"old subtitles"), save=True)
-        upload = SimpleUploadedFile("narration.m4a", b"uploaded audio", content_type="audio/mp4")
-
-        response = self.client.post(f"/projects/{project.pk}/audio/", {
-            "audio_source": "imported", "audio_file": upload,
-        })
-
-        self.assertRedirects(response, f"/projects/{project.pk}/")
-        asset = AudioAsset.objects.get(user=self.user, project=project)
-        project.refresh_from_db()
-        segment.refresh_from_db()
-        self.assertEqual(project.audio_source, NarrationProject.AudioSource.IMPORTED)
-        self.assertEqual(project.imported_audio, asset)
-        self.assertEqual(asset.duration, 32.5)
-        self.assertTrue(asset.audio_file.name.startswith(f"audios/user_{self.user.pk}/"))
-        self.assertEqual(Path(asset.audio_file.name).suffix, ".m4a")
-        self.assertFalse(project.video_file)
-        self.assertFalse(project.subtitles)
-        self.assertEqual(project.imported_audio_cache_key, "")
-        self.assertEqual(project.imported_audio_alignment, {})
-        self.assertTrue(project.full_audio)
-        self.assertTrue(segment.audio)
-        self.assertEqual(segment.cache_key, "xtts-cache")
-        self.assertEqual(segment.subtitle_data[0]["text"], "Texte XTTS")
-        probe.assert_called_once()
-
-    @patch("studio.views._probe_music_duration")
-    def test_upload_rejects_invalid_extension_and_size_before_probing(self, probe):
-        project = self.make_project()
-        unsupported = SimpleUploadedFile("voice.flac", b"audio", content_type="audio/flac")
-        self.client.post(f"/projects/{project.pk}/audio/", {
-            "audio_source": "imported", "audio_file": unsupported,
-        })
-        self.assertFalse(AudioAsset.objects.exists())
-
-        with patch("studio.views.MAX_PROJECT_AUDIO_BYTES", 4):
-            oversized = SimpleUploadedFile("large.mp3", b"12345", content_type="audio/mpeg")
-            self.client.post(f"/projects/{project.pk}/audio/", {
-                "audio_source": "imported", "audio_file": oversized,
-            })
-
-        self.assertFalse(AudioAsset.objects.exists())
-        probe.assert_not_called()
-
-    def test_audio_library_and_project_audio_endpoint_are_isolated_by_user(self):
-        other_user = get_user_model().objects.create_user(username="audio-owner-b", password="SafePass123!x")
-        other_project = NarrationProject.objects.create(user=other_user, title="Privé")
-        other_asset = self.make_asset(user=other_user, project=other_project, name="Audio privé")
+    def test_audio_asset_and_placeholder_page_remain_available_and_isolated(self):
+        own_asset = self.make_asset(self.user, "Mon audio")
+        other_user = get_user_model().objects.create_user(username="audio-owner", password="SafePass123!x")
+        self.make_asset(other_user, "Audio privé")
 
         response = self.client.get("/audios/")
 
         self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Mon audio")
         self.assertNotContains(response, "Audio privé")
-        self.assertEqual(self.client.post(f"/projects/{other_project.pk}/audio/", {
-            "audio_source": "imported",
-        }).status_code, 404)
-        self.assertEqual(self.client.get(f"/projects/{other_project.pk}/").status_code, 404)
-        self.assertTrue(AudioAsset.objects.filter(pk=other_asset.pk).exists())
+        self.assertEqual(list(response.context["audio_assets"]), [own_asset])
 
-    def test_switching_source_preserves_xtts_cache_and_invalidates_video_subtitles(self):
-        asset = self.make_asset()
-        project = self.make_project(
-            status=NarrationProject.Status.READY,
-            audio_source=NarrationProject.AudioSource.XTTS,
-            imported_audio=asset,
+    def test_project_audio_upload_endpoint_is_removed(self):
+        project = NarrationProject.objects.create(user=self.user, title="XTTS uniquement")
+
+        response = self.client.post(f"/projects/{project.pk}/audio/", {})
+
+        self.assertEqual(response.status_code, 404)
+
+
+class RemoveImportedAudioMigrationTests(TestCase):
+    def test_migration_clears_external_audio_state_and_resets_projects_to_xtts(self):
+        from importlib import import_module
+
+        migration = import_module("studio.migrations.0018_remove_imported_audio_mode")
+        manager = Mock()
+        apps = Mock()
+        apps.get_model.return_value.objects = manager
+        schema_editor = Mock()
+        schema_editor.connection.alias = "default"
+
+        migration.reset_projects_to_xtts(apps, schema_editor)
+
+        manager.using.return_value.all.return_value.update.assert_called_once_with(
+            imported_audio=None,
+            imported_audio_cache_key="",
+            imported_audio_alignment={},
+            audio_warning="",
+            audio_source="xtts",
         )
-        project.full_audio.save("xtts.wav", ContentFile(b"cached XTTS"), save=True)
-        project.imported_audio_alignment = {"captions": [{"start": 0, "end": 1, "text": "cached"}]}
-        project.imported_audio_cache_key = "b" * 64
-        project.save(update_fields=["imported_audio_alignment", "imported_audio_cache_key"])
-        project.video_file.save("old.mp4", ContentFile(b"old video"), save=True)
-        project.subtitles.save("old.srt", ContentFile(b"old subtitles"), save=True)
-        segment = NarrationSegment.objects.create(project=project, position=0, text="Texte")
-        segment.audio.save("scene.wav", ContentFile(b"cached XTTS scene"), save=True)
-        segment.cache_key = "keep-this-cache"
-        segment.save(update_fields=["cache_key"])
-
-        response = self.client.post(f"/projects/{project.pk}/audio/", {"audio_source": "imported"})
-
-        self.assertRedirects(response, f"/projects/{project.pk}/")
-        project.refresh_from_db()
-        segment.refresh_from_db()
-        self.assertEqual(project.audio_source, NarrationProject.AudioSource.IMPORTED)
-        self.assertFalse(project.video_file)
-        self.assertFalse(project.subtitles)
-        self.assertEqual(project.imported_audio_cache_key, "b" * 64)
-        self.assertTrue(project.full_audio)
-        self.assertTrue(segment.audio)
-        self.assertEqual(segment.cache_key, "keep-this-cache")
-
-    def test_changing_music_in_imported_mode_preserves_audio_and_alignment_cache(self):
-        asset = self.make_asset()
-        track = BackgroundTrack(user=self.user, name="Fond", duration=9.0)
-        track.audio_file.save("fond.mp3", ContentFile(b"music bytes"), save=True)
-        project = self.make_project(
-            audio_source=NarrationProject.AudioSource.IMPORTED,
-            imported_audio=asset,
-            imported_audio_cache_key="d" * 64,
-            imported_audio_alignment={"captions": [{"start": 0, "end": 1, "text": "aligné"}]},
-        )
-        project.video_file.save("old.mp4", ContentFile(b"old video"), save=True)
-
-        response = self.client.post(f"/projects/{project.pk}/music/", {
-            "background_track_id": str(track.pk), "music_volume": "18",
-        })
-
-        self.assertRedirects(response, f"/projects/{project.pk}/")
-        project.refresh_from_db()
-        self.assertEqual(project.background_track, track)
-        self.assertEqual(project.music_volume, 18)
-        self.assertFalse(project.video_file)
-        self.assertEqual(project.imported_audio, asset)
-        self.assertEqual(project.imported_audio_cache_key, "d" * 64)
-        self.assertEqual(project.imported_audio_alignment["captions"][0]["text"], "aligné")
-
-    def test_remove_project_audio_asset_returns_to_xtts_and_preserves_xtts_cache(self):
-        project = self.make_project(audio_source=NarrationProject.AudioSource.IMPORTED)
-        asset = self.make_asset(project=project)
-        project.imported_audio = asset
-        project.imported_audio_cache_key = "c" * 64
-        project.imported_audio_alignment = {"captions": [{"start": 0, "end": 1, "text": "cached"}]}
-        project.save(update_fields=["imported_audio", "imported_audio_cache_key", "imported_audio_alignment"])
-        segment = NarrationSegment.objects.create(project=project, position=0, text="Texte")
-        segment.audio.save("scene.wav", ContentFile(b"cached XTTS scene"), save=True)
-        segment.cache_key = "keep-this-cache"
-        segment.save(update_fields=["cache_key"])
-
-        with self.captureOnCommitCallbacks(execute=True):
-            response = self.client.post(f"/projects/{project.pk}/audio/", {"action": "remove"})
-
-        self.assertRedirects(response, f"/projects/{project.pk}/")
-        project.refresh_from_db()
-        segment.refresh_from_db()
-        self.assertEqual(project.audio_source, NarrationProject.AudioSource.XTTS)
-        self.assertIsNone(project.imported_audio)
-        self.assertEqual(project.imported_audio_cache_key, "")
-        self.assertEqual(project.imported_audio_alignment, {})
-        self.assertTrue(segment.audio)
-        self.assertEqual(segment.cache_key, "keep-this-cache")
-        self.assertFalse(AudioAsset.objects.filter(pk=asset.pk).exists())
-
-    def test_editor_displays_audio_source_control_and_imported_player(self):
-        asset = self.make_asset()
-        project = self.make_project(
-            audio_source=NarrationProject.AudioSource.IMPORTED,
-            imported_audio=asset,
-        )
-
-        response = self.client.get(f"/projects/{project.pk}/")
-
-        self.assertEqual(response.status_code, 200)
-        self.assertContains(response, 'id="projectAudioSourceForm"')
-        self.assertContains(response, 'value="imported" checked')
-        self.assertContains(response, asset.audio_file.url)
-        self.assertContains(response, "18,8 s")
-        self.assertContains(response, "app.js?v=10")
-
-    def test_prepare_imported_audio_queues_without_xtts_voice(self):
-        asset = self.make_asset()
-        project = self.make_project(audio_source=NarrationProject.AudioSource.IMPORTED, imported_audio=asset)
-        segment = NarrationSegment.objects.create(project=project, position=0, text="Bonjour le Shiba")
-        segment.image.save("scene.jpg", ContentFile(b"image bytes"), save=True)
-
-        response = self.client.post(f"/projects/{project.pk}/prepare/", {})
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["ok"], True)
-        project.refresh_from_db()
-        self.assertEqual(project.status, NarrationProject.Status.QUEUED)
-        self.assertEqual(project.job_type, NarrationProject.JobType.VIDEO)
-        self.assertIsNone(project.voice_id)
 
 class ProjectViewTests(MediaTestCase):
     @patch("studio.services.hash_file", wraps=services.hash_file)
@@ -1134,6 +942,16 @@ class VideoNarrationModeTests(MediaTestCase):
         video_narration.assert_not_called()
         render_video.assert_not_called()
 
+    def test_worker_startup_announces_xtts_only_mode(self):
+        from .management.commands.run_narration_worker import Command
+
+        command = Command()
+        command.stdout = StringIO()
+        with override_settings(MEDIA_ROOT=Path(self.media_dir.name)):
+            command.handle(once=True, poll_seconds=0.25)
+
+        self.assertIn("mode XTTS uniquement", command.stdout.getvalue())
+
     def test_probe_clip_extracts_source_video_metadata(self):
         from .video_services import _probe_clip
 
@@ -1183,7 +1001,6 @@ class VideoNarrationModeTests(MediaTestCase):
         self.assertEqual(project.status, NarrationProject.Status.QUEUED)
         self.assertEqual(project.job_type, NarrationProject.JobType.VIDEO_NARRATION)
         self.assertEqual(segment.text, "Bonjour, le Shiba arrive.")
-
 
     def test_classic_assembly_still_queues_assembly_job_for_video_clips(self):
         project = NarrationProject.objects.create(user=self.user, title="Assemblage classique")
@@ -1251,186 +1068,6 @@ class VideoNarrationModeTests(MediaTestCase):
                     Command().handle(once=True, poll_seconds=0.25)
         prepare.assert_called_once_with(project.pk)
         render.assert_called_once_with(project.pk)
-
-
-    def test_worker_routes_imported_audio_around_xtts(self):
-        from .management.commands.run_narration_worker import Command
-
-        asset = AudioAsset(user=self.user, name="Narration importée", duration=8.0)
-        asset.audio_file.save("import.mp3", ContentFile(b"audio"), save=True)
-        project = NarrationProject.objects.create(
-            user=self.user, title="Audio importé worker",
-            audio_source=NarrationProject.AudioSource.IMPORTED,
-            imported_audio=asset,
-            status=NarrationProject.Status.QUEUED,
-            queued_at=timezone.now(),
-            job_type=NarrationProject.JobType.VIDEO,
-        )
-
-        with override_settings(MEDIA_ROOT=Path(self.media_dir.name)):
-            with (
-                patch("studio.management.commands.run_narration_worker.prepare_imported_audio") as prepare_imported,
-                patch("studio.management.commands.run_narration_worker.prepare_project") as prepare_xtts,
-                patch("studio.management.commands.run_narration_worker.render_imported_audio_video") as render,
-            ):
-                Command().handle(once=True, poll_seconds=0.25)
-
-        prepare_imported.assert_called_once_with(project.pk)
-        prepare_xtts.assert_not_called()
-        render.assert_called_once_with(project.pk)
-
-
-class ImportedAudioPipelineTests(MediaTestCase):
-    def make_imported_project(self, *, with_music=False, subtitles_enabled=True):
-        asset = AudioAsset(user=self.user, name="Narration importée", duration=4.0)
-        asset.audio_file.save("narration.mp3", ContentFile(b"imported audio bytes"), save=True)
-        project = NarrationProject.objects.create(
-            user=self.user,
-            title="Projet avec audio importé",
-            audio_source=NarrationProject.AudioSource.IMPORTED,
-            imported_audio=asset,
-            job_type=NarrationProject.JobType.VIDEO,
-            status=NarrationProject.Status.PROCESSING,
-            subtitles_enabled=subtitles_enabled,
-            background_track=self.make_background_track() if with_music else None,
-        )
-        words = [
-            {"word": "Bonjour", "start": 0.2, "end": 0.7},
-            {"word": "le", "start": 0.75, "end": 0.9},
-            {"word": "Shiba", "start": 1.0, "end": 1.5},
-        ]
-        captions = _group_words(words)
-        project.imported_audio_alignment = {
-            "transcript": "Bonjour le Shiba",
-            "captions": captions,
-            "duration": 4.0,
-            "scene_durations": [4.0],
-            "warning": "",
-            "match_ratio": 1.0,
-        }
-        project.imported_audio_cache_key = "f" * 64
-        project.save(update_fields=["imported_audio_alignment", "imported_audio_cache_key"])
-        scene = NarrationSegment.objects.create(project=project, position=0, text="Bonjour le Shiba")
-        scene.video_clip.save("clip.mp4", ContentFile(b"source video"), save=True)
-        return project, asset, scene
-
-    def make_background_track(self):
-        track = BackgroundTrack(user=self.user, name="Musique de fond", duration=15)
-        track.audio_file.save("background.ogg", ContentFile(b"music bytes"), save=True)
-        return track
-
-    def test_imported_alignment_maps_words_to_scenes_and_warns_on_mismatch(self):
-        first = NarrationSegment(position=0, text="Bonjour à tous")
-        second = NarrationSegment(position=1, text="Bienvenue chez nous")
-        words = [
-            {"word": "Bonjour", "start": 0.2, "end": 0.7},
-            {"word": "à", "start": 0.8, "end": 0.9},
-            {"word": "tous", "start": 1.0, "end": 1.4},
-            {"word": "Bienvenue", "start": 2.0, "end": 2.6},
-            {"word": "chez", "start": 2.7, "end": 2.9},
-            {"word": "nous", "start": 3.0, "end": 3.4},
-        ]
-
-        durations, warning, ratio = _scene_timing_map([first, second], words, 4.0)
-
-        self.assertAlmostEqual(sum(durations), 4.0, places=3)
-        self.assertEqual(warning, "")
-        self.assertEqual(ratio, 1.0)
-        _, mismatch_warning, mismatch_ratio = _scene_timing_map(
-            [first, second], [{"word": "Bonjour", "start": 0.2, "end": 0.7}], 4.0,
-        )
-        self.assertTrue(mismatch_warning)
-        self.assertLess(mismatch_ratio, 0.85)
-
-    @patch("studio.services.transcribe_imported_audio")
-    def test_imported_audio_alignment_is_cached_independently_of_music(self, transcribe):
-        asset = AudioAsset(user=self.user, name="Narration", duration=3.0)
-        asset.audio_file.save("narration.wav", ContentFile(b"audio asset bytes"), save=True)
-        project = NarrationProject.objects.create(
-            user=self.user, title="Audio en cache",
-            audio_source=NarrationProject.AudioSource.IMPORTED, imported_audio=asset,
-        )
-        segment = NarrationSegment.objects.create(project=project, position=0, text="Bonjour le Shiba")
-        segment.audio.save("cached-xtts.wav", ContentFile(b"existing xtts cache"), save=True)
-        segment.cache_key = "xtts-cache-key"
-        segment.subtitle_data = [{"start": 0.0, "end": 1.0, "text": "ancien sous-titre"}]
-        segment.save(update_fields=["cache_key", "subtitle_data"])
-        words = [
-            {"word": "Bonjour", "start": 0.1, "end": 0.5},
-            {"word": "le", "start": 0.6, "end": 0.7},
-            {"word": "Shiba", "start": 0.8, "end": 1.2},
-        ]
-        transcribe.return_value = ("Bonjour le Shiba", _group_words(words), 2.0)
-
-        prepare_imported_audio(project.pk)
-        project.refresh_from_db()
-        segment.refresh_from_db()
-        self.assertRegex(project.imported_audio_cache_key, r"^[0-9a-f]{64}$")
-        self.assertTrue(project.imported_audio_alignment["captions"])
-        self.assertTrue(segment.audio.name)
-        self.assertEqual(segment.cache_key, "xtts-cache-key")
-        self.assertEqual(segment.subtitle_data[0]["text"], "ancien sous-titre")
-        cached_key = project.imported_audio_cache_key
-        track = self.make_background_track()
-        project.background_track = track
-        project.save(update_fields=["background_track", "updated_at"])
-
-        with patch("studio.services.transcribe_imported_audio", side_effect=AssertionError("Ne doit pas retraiter l’audio")) as transcribe_again:
-            prepare_imported_audio(project.pk)
-
-        transcribe_again.assert_not_called()
-        project.refresh_from_db()
-        self.assertEqual(project.imported_audio_cache_key, cached_key)
-
-    @patch("studio.video_services._probe_clip", return_value={"duration": 3.0})
-    @patch("studio.video_services._ffmpeg_path", return_value="ffmpeg")
-    @patch("studio.video_services._run_ffmpeg")
-    def test_imported_audio_renders_global_subtitles_without_music(self, run_ffmpeg, _ffmpeg, _probe):
-        from .video_services import render_imported_audio_video
-
-        project, _asset, _scene = self.make_imported_project(subtitles_enabled=True)
-
-        def fake_ffmpeg(command, cwd, operation, cancel_check=None):
-            Path(command[-1]).write_bytes(b"x" * 2048)
-
-        run_ffmpeg.side_effect = fake_ffmpeg
-        render_imported_audio_video(project.pk)
-
-        project.refresh_from_db()
-        self.assertEqual(project.status, NarrationProject.Status.READY)
-        self.assertTrue(project.video_file)
-        final_command = run_ffmpeg.call_args_list[-1].args[0]
-        self.assertIn("subtitles=filename=project.ass", final_command[final_command.index("-vf") + 1])
-
-    @patch("studio.video_services.mix_music_with_video")
-    @patch("studio.video_services._probe_clip", return_value={"duration": 3.0})
-    @patch("studio.video_services._ffmpeg_path", return_value="ffmpeg")
-    @patch("studio.video_services._run_ffmpeg")
-    def test_imported_audio_renders_with_music_and_preserves_video_copy(
-        self, run_ffmpeg, _ffmpeg, _probe, mix_music,
-    ):
-        from .video_services import render_imported_audio_video
-
-        project, _asset, _scene = self.make_imported_project(with_music=True, subtitles_enabled=False)
-
-        def fake_ffmpeg(command, cwd, operation, cancel_check=None):
-            Path(command[-1]).write_bytes(b"x" * 2048)
-
-        def fake_mix(video_path, music_path, volume, duration, output_path, cancel_check=None):
-            output_path.write_bytes(b"mixed" * 512)
-            return output_path
-
-        run_ffmpeg.side_effect = fake_ffmpeg
-        mix_music.side_effect = fake_mix
-        render_imported_audio_video(project.pk)
-
-        project.refresh_from_db()
-        self.assertEqual(project.status, NarrationProject.Status.READY)
-        self.assertTrue(project.video_file)
-        final_command = run_ffmpeg.call_args_list[-1].args[0]
-        self.assertIn("-c:v", final_command)
-        self.assertEqual(final_command[final_command.index("-c:v") + 1], "copy")
-        mix_music.assert_called_once()
 
 
 class ProjectLifecycleAndNamingTests(MediaTestCase):

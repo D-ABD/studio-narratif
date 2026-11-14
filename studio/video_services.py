@@ -9,7 +9,6 @@ import threading
 import tempfile
 import time
 from pathlib import Path
-from types import SimpleNamespace
 
 from django.conf import settings
 from django.core.files import File
@@ -716,20 +715,16 @@ def _render_parallax_clip(
     command = [
         ffmpeg, "-y", "-v", "error",
         "-f", "rawvideo", "-pixel_format", "rgb24", "-video_size", f"{width}x{height}",
-        "-framerate", "24", "-i", "pipe:0",
+        "-framerate", "24", "-i", "pipe:0", "-i", str(audio_path), "-t", f"{duration:.3f}",
     ]
-    if audio_path:
-        command.extend(["-i", str(audio_path)])
-    command.extend(["-t", f"{duration:.3f}"])
     video_filters = _animation_filter_chain(animation_settings, width, height, duration, subtitle_file)
     if video_filters:
         command.extend(["-vf", ",".join(video_filters)])
-    command.extend([*_video_encoder_args(ffmpeg, width, height), "-pix_fmt", "yuv420p"])
-    if audio_path:
-        command.extend(["-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2", "-shortest"])
-    else:
-        command.append("-an")
-    command.append(str(output_path))
+    command.extend([
+        *_video_encoder_args(ffmpeg, width, height),
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "128k", "-ar", "48000", "-ac", "2", "-shortest", str(output_path),
+    ])
 
     try:
         _run_parallax_attempt(command, image_path, output_path, width, height, duration, folder, cancel_check=cancel_check)
@@ -1115,189 +1110,6 @@ def render_video_narration(project_id):
         )
     finally:
         close_old_connections()
-
-
-def _render_imported_audio_scene(ffmpeg, scene, output, width, height, duration, folder, cancel_check):
-    """Render one silent scene so project-wide imported audio stays on one continuous timeline."""
-    check_job_cancellation(scene.project_id)
-    if scene.image:
-        animation_settings = scene.animation_settings or {}
-        effects = animation_settings.get("effects", {})
-        if effects.get("parallax", {}).get("enabled") or scene.motion == NarrationSegment.Motion.PARALLAX:
-            _render_parallax_clip(
-                ffmpeg, scene.image.path, None, output, None, width, height, duration, folder,
-                animation_settings=animation_settings, cancel_check=cancel_check,
-            )
-            return
-        filters = _animation_filter_chain(animation_settings, width, height, duration)
-        command = [
-            ffmpeg, "-y", "-v", "error", "-loop", "1", "-i", str(scene.image.path),
-            "-t", f"{duration:.3f}", "-vf", ",".join(filters), "-r", "24",
-            *_video_encoder_args(ffmpeg, width, height), "-pix_fmt", "yuv420p", "-an", str(output),
-        ]
-    elif scene.video_clip:
-        metadata = _probe_clip(scene.video_clip.path)
-        video_filters = [
-            f"scale={width}:{height}:force_original_aspect_ratio=increase",
-            f"crop={width}:{height}", "fps=24", "setsar=1",
-        ]
-        extension = max(0.0, duration - float(metadata["duration"]))
-        if extension > 0.01:
-            video_filters.append(f"tpad=stop_mode=clone:stop_duration={extension:.3f}")
-        command = [
-            ffmpeg, "-y", "-v", "error", "-i", str(scene.video_clip.path),
-            "-t", f"{duration:.3f}", "-vf", ",".join(video_filters), "-r", "24",
-            *_video_encoder_args(ffmpeg, width, height), "-pix_fmt", "yuv420p", "-an", str(output),
-        ]
-    else:
-        raise RuntimeError(f"La scène {scene.position + 1} ne contient ni image ni clip vidéo.")
-
-    _run_ffmpeg(command, folder, f"rendu silencieux de la scène {scene.position + 1}", cancel_check=cancel_check)
-
-
-def _imported_audio_final_command(
-    ffmpeg, silent_video, audio_path, output, duration, width, height, subtitle_file=None,
-):
-    """Attach one complete imported soundtrack and optional project-wide subtitles."""
-    command = [ffmpeg, "-y", "-v", "error", "-i", str(silent_video), "-i", str(audio_path)]
-    if subtitle_file:
-        command.extend(["-vf", _subtitle_filter(subtitle_file), "-r", "24"])
-    command.extend(["-map", "0:v:0", "-map", "1:a:0"])
-    if subtitle_file:
-        command.extend([*_video_encoder_args(ffmpeg, width, height), "-pix_fmt", "yuv420p"])
-    else:
-        command.extend(["-c:v", "copy"])
-    command.extend([
-        "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
-        "-t", f"{duration:.3f}", "-shortest", "-movflags", "+faststart", str(output),
-    ])
-    return command
-
-
-def render_imported_audio_video(project_id):
-    """Render silent scene visuals, burn one global ASS track, then attach the imported audio."""
-    close_old_connections()
-    try:
-        project = NarrationProject.objects.select_related("imported_audio", "background_track").get(pk=project_id)
-        cancel_check = cancellation_checker(project_id)
-        check_job_cancellation(project_id)
-        scenes = list(project.segments.order_by("position", "id"))
-        asset = project.imported_audio
-        if project.audio_source != NarrationProject.AudioSource.IMPORTED or not asset:
-            raise RuntimeError("Le projet n’a pas de fichier audio importé actif.")
-        if asset.user_id != project.user_id:
-            raise RuntimeError("Le fichier audio importé n’appartient pas au propriétaire du projet.")
-        if not scenes or any(not scene.image and not scene.video_clip for scene in scenes):
-            raise RuntimeError("Ajoute au moins une scène visuelle avant de lancer le rendu.")
-        if not asset.audio_file or not Path(asset.audio_file.path).is_file():
-            raise RuntimeError("Le fichier audio importé est introuvable. Importe-le à nouveau.")
-
-        alignment = project.imported_audio_alignment or {}
-        captions = alignment.get("captions", [])
-        scene_durations = alignment.get("scene_durations", [])
-        duration = float(alignment.get("duration") or 0)
-        if duration <= 0 or len(scene_durations) != len(scenes):
-            raise RuntimeError("L’alignement WhisperX est absent ou périmé. Relance le rendu du projet.")
-        if project.subtitles_enabled and not captions:
-            raise RuntimeError("Aucun sous-titre synchronisé n’est disponible pour l’audio importé.")
-
-        ffmpeg = _ffmpeg_path()
-        width, height = _dimensions(project.video_format)
-        project.progress_percent = 2
-        project.status_message = "Rendu des scènes visuelles sans audio…"
-        project.save(update_fields=["progress_percent", "status_message", "updated_at"])
-        with tempfile.TemporaryDirectory(prefix=f"petit-studio-imported-audio-{project.pk}-") as temp:
-            folder = Path(temp)
-            clips = []
-            for index, (scene, scene_duration) in enumerate(zip(scenes, scene_durations), start=1):
-                check_job_cancellation(project_id)
-                scene_duration = float(scene_duration)
-                if scene_duration <= 0:
-                    raise RuntimeError(f"La durée calculée pour la scène {index} est invalide.")
-                project.status_message = f"Rendu visuel silencieux · scène {index}/{len(scenes)}"
-                project.current_segment = index
-                project.progress_percent = 5 + round(70 * (index - 1) / len(scenes))
-                project.save(update_fields=["status_message", "current_segment", "progress_percent", "updated_at"])
-                clip = folder / f"scene-{index:04}.mp4"
-                _render_imported_audio_scene(
-                    ffmpeg, scene, clip, width, height, scene_duration, folder, cancel_check,
-                )
-                if not clip.is_file() or clip.stat().st_size < 1000:
-                    raise RuntimeError(f"FFmpeg n’a pas produit la vidéo silencieuse de la scène {index}.")
-                clips.append(clip)
-
-            concat_list = folder / "scenes.txt"
-            concat_list.write_text("".join(f"file '{clip.name}'\n" for clip in clips), encoding="utf-8")
-            silent_video = folder / "scenes-silent.mp4"
-            _run_ffmpeg(
-                [ffmpeg, "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(concat_list),
-                 "-c", "copy", "-movflags", "+faststart", str(silent_video)],
-                folder, "assemblage des scènes visuelles silencieuses", cancel_check=cancel_check,
-            )
-            if not silent_video.is_file() or silent_video.stat().st_size < 1000:
-                raise RuntimeError("FFmpeg n’a pas assemblé les scènes visuelles.")
-
-            subtitle_file = None
-            if project.subtitles_enabled:
-                subtitle_file = folder / "project.ass"
-                ass_content = _ass_text(SimpleNamespace(subtitle_data=captions), width, height)
-                if "Dialogue:" not in ass_content:
-                    raise RuntimeError("Aucun sous-titre global synchronisé n’est disponible.")
-                subtitle_file.write_text(ass_content, encoding="utf-8")
-
-            project.status_message = "Ajout de l’audio importé et des sous-titres globaux…"
-            project.progress_percent = 82
-            project.save(update_fields=["status_message", "progress_percent", "updated_at"])
-            output = folder / "narration-imported-audio.mp4"
-            _run_ffmpeg(
-                _imported_audio_final_command(
-                    ffmpeg, silent_video, asset.audio_file.path, output, duration,
-                    width, height, subtitle_file,
-                ),
-                folder, "assemblage audio importé et sous-titres", cancel_check=cancel_check,
-            )
-            if not output.is_file() or output.stat().st_size < 1000:
-                raise RuntimeError("FFmpeg n’a pas produit la vidéo avec l’audio importé.")
-
-            if project.background_track_id:
-                mixed_output = folder / "narration-imported-audio-music.mp4"
-                output = mix_music_with_video(
-                    output, project.background_track.audio_file.path, project.music_volume,
-                    duration, mixed_output, cancel_check=cancel_check,
-                )
-            check_job_cancellation(project_id)
-            project.refresh_from_db()
-            if project.video_file:
-                project.video_file.delete(save=False)
-            with output.open("rb") as stream:
-                project.video_file.save(f"narration-imported-audio-{project.pk}.mp4", File(stream), save=False)
-            project.duration_seconds = duration
-            project.status = NarrationProject.Status.READY
-            project.status_message = "Vidéo prête avec l’audio importé."
-            if project.audio_warning:
-                project.status_message += f" {project.audio_warning}"
-            project.error_message = ""
-            project.progress_percent = 100
-            project.current_segment = len(scenes)
-            project.total_segments = len(scenes)
-            project.finished_at = timezone.now()
-            project.save(update_fields=[
-                "video_file", "duration_seconds", "status", "status_message", "error_message",
-                "progress_percent", "current_segment", "total_segments", "finished_at", "updated_at",
-            ])
-    except JobCancelled:
-        mark_job_cancelled(project_id)
-    except Exception as exc:
-        NarrationProject.objects.filter(pk=project_id).update(
-            status=NarrationProject.Status.ERROR,
-            status_message="Le rendu avec l’audio importé a échoué.",
-            error_message=str(exc)[:2000],
-            queued_at=None,
-            finished_at=timezone.now(),
-        )
-    finally:
-        close_old_connections()
-
 
 def render_project_video(project_id):
     """Render each image/audio scene, optionally burn aligned captions, then concatenate MP4 clips."""

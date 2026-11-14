@@ -26,7 +26,6 @@ urlpatterns = [
     path("projects/<int:project_id>/rename/", views.rename_project, name="rename_project"),
     path("projects/<int:project_id>/voice/", views.set_project_voice, name="set_project_voice"),
     path("projects/<int:project_id>/music/", views.set_project_music, name="set_project_music"),
-    path("projects/<int:project_id>/audio/", views.save_project_audio, name="save_project_audio"),
     path("projects/<int:project_id>/segments/add/", views.add_segment, name="add_segment"),
     path("projects/<int:project_id>/segments/reorder/", views.reorder_segments, name="reorder_segments"),
     path("projects/<int:project_id>/segments/<int:segment_id>/save/", views.save_segment, name="save_segment"),

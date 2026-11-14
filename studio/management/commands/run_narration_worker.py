@@ -8,10 +8,8 @@ from django.utils import timezone
 
 from studio.models import NarrationProject
 from studio.job_control import JobCancelled, mark_job_cancelled
-from studio.services import prepare_imported_audio, prepare_project
-from studio.video_services import (
-    render_imported_audio_video, render_project_video, render_video_assembly, render_video_narration,
-)
+from studio.services import prepare_project
+from studio.video_services import render_project_video, render_video_assembly, render_video_narration
 
 
 class Command(BaseCommand):
@@ -30,7 +28,7 @@ class Command(BaseCommand):
         except BlockingIOError as exc:
             raise CommandError("Un worker de narration tourne déjà pour ce dossier média.") from exc
 
-        self.stdout.write(self.style.SUCCESS("Worker prêt. En attente de narrations…"))
+        self.stdout.write(self.style.SUCCESS("Worker prêt · mode XTTS uniquement, sans audio importé. En attente de narrations…"))
         self._recover_interrupted_jobs()
         while True:
             project_id = self._claim_next_job()
@@ -47,20 +45,15 @@ class Command(BaseCommand):
                 if job_type == NarrationProject.JobType.ASSEMBLY:
                     render_video_assembly(project_id)
                 else:
-                    project = NarrationProject.objects.only("audio_source").get(pk=project_id)
-                    if project.audio_source == NarrationProject.AudioSource.IMPORTED:
-                        prepare_imported_audio(project_id)
-                    else:
-                        prepare_project(project_id)
-                if job_type in {NarrationProject.JobType.VIDEO_NARRATION, NarrationProject.JobType.VIDEO}:
+                    prepare_project(project_id)
+                if job_type == NarrationProject.JobType.VIDEO_NARRATION:
                     project = NarrationProject.objects.filter(pk=project_id).first()
                     if project and project.status == NarrationProject.Status.PROCESSING:
-                        if project.audio_source == NarrationProject.AudioSource.IMPORTED:
-                            render_imported_audio_video(project_id)
-                        elif job_type == NarrationProject.JobType.VIDEO_NARRATION:
-                            render_video_narration(project_id)
-                        elif job_type == NarrationProject.JobType.VIDEO:
-                            render_project_video(project_id)
+                        render_video_narration(project_id)
+                elif job_type == NarrationProject.JobType.VIDEO:
+                    project = NarrationProject.objects.filter(pk=project_id).first()
+                    if project and project.status == NarrationProject.Status.PROCESSING:
+                        render_project_video(project_id)
             except JobCancelled:
                 mark_job_cancelled(project_id)
             except Exception as exc:  # prepare_project records errors; protect the worker from unexpected failures.

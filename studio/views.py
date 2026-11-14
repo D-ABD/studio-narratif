@@ -43,9 +43,7 @@ MAX_VIDEO_CLIP_BYTES = 200 * 1024 * 1024
 MAX_IMPORT_BYTES = 500 * 1024 * 1024
 MAX_IMPORT_PIXELS = 100_000_000
 MAX_MUSIC_BYTES = 50 * 1024 * 1024
-MAX_PROJECT_AUDIO_BYTES = 100 * 1024 * 1024
 ALLOWED_MUSIC_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg"}
-ALLOWED_PROJECT_AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg"}
 ALLOWED_SAMPLE_EXTENSIONS = {".wav", ".mp3", ".webm", ".m4a", ".ogg"}
 ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm"}
 ANIMATION_EFFECT_DEFINITIONS = (
@@ -209,42 +207,6 @@ def _invalidate_video(project, extra_update_fields=()):
         update_fields.append("status_message")
     update_fields.extend(extra_update_fields)
     project.save(update_fields=update_fields)
-    _schedule_storage_cleanup(files_to_delete)
-
-
-def _invalidate_audio_render(project, *, clear_alignment=False, extra_update_fields=()):
-    """Drop project-level subtitles/video while retaining per-scene XTTS caches."""
-    files_to_delete = [
-        (field.storage, field.name)
-        for field in (project.subtitles, project.video_file)
-        if field and field.name
-    ]
-    project.subtitles = ""
-    project.video_file = ""
-    project.audio_warning = ""
-    update_fields = ["subtitles", "video_file", "audio_warning", "updated_at"]
-    if clear_alignment:
-        project.imported_audio_cache_key = ""
-        project.imported_audio_alignment = {}
-        update_fields.extend(["imported_audio_cache_key", "imported_audio_alignment"])
-    if project.status == NarrationProject.Status.READY:
-        project.status_message = "La source audio a changé. Génère une nouvelle vidéo."
-        update_fields.append("status_message")
-    update_fields.extend(extra_update_fields)
-    project.save(update_fields=list(dict.fromkeys(update_fields)))
-    _schedule_storage_cleanup(files_to_delete)
-
-
-def _delete_project_audio_asset_if_orphaned(asset_id):
-    try:
-        asset = AudioAsset.objects.get(pk=asset_id)
-    except AudioAsset.DoesNotExist:
-        return
-    if asset.project_id is None or asset.imported_by_projects.exists():
-        return
-    files_to_delete = [(asset.audio_file.storage, asset.audio_file.name)] if asset.audio_file else []
-    with transaction.atomic():
-        asset.delete()
     _schedule_storage_cleanup(files_to_delete)
 
 
@@ -443,118 +405,6 @@ def upload_music(request):
         logger.exception("Échec de l’enregistrement d’une musique pour l’utilisateur %s.", request.user.pk)
         messages.error(request, "Impossible d’enregistrer cette musique.")
     return redirect("musics")
-
-
-@login_required
-@require_POST
-def save_project_audio(request, project_id):
-    project = get_object_or_404(NarrationProject, pk=project_id, user=request.user)
-    if project.status in {NarrationProject.Status.QUEUED, NarrationProject.Status.PROCESSING}:
-        return JsonResponse({"ok": False, "error": "Attends la fin du traitement avant de modifier la source audio."}, status=409)
-
-    action = request.POST.get("action", "save")
-    if action == "remove":
-        old_asset = project.imported_audio
-        if not old_asset:
-            messages.info(request, "Aucun audio importé n’est associé à ce projet.")
-            return redirect("project_detail", project_id=project.pk)
-        project.imported_audio = None
-        project.audio_source = NarrationProject.AudioSource.XTTS
-        _invalidate_audio_render(
-            project, clear_alignment=True, extra_update_fields=("imported_audio", "audio_source"),
-        )
-        if old_asset.project_id == project.pk:
-            transaction.on_commit(
-                lambda asset_id=old_asset.pk: _delete_project_audio_asset_if_orphaned(asset_id)
-            )
-        messages.success(request, "L’audio importé a été retiré du projet. La source XTTS est active.")
-        return redirect("project_detail", project_id=project.pk)
-
-    audio_source = request.POST.get("audio_source")
-    if audio_source not in NarrationProject.AudioSource.values:
-        messages.error(request, "Choisis une source audio valide.")
-        return redirect("project_detail", project_id=project.pk)
-    upload = request.FILES.get("audio_file")
-    if upload and audio_source != NarrationProject.AudioSource.IMPORTED:
-        messages.error(request, "Sélectionne « Audio importé » pour associer un fichier à ce projet.")
-        return redirect("project_detail", project_id=project.pk)
-
-    if upload:
-        if upload.size <= 0:
-            messages.error(request, "Le fichier audio est vide.")
-            return redirect("project_detail", project_id=project.pk)
-        if upload.size > MAX_PROJECT_AUDIO_BYTES:
-            messages.error(request, "Le fichier audio dépasse la limite de 100 Mo.")
-            return redirect("project_detail", project_id=project.pk)
-        extension = Path(upload.name).suffix.lower()
-        if extension not in ALLOWED_PROJECT_AUDIO_EXTENSIONS:
-            messages.error(request, "Formats acceptés : MP3, WAV, M4A et OGG.")
-            return redirect("project_detail", project_id=project.pk)
-
-        created_file = None
-        asset = None
-        try:
-            with tempfile.TemporaryDirectory(prefix=f"petit-studio-audio-{project.pk}-") as folder:
-                staged_path = Path(folder) / f"upload{extension}"
-                _stream_upload_to_path(upload, staged_path)
-                duration = _probe_music_duration(staged_path)
-                title = Path(upload.name).stem.strip()[:160] or "Audio importé"
-                asset = AudioAsset(
-                    user=request.user,
-                    name=title,
-                    duration=duration,
-                    source=AudioAsset.Source.UPLOAD,
-                    project=project,
-                )
-                with staged_path.open("rb") as stream:
-                    asset.audio_file.save(Path(upload.name).name, File(stream), save=False)
-                created_file = (asset.audio_file.storage, asset.audio_file.name)
-                with transaction.atomic():
-                    asset.save()
-                    old_asset = project.imported_audio
-                    project.imported_audio = asset
-                    project.audio_source = NarrationProject.AudioSource.IMPORTED
-                    _invalidate_audio_render(
-                        project,
-                        clear_alignment=True,
-                        extra_update_fields=("imported_audio", "audio_source"),
-                    )
-                    if old_asset and old_asset.pk != asset.pk and old_asset.project_id == project.pk:
-                        transaction.on_commit(
-                            lambda asset_id=old_asset.pk: _delete_project_audio_asset_if_orphaned(asset_id)
-                        )
-            messages.success(
-                request,
-                f"« {asset.name} » ({asset.duration:.1f} s) est associé au projet en mode audio importé.",
-            )
-        except (OSError, ValueError, subprocess.SubprocessError) as exc:
-            if created_file:
-                _delete_storage_files([created_file])
-            messages.error(request, str(exc) or "Impossible d’ajouter ce fichier audio.")
-        except Exception:
-            if created_file:
-                _delete_storage_files([created_file])
-            logger.exception("Échec de l’import audio pour le projet %s.", project.pk)
-            messages.error(request, "Impossible d’enregistrer le fichier audio importé.")
-        return redirect("project_detail", project_id=project.pk)
-
-    if audio_source == NarrationProject.AudioSource.IMPORTED and not project.imported_audio:
-        messages.error(request, "Ajoute un fichier audio avant d’activer ce mode.")
-        return redirect("project_detail", project_id=project.pk)
-    if project.audio_source != audio_source:
-        project.audio_source = audio_source
-        _invalidate_audio_render(
-            project, extra_update_fields=("audio_source",),
-        )
-        messages.success(
-            request,
-            "La source audio a été changée. Les fichiers XTTS en cache restent disponibles."
-            if audio_source == NarrationProject.AudioSource.XTTS
-            else "Le mode audio importé est actif. L’alignement sera calculé au prochain rendu.",
-        )
-    else:
-        messages.info(request, "Cette source audio est déjà active.")
-    return redirect("project_detail", project_id=project.pk)
 
 
 @login_required
@@ -772,7 +622,6 @@ def project_detail(request, project_id):
         "motions": NarrationSegment.Motion.choices,
         "camera_profiles": NarrationSegment.CameraProfile.choices,
         "animation_levels": ANIMATION_LEVEL_CHOICES,
-        "audio_source_choices": NarrationProject.AudioSource.choices,
         "has_scenes": bool(segments and any(segment.image for segment in segments)),
         "has_video_clips": bool(segments and any(segment.video_clip for segment in segments)),
         "can_assemble_clips": bool(
@@ -781,13 +630,6 @@ def project_detail(request, project_id):
         "can_narrate_video": bool(
             segments and all(
                 segment.video_clip and not segment.image and segment.text.strip()
-                for segment in segments
-            )
-        ),
-        "can_render_imported_audio": bool(
-            segments and all(
-                segment.text.strip() and bool(segment.image or segment.video_clip)
-                and not (segment.image and segment.video_clip)
                 for segment in segments
             )
         ),
@@ -1224,50 +1066,34 @@ def prepare(request, project_id):
     project = get_object_or_404(NarrationProject, pk=project_id, user=request.user)
     if project.status in {NarrationProject.Status.QUEUED, NarrationProject.Status.PROCESSING}:
         return JsonResponse({"ok": False, "error": "Ce projet est déjà dans la file ou en cours de traitement."}, status=409)
+    voice_id = request.POST.get("voice_id") or project.voice_id
+    voice = get_object_or_404(Voice, pk=voice_id, user=request.user, consent_confirmed=True) if voice_id else None
     segments = list(project.segments.order_by("position", "id"))
+    if not voice:
+        return JsonResponse({"ok": False, "error": "Choisis une voix autorisée pour ce projet."}, status=400)
     if not segments or any(not segment.text.strip() for segment in segments):
         return JsonResponse({"ok": False, "error": "Ajoute un texte à chaque segment avant de préparer la narration."}, status=400)
     has_images = any(segment.image for segment in segments)
     has_video_clips = any(segment.video_clip for segment in segments)
     requested_mode = request.POST.get("mode", "")
     audio_only = request.POST.get("audio_only") == "1"
-    if project.audio_source == NarrationProject.AudioSource.IMPORTED:
-        voice = None
-        if audio_only:
-            return JsonResponse({"ok": False, "error": "La pré-génération XTTS est disponible uniquement en mode XTTS."}, status=400)
-        if not project.imported_audio or project.imported_audio.user_id != request.user.pk:
-            return JsonResponse({"ok": False, "error": "Associe un fichier audio qui t’appartient à ce projet."}, status=400)
-        if any(not segment.image and not segment.video_clip for segment in segments):
-            return JsonResponse({"ok": False, "error": "Ajoute une image ou un clip vidéo à chaque scène."}, status=400)
-        if any(segment.image and segment.video_clip for segment in segments):
-            return JsonResponse({"ok": False, "error": "Une scène ne peut pas contenir une image et une vidéo simultanément."}, status=400)
-        job_type = (
-            NarrationProject.JobType.VIDEO_NARRATION
-            if all(segment.video_clip for segment in segments)
-            else NarrationProject.JobType.VIDEO
-        )
+    if audio_only:
+        if has_video_clips and any(not segment.video_clip or segment.image for segment in segments):
+            return JsonResponse({"ok": False, "error": "La pré-génération audio accepte uniquement des clips vidéo, sans images mélangées."}, status=400)
+        job_type = NarrationProject.JobType.AUDIO
+    elif has_video_clips:
+        if requested_mode != NarrationProject.JobType.VIDEO_NARRATION:
+            return JsonResponse({"ok": False, "error": "Choisis « Narration vidéo » pour remplacer le son des clips par la voix XTTS, ou utilise l’assemblage classique."}, status=400)
+        if any(not segment.video_clip or segment.image for segment in segments):
+            return JsonResponse({"ok": False, "error": "La narration vidéo accepte uniquement des clips vidéo, sans images mélangées."}, status=400)
+        job_type = NarrationProject.JobType.VIDEO_NARRATION
     else:
-        voice_id = request.POST.get("voice_id") or project.voice_id
-        voice = get_object_or_404(Voice, pk=voice_id, user=request.user, consent_confirmed=True) if voice_id else None
-        if not voice:
-            return JsonResponse({"ok": False, "error": "Choisis une voix autorisée pour ce projet."}, status=400)
-        if audio_only:
-            if has_video_clips and any(not segment.video_clip or segment.image for segment in segments):
-                return JsonResponse({"ok": False, "error": "La pré-génération audio accepte uniquement des clips vidéo, sans images mélangées."}, status=400)
-            job_type = NarrationProject.JobType.AUDIO
-        elif has_video_clips:
-            if requested_mode != NarrationProject.JobType.VIDEO_NARRATION:
-                return JsonResponse({"ok": False, "error": "Choisis « Narration vidéo » pour remplacer le son des clips par la voix XTTS, ou utilise l’assemblage classique."}, status=400)
-            if any(not segment.video_clip or segment.image for segment in segments):
-                return JsonResponse({"ok": False, "error": "La narration vidéo accepte uniquement des clips vidéo, sans images mélangées."}, status=400)
-            job_type = NarrationProject.JobType.VIDEO_NARRATION
-        else:
-            if requested_mode == NarrationProject.JobType.VIDEO_NARRATION:
-                return JsonResponse({"ok": False, "error": "Ajoute des clips vidéo pour utiliser le mode Narration vidéo."}, status=400)
-            if has_images and any(not segment.image for segment in segments):
-                return JsonResponse({"ok": False, "error": "Ajoute une image à chaque scène avant de générer la vidéo."}, status=400)
-            job_type = NarrationProject.JobType.VIDEO if has_images else NarrationProject.JobType.AUDIO
-    if voice and project.voice_id != voice.pk:
+        if requested_mode == NarrationProject.JobType.VIDEO_NARRATION:
+            return JsonResponse({"ok": False, "error": "Ajoute des clips vidéo pour utiliser le mode Narration vidéo."}, status=400)
+        if has_images and any(not segment.image for segment in segments):
+            return JsonResponse({"ok": False, "error": "Ajoute une image à chaque scène avant de générer la vidéo."}, status=400)
+        job_type = NarrationProject.JobType.VIDEO if has_images else NarrationProject.JobType.AUDIO
+    if project.voice_id != voice.pk:
         project.voice = voice
         _invalidate_export(project)
     project.status = NarrationProject.Status.QUEUED
@@ -1275,9 +1101,7 @@ def prepare(request, project_id):
     project.job_type = job_type
     project.cancel_requested = False
     project.status_message = (
-        "Rendu avec audio importé ajouté à la file d’attente."
-        if project.audio_source == NarrationProject.AudioSource.IMPORTED
-        else "Pré-génération audio XTTS/WhisperX ajoutée à la file d’attente."
+        "Pré-génération audio XTTS/WhisperX ajoutée à la file d’attente."
         if audio_only
         else "Narration vidéo ajoutée à la file d’attente."
         if job_type == NarrationProject.JobType.VIDEO_NARRATION
@@ -1317,13 +1141,7 @@ def project_status(request, project_id):
         "queue_position": queue_position,
         "queue_count": queue_count,
         "cancel_requested": project.cancel_requested,
-        "audio_url": (
-            project.imported_audio.audio_file.url
-            if project.audio_source == NarrationProject.AudioSource.IMPORTED
-            and project.imported_audio and project.imported_audio.audio_file
-            else project.full_audio.url if project.full_audio else ""
-        ),
-        "audio_warning": project.audio_warning,
+        "audio_url": project.full_audio.url if project.full_audio else "",
         "subtitles_url": project.subtitles.url if project.subtitles else "",
         "video_url": project.video_file.url if project.video_file else "",
     })
