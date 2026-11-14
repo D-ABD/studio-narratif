@@ -807,3 +807,73 @@ class ProjectLifecycleAndNamingTests(MediaTestCase):
         response = self.client.post(f"/projects/{project.pk}/delete/")
         self.assertEqual(response.status_code, 302)
         self.assertFalse(NarrationProject.objects.filter(pk=project.pk).exists())
+
+class QueueSupervisionTests(MediaTestCase):
+    def test_queue_page_and_json_api_sort_waiting_projects_and_show_processing(self):
+        now = timezone.now()
+        later = NarrationProject.objects.create(
+            title="En attente plus tard",
+            status=NarrationProject.Status.QUEUED,
+            queued_at=now,
+        )
+        earlier = NarrationProject.objects.create(
+            title="En attente en premier",
+            status=NarrationProject.Status.QUEUED,
+            queued_at=now - timedelta(minutes=2),
+        )
+        processing = NarrationProject.objects.create(
+            title="Projet en cours",
+            status=NarrationProject.Status.PROCESSING,
+            queued_at=now - timedelta(minutes=1),
+            progress_percent=45,
+            current_segment=2,
+            total_segments=5,
+        )
+        NarrationProject.objects.create(title="Brouillon hors file")
+
+        response = self.client.get("/queue/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [project.pk for project in response.context["waiting_projects"]],
+            [earlier.pk, later.pk],
+        )
+        self.assertEqual(
+            [project.pk for project in response.context["processing_projects"]],
+            [processing.pk],
+        )
+        self.assertEqual(response.context["queue_count"], 2)
+        self.assertContains(response, "Projet en cours")
+        self.assertContains(response, "Segment 2/5")
+
+        api_response = self.client.get("/queue/status/")
+        self.assertEqual(api_response.status_code, 200)
+        payload = api_response.json()
+        self.assertEqual([project["id"] for project in payload["waiting"]], [earlier.pk, later.pk])
+        self.assertEqual([project["id"] for project in payload["processing"]], [processing.pk])
+        self.assertEqual(payload["queue_count"], 2)
+        self.assertFalse(payload["is_empty"])
+
+    def test_sidebar_queue_count_is_available_globally_and_excludes_processing(self):
+        NarrationProject.objects.create(title="Attente 1", status=NarrationProject.Status.QUEUED)
+        NarrationProject.objects.create(title="Attente 2", status=NarrationProject.Status.QUEUED)
+        NarrationProject.objects.create(title="Traitement actif", status=NarrationProject.Status.PROCESSING)
+        NarrationProject.objects.create(title="Brouillon")
+
+        home_response = self.client.get("/")
+        self.assertEqual(home_response.status_code, 200)
+        self.assertEqual(home_response.context["queue_count"], 2)
+        self.assertContains(home_response, 'id="queueCountBadge" aria-label="2 projet(s) en attente">2</span>')
+
+        queue_response = self.client.get("/queue/")
+        self.assertEqual(queue_response.status_code, 200)
+        self.assertEqual(queue_response.context["queue_count"], 2)
+
+    def test_queue_page_shows_empty_state_when_no_active_jobs(self):
+        response = self.client.get("/queue/")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "La file est vide.")
+        self.assertNotIn('id="queueEmpty" hidden', response.content.decode())
+        api_response = self.client.get("/queue/status/")
+        self.assertTrue(api_response.json()["is_empty"])
+
+

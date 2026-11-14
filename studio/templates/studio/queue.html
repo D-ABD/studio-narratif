@@ -1,0 +1,225 @@
+{% extends "studio/base.html" %}
+{% block title %}File d'attente · Petit Studio{% endblock %}
+{% block heading %}File d'attente{% endblock %}
+{% block content %}
+<style>
+  .queue-page { max-width: 1200px; margin: 0 auto; }
+  .queue-intro { margin: -8px 0 22px; color: #929BAA; font-size: 12px; }
+  .queue-grid { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 16px; align-items: start; }
+  .queue-section { min-width: 0; padding: 19px; border: 1px solid #29313E; border-radius: 16px; background: #151A22; box-shadow: 0 22px 60px #0003; }
+  .queue-section h2 { margin: 0 0 14px; color: #E7EAF0; font-size: 12px; letter-spacing: .5px; }
+  .queue-list { display: grid; gap: 9px; }
+  .queue-row { min-width: 0; padding: 13px; border: 1px solid #2B3441; border-radius: 12px; background: #11161F; }
+  .queue-row-main { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+  .queue-project-link { min-width: 0; overflow: hidden; color: #F2F4F8; font-size: 12px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+  .queue-project-link:hover { color: #FFC65D; }
+  .queue-row-status { flex: 0 0 auto; color: #F6BD73; font-size: 9px; }
+  .queue-row.is-queued .queue-row-status { color: #AAB3C1; }
+  .queue-row progress { display: block; width: 100%; height: 7px; margin: 12px 0 5px; accent-color: #F59E0B; }
+  .queue-row-details { display: flex; justify-content: space-between; gap: 10px; color: #929BAA; font-size: 10px; }
+  .queue-row-actions { display: flex; justify-content: flex-end; margin-top: 11px; }
+  .queue-cancel-button { min-height: 31px; padding: 0 10px; border: 1px solid #603337; border-radius: 8px; color: #F0AAA3; background: #2A1B1B; font-size: 10px; font-weight: 700; cursor: pointer; }
+  .queue-cancel-button:disabled { opacity: .55; cursor: not-allowed; }
+  .queue-empty { padding: 28px 16px; border: 1px dashed #35404F; border-radius: 12px; color: #AAB3C1; text-align: center; }
+  .queue-empty strong { display: block; margin-bottom: 4px; color: #E7EAF0; font-size: 13px; }
+  .queue-subempty { color: #778294; font-size: 10px; text-align: center; }
+  .queue-refresh-note { margin: 12px 2px 0; color: #778294; font-size: 9px; text-align: right; }
+  .queue-page [hidden] { display: none !important; }
+  @media(max-width:800px) { .queue-grid { grid-template-columns: minmax(0,1fr); } }
+</style>
+
+<section class="queue-page" id="queuePage" data-status-url="{% url 'queue_status' %}">
+  <p class="queue-intro">Suivi des traitements et annulation depuis une seule page.</p>
+  <div class="queue-grid">
+    <section class="queue-section" aria-labelledby="queueProcessingTitle">
+      <h2 id="queueProcessingTitle">EN COURS</h2>
+      <div class="queue-list" id="processingList">
+        {% for project in processing_projects %}
+        <article class="queue-row is-processing" data-project-id="{{ project.id }}">
+          <div class="queue-row-main">
+            <a class="queue-project-link" href="{% url 'project_detail' project.id %}">{{ project.title }}</a>
+            <span class="queue-row-status">{{ project.get_status_display }}</span>
+          </div>
+          <progress max="100" value="{{ project.progress_percent }}" aria-label="Progression de {{ project.title }}"></progress>
+          <div class="queue-row-details"><span>Segment {{ project.current_segment }}/{{ project.total_segments }}</span><span>{{ project.progress_percent }} %</span></div>
+          <div class="queue-row-actions">
+            <form method="post" action="{% url 'cancel_job' project.id %}" data-cancel-form>
+              {% csrf_token %}
+              <button class="queue-cancel-button" type="submit" {% if project.cancel_requested %}disabled{% endif %}>
+                {% if project.cancel_requested %}Annulation demandée…{% else %}Annuler{% endif %}
+              </button>
+            </form>
+          </div>
+        </article>
+        {% endfor %}
+      </div>
+      <p class="queue-subempty" id="processingEmpty" {% if processing_projects or not waiting_projects %}hidden{% endif %}>Aucun projet en cours.</p>
+    </section>
+
+    <section class="queue-section" aria-labelledby="queueWaitingTitle">
+      <h2>EN ATTENTE <span class="premium-queue-count" id="queuePageCount">{{ queue_count }}</span></h2>
+      <div class="queue-list" id="waitingList">
+        {% for project in waiting_projects %}
+        <article class="queue-row is-queued" data-project-id="{{ project.id }}">
+          <div class="queue-row-main">
+            <a class="queue-project-link" href="{% url 'project_detail' project.id %}">{{ project.title }}</a>
+            <span class="queue-row-status">Position {{ forloop.counter }}</span>
+          </div>
+          <div class="queue-row-details"><span>{{ project.status_message|default:"En attente du worker" }}</span><span>En file</span></div>
+          <div class="queue-row-actions">
+            <form method="post" action="{% url 'cancel_job' project.id %}" data-cancel-form>
+              {% csrf_token %}
+              <button class="queue-cancel-button" type="submit" {% if project.cancel_requested %}disabled{% endif %}>
+                {% if project.cancel_requested %}Annulation demandée…{% else %}Annuler{% endif %}
+              </button>
+            </form>
+          </div>
+        </article>
+        {% endfor %}
+      </div>
+      <p class="queue-subempty" id="waitingEmpty" {% if waiting_projects or not processing_projects %}hidden{% endif %}>Aucun projet en attente.</p>
+    </section>
+  </div>
+
+  <div class="queue-empty" id="queueEmpty" {% if processing_projects or waiting_projects %}hidden{% endif %}>
+    <strong>La file est vide.</strong>
+    Aucun projet n'est en cours ni en attente.
+  </div>
+  <p class="queue-refresh-note" id="queueRefreshNote" role="status">Actualisation automatique toutes les 2,5 secondes.</p>
+</section>
+
+<script>
+(() => {
+  const page = document.getElementById('queuePage');
+  if (!page) return;
+  const processingList = document.getElementById('processingList');
+  const waitingList = document.getElementById('waitingList');
+  const processingEmpty = document.getElementById('processingEmpty');
+  const waitingEmpty = document.getElementById('waitingEmpty');
+  const queueEmpty = document.getElementById('queueEmpty');
+  const pageCount = document.getElementById('queuePageCount');
+  const sidebarCount = document.getElementById('queueCountBadge');
+  const refreshNote = document.getElementById('queueRefreshNote');
+  const csrfToken = document.querySelector('[name=csrfmiddlewaretoken]')?.value || '';
+  let refreshing = false;
+
+  const makeProjectRow = (project, isProcessing) => {
+    const article = document.createElement('article');
+    article.className = 'queue-row ' + (isProcessing ? 'is-processing' : 'is-queued');
+    article.dataset.projectId = String(project.id);
+
+    const main = document.createElement('div');
+    main.className = 'queue-row-main';
+    const link = document.createElement('a');
+    link.className = 'queue-project-link';
+    link.href = project.detail_url;
+    link.textContent = project.title;
+    const status = document.createElement('span');
+    status.className = 'queue-row-status';
+    status.textContent = isProcessing ? project.status_label : 'Position ' + project.position;
+    main.append(link, status);
+    article.append(main);
+
+    if (isProcessing) {
+      const progress = document.createElement('progress');
+      progress.max = 100;
+      progress.value = Math.max(0, Math.min(100, Number(project.progress) || 0));
+      progress.setAttribute('aria-label', 'Progression de ' + project.title);
+      const details = document.createElement('div');
+      details.className = 'queue-row-details';
+      const segment = document.createElement('span');
+      segment.textContent = 'Segment ' + project.current_segment + '/' + project.total_segments;
+      const percent = document.createElement('span');
+      percent.textContent = project.progress + ' %';
+      details.append(segment, percent);
+      article.append(progress, details);
+    } else {
+      const details = document.createElement('div');
+      details.className = 'queue-row-details';
+      const message = document.createElement('span');
+      message.textContent = project.status_label || 'En attente du worker';
+      const queued = document.createElement('span');
+      queued.textContent = 'En file';
+      details.append(message, queued);
+      article.append(details);
+    }
+
+    const actions = document.createElement('div');
+    actions.className = 'queue-row-actions';
+    const form = document.createElement('form');
+    form.method = 'post';
+    form.action = project.cancel_url;
+    form.dataset.cancelForm = '';
+    const csrf = document.createElement('input');
+    csrf.type = 'hidden';
+    csrf.name = 'csrfmiddlewaretoken';
+    csrf.value = csrfToken;
+    const button = document.createElement('button');
+    button.className = 'queue-cancel-button';
+    button.type = 'submit';
+    button.disabled = Boolean(project.cancel_requested);
+    button.textContent = project.cancel_requested ? 'Annulation demandée…' : 'Annuler';
+    form.append(csrf, button);
+    actions.append(form);
+    article.append(actions);
+    return article;
+  };
+
+  const refreshQueue = async () => {
+    if (refreshing) return;
+    refreshing = true;
+    try {
+      const response = await fetch(page.dataset.statusUrl, {
+        headers: {Accept: 'application/json'},
+        cache: 'no-store',
+      });
+      if (!response.ok) throw new Error('Statut HTTP ' + response.status);
+      const data = await response.json();
+      processingList.replaceChildren(...data.processing.map(project => makeProjectRow(project, true)));
+      waitingList.replaceChildren(...data.waiting.map(project => makeProjectRow(project, false)));
+      const isEmpty = data.processing.length === 0 && data.waiting.length === 0;
+      processingEmpty.hidden = isEmpty || data.processing.length > 0;
+      waitingEmpty.hidden = isEmpty || data.waiting.length > 0;
+      queueEmpty.hidden = !isEmpty;
+      pageCount.textContent = String(data.queue_count);
+      if (sidebarCount) {
+        sidebarCount.textContent = String(data.queue_count);
+        sidebarCount.setAttribute('aria-label', data.queue_count + ' projet(s) en attente');
+      }
+      refreshNote.textContent = 'Mis à jour à ' + new Date().toLocaleTimeString('fr-FR', {hour: '2-digit', minute: '2-digit', second: '2-digit'});
+    } catch (error) {
+      refreshNote.textContent = 'Actualisation impossible. Nouvelle tentative automatique.';
+    } finally {
+      refreshing = false;
+    }
+  };
+
+  document.addEventListener('submit', async event => {
+    const form = event.target.closest('form[data-cancel-form]');
+    if (!form) return;
+    event.preventDefault();
+    const button = form.querySelector('button[type="submit"]');
+    if (!button) return;
+    button.disabled = true;
+    button.textContent = 'Annulation…';
+    try {
+      const response = await fetch(form.action, {
+        method: 'POST',
+        body: new FormData(form),
+        headers: {'X-CSRFToken': csrfToken},
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Impossible d’annuler ce traitement.');
+      await refreshQueue();
+    } catch (error) {
+      button.disabled = false;
+      button.textContent = 'Annuler';
+      refreshNote.textContent = error.message;
+    }
+  });
+
+  refreshQueue();
+  window.setInterval(refreshQueue, 2500);
+})();
+</script>
+{% endblock %}

@@ -9,9 +9,10 @@ from django.core.files import File
 from django.core.files.base import ContentFile
 from django.db import transaction
 from django.http import HttpResponse, HttpResponseBadRequest, JsonResponse
+from django.urls import reverse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
-from django.views.decorators.http import require_POST
+from django.views.decorators.http import require_GET, require_POST
 from PIL import Image, UnidentifiedImageError
 
 from .models import (
@@ -347,6 +348,63 @@ def delete_voice(request, voice_id):
         sample.delete(save=False)
     messages.success(request, f"La voix « {name} » a été supprimée.")
     return redirect("home")
+
+
+
+def _queue_queryset():
+    return NarrationProject.objects.filter(
+        status__in=[NarrationProject.Status.PROCESSING, NarrationProject.Status.QUEUED],
+    ).order_by("queued_at", "id")
+
+
+def queue_view(request):
+    active_projects = list(_queue_queryset())
+    processing_projects = [project for project in active_projects if project.status == NarrationProject.Status.PROCESSING]
+    waiting_projects = [project for project in active_projects if project.status == NarrationProject.Status.QUEUED]
+    return render(request, "studio/queue.html", {
+        "processing_projects": processing_projects,
+        "waiting_projects": waiting_projects,
+        "projects": NarrationProject.objects.all()[:30],
+    })
+
+
+def _queue_project_payload(project, position=None):
+    return {
+        "id": project.pk,
+        "title": project.title,
+        "status": project.status,
+        "status_label": project.get_status_display(),
+        "progress": project.progress_percent,
+        "current_segment": project.current_segment,
+        "total_segments": project.total_segments,
+        "cancel_requested": project.cancel_requested,
+        "position": position,
+        "detail_url": reverse("project_detail", args=[project.pk]),
+        "cancel_url": reverse("cancel_job", args=[project.pk]),
+    }
+
+
+@require_GET
+def queue_status(request):
+    projects = list(_queue_queryset())
+    processing = [
+        _queue_project_payload(project)
+        for project in projects
+        if project.status == NarrationProject.Status.PROCESSING
+    ]
+    waiting = [
+        _queue_project_payload(project, position=index)
+        for index, project in enumerate(
+            (project for project in projects if project.status == NarrationProject.Status.QUEUED),
+            start=1,
+        )
+    ]
+    return JsonResponse({
+        "processing": processing,
+        "waiting": waiting,
+        "queue_count": len(waiting),
+        "is_empty": not processing and not waiting,
+    })
 
 
 @require_POST
