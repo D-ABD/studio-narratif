@@ -4,31 +4,26 @@ Application web Django locale en français pour transformer des images JPG/PNG o
 
 Les projets, échantillons vocaux, narrations et sous-titres sont stockés dans `media/`; les données sont dans `db.sqlite3`. Aucun compte ni service cloud n’est nécessaire à l’usage. Une connexion Internet est nécessaire à l’installation des paquets et au premier téléchargement des poids IA, ensuite mis en cache localement. Le code ne désactive pas la vérification TLS.
 
-## Fonctionnalités
+## Fonctionnalités clés
 
-- Bibliothèque locale avec catégories Shiba, Homme, Femme et Autre, recherche et filtre.
-- Import WAV/MP3 ou enregistrement microphone, écoute avant sauvegarde, normalisation locale en WAV mono 24 kHz.
-- Consentement explicite avant l’enregistrement d’une voix clonée.
-- Renommage, recatégorisation et suppression confirmée des voix.
-- Projets avec plusieurs segments de texte modifiables, supprimables et réordonnables.
-- Import local d’images JPG/PNG ou de PDF ; chaque page PDF est convertie en une scène image.
-- Import de clips MP4, MOV, M4V ou WebM dans un projet dédié ; réorganisation des clips et assemblage MP4 FFmpeg avec son d’origine conservé, sans synthèse IA.
-- Aperçu des images sélectionnées avant de confirmer leur import dans le projet.
-- Aperçu des scènes, réorganisation par glisser-déposer et mouvements de caméra par scène : image fixe, zoom avant/arrière, panoramique horizontal/vertical, zoom diagonal ou parallaxe 2.5D « profondeur douce » avec sujet détouré localement.
-- Synthèse française XTTS v2 et alignement forcé WhisperX sur l’audio réellement généré.
-- Sous-titres synchronisés avec l’audio ; les phrases sont incrustées progressivement dans la vidéo, avec activation/désactivation.
-- Rendu MP4 FFmpeg en 9:16 ou 16:9, proportions conservées, prévisualisation et téléchargement.
-- La parallaxe crée une impression de profondeur sans animer le visage ni les gestes du sujet.
-- File d’attente persistante des projets : un worker séquentiel garde XTTS et WhisperX chargés en mémoire pendant qu’il traite plusieurs narrations.
-- Cache disque par texte, empreinte SHA-256 de l’échantillon, modèle et langue ; les segments inchangés sont réutilisés.
-- Écoute des segments, plus export WAV/SRT et vidéo MP4.
-- Progression persistante en base, position dans la file, segment courant, temps écoulé, durées XTTS/WhisperX et état prêt/en attente/en cours/erreur.
-- Interface responsive inspirée des captures fournies, sans dépendance à une police ou ressource distante.
+- **Bibliothèque de voix** : import ou enregistrement d’échantillons WAV/MP3, écoute avant sauvegarde, normalisation locale en WAV mono 24 kHz et consentement explicite avant l’utilisation d’une voix clonée.
+- **Projets nommés** : création, renommage et suppression confirmée des projets ; scènes modifiables et réordonnables par glisser-déposer.
+- **Images et PDF** : import d’images JPG/PNG ou de documents PDF, chaque page du PDF devenant une scène image. Les mouvements et effets visuels peuvent être réglés scène par scène.
+- **Narration vidéo** : import de clips HeyGen ou d’autres vidéos compatibles (MP4, MOV, M4V, WebM). Le mode Narration vidéo remplace leur audio d’origine par la voix XTTS et ajoute les sous-titres synchronisés. Si la voix dépasse la durée du clip, la dernière image est prolongée ; si le clip est plus long, il est coupé à la fin de la voix.
+- **Assemblage classique** : assemblage de clips vidéo en conservant leur son d’origine, sans génération XTTS.
+- **Synthèse vocale et alignement** : XTTS v2 génère la narration en français ; WhisperX aligne les sous-titres sur l’audio réellement produit.
+- **Sous-titres style TikTok** : incrustation ASS synchronisée mot par mot, avec le mot prononcé surligné en orange, un contour noir et au maximum deux lignes.
+- **Animations sur les scènes image** : combinaison de plusieurs effets (zoom, panoramique, parallaxe 2.5D, caméra à main levée, respiration lumineuse et fuite de lumière), avec intensités lente, moyenne ou rapide et profils de caméra linéaire ou organique.
+- **Rendu et exports** : vidéo MP4 verticale 9:16 ou horizontale 16:9, aperçus et téléchargements de la vidéo, de l’audio WAV et des sous-titres SRT. Le rendu des images applique aussi un léger color grading.
+- **File d’attente supervisable** : traitement séquentiel, suivi de la position et de la progression, segment en cours, temps écoulé, annulation d’un traitement et page de supervision.
+- **Pré-génération audio** : pour les projets de narration vidéo, prépare XTTS et WhisperX sans lancer FFmpeg. Le badge de l’éditeur indique si l’audio de tous les segments est en cache ; les résultats sont réutilisés tant que le texte et la voix restent identiques.
+- **Cache local** : les modèles IA et les audios préparés sont conservés localement. Le worker garde XTTS et WhisperX chargés pendant son exécution ; plusieurs projets peuvent être mis en file les uns à la suite des autres.
+- **Interface locale responsive** : interface en français, sans dépendance à une police ou à une ressource distante.
 
 ## Prérequis
 
 - Python 3.11 recommandé.
-- FFmpeg et ffprobe pour les exports MP4, l’assemblage de clips et la normalisation audio. Sur macOS : `brew install ffmpeg`. L’incrustation des sous-titres requiert aussi le filtre `subtitles` (libass). Si la version Homebrew installée ne le fournit pas, crée une fois l’environnement Conda dédié : `conda create -n ffmpeg-subs -c conda-forge ffmpeg`. L’application détecte automatiquement cet environnement aux emplacements Conda courants, sans commande `export` à répéter.
+- FFmpeg et ffprobe pour les exports MP4, l’assemblage de clips et la normalisation audio. Sur macOS : `brew install ffmpeg`. L’incrustation des sous-titres ASS requiert le filtre FFmpeg `subtitles` compilé avec libass ; aucun paquet Python ASS supplémentaire n’est nécessaire. Si la version Homebrew installée ne fournit pas ce filtre, crée une fois l’environnement Conda dédié : `conda create -n ffmpeg-subs -c conda-forge ffmpeg`. L’application détecte automatiquement cet environnement aux emplacements Conda courants, sans commande `export` à répéter.
 - Pillow et PyMuPDF sont installés par `requirements.txt` pour valider les images et convertir les PDF.
 - Le mouvement « Profondeur douce » est facultatif et utilise rembg/ONNX en local : installe `requirements-parallax.txt`. Ses versions sont fixées pour rester compatibles avec XTTS (NumPy 1.26.4, NetworkX 2.8.8) et les Mac Intel. Le modèle U2NetP est téléchargé au premier rendu et réutilisé ensuite localement.
 - Environ 8 à 10 Go libres pour les poids XTTS/WhisperX téléchargés au premier lancement. La synthèse CPU peut être lente ; une carte NVIDIA/CUDA accélère le traitement sur les systèmes compatibles.
@@ -64,15 +59,16 @@ Cette commande charge XTTS v2 et télécharge ses poids si nécessaire. Elle éc
 
 ## Lancement
 
-Pour démarrer le site et le worker depuis un seul terminal, active `.venv` dans le dossier du dépôt puis exécute :
+L’alias local `studio`, configuré dans `~/.zshrc`, démarre le site et le worker dans un seul terminal. Active d’abord l’environnement virtuel dans le dossier du dépôt :
 
 ```bash
-python manage.py run_studio
+source .venv/bin/activate
+studio
 ```
 
-Ouvre ensuite <http://127.0.0.1:8000/>. Cette commande démarre le site web et le worker XTTS/FFmpeg ensemble ; Ctrl+C arrête les deux. Le serveur de développement est lancé sans rechargement automatique : après une modification du code, relance la commande.
+Ouvre ensuite <http://127.0.0.1:8000/>. L’alias lance `python manage.py run_studio), qui démarre le site web et le worker XTTS/FFmpeg ensemble ; Ctrl+C arrête les deux. Si l’alias n’est pas configuré dans ton terminal, lance directement `python manage.py run_studio`. Le serveur de développement démarre sans rechargement automatique : après une modification du code, relance la commande.
 
-Tu peux aussi les lancer séparément dans deux terminaux si tu préfères :
+Tu peux aussi lancer le site et le worker séparément dans deux terminaux :
 
 ```bash
 python manage.py runserver 127.0.0.1:8000
@@ -94,11 +90,12 @@ Les tests Django couvrent l’autorisation et la gestion des voix, les imports i
 
 ## Utilisation
 
-1. Crée un projet. Pour une vidéo narrée, importe des images ou un PDF. Pour réunir des vidéos, importe uniquement des clips MP4, MOV, M4V ou WebM (200 Mo maximum chacun) dans un projet séparé.
-2. Réordonne les scènes par glisser-déposer ; ajoute le texte et choisis une image fixe ou un zoom pour chacune.
+1. Crée un projet. Pour une vidéo à partir d’images, importe des images JPG/PNG ou un PDF. Pour une narration vidéo, importe des clips MP4, MOV, M4V ou WebM (200 Mo maximum chacun) dans un projet dédié.
+2. Réordonne les scènes ou les clips par glisser-déposer. Écris le texte à prononcer sur chaque scène ou clip ; sur les scènes image, choisis et combine les effets d’animation souhaités.
 3. Ajoute une voix WAV/MP3 ou enregistre-la au microphone. Écoute-la, nomme-la, classe-la et confirme l’autorisation d’utilisation.
-4. Pour les images, choisis les sous-titres et le format 9:16 ou 16:9, puis clique sur **Générer la vidéo MP4**. Pour des clips, réordonne-les, choisis le format et clique sur **Assembler les clips vidéo** ; le son d’origine est conservé.
-5. La file traite les projets dans l’ordre ; la page affiche la position et l’avancement. Les audios dont le texte et la voix n’ont pas changé sont réutilisés depuis le cache. Prévisualise ou télécharge le MP4, le WAV et le SRT.
+4. Pour les images, choisis le format 9:16 ou 16:9 et lance **Générer la vidéo MP4**. Pour les clips, choisis **Narration vidéo** pour remplacer le son d’origine par la voix XTTS et incruster les sous-titres, ou **Assembler les clips vidéo** pour conserver leur son d’origine.
+5. Pour les clips narrés, **Pré-générer l’audio seul** lance XTTS et WhisperX sans FFmpeg. Quand le badge indique **Audio en cache**, lance le rendu vidéo ; tant que texte et voix restent identiques, les audios préparés sont réutilisés.
+6. Suis la progression depuis le projet ou la page **File d’attente**. Prévisualise ou télécharge le MP4, l’audio WAV et les sous-titres SRT.
 
 Si WhisperX échoue à aligner un segment, le projet passe en erreur avec le détail retourné ; aucun horodatage approximatif n’est créé.
 

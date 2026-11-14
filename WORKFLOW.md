@@ -38,6 +38,31 @@ Pour démarrer le serveur et le worker en même temps :
 2. Lancer le studio : `python manage.py run_studio`
 3. Ouvrir le navigateur sur : http://127.0.0.1:8000
 
+## Workflow de production (Mac Intel)
+
+La génération XTTS et l’alignement WhisperX peuvent prendre plusieurs minutes sur un Mac Intel. Pour préparer plusieurs projets à l’avance :
+
+1. **Le soir : pré-générer les audios**
+   - Activer l’environnement virtuel : `source .venv/bin/activate`
+   - Lancer le site et le worker avec `studio`.
+   - Pour chaque projet de narration vidéo, cliquer sur **Pré-générer l’audio seul**.
+   - La tâche prépare les voix XTTS et leurs sous-titres WhisperX sans lancer le rendu FFmpeg.
+
+2. **Pendant la nuit : laisser le Mac travailler**
+   - Garder le Mac branché et empêcher sa mise en veille.
+   - Laisser le terminal et la commande `studio` ouverts ; le worker traite la file dans l’ordre.
+   - Ne pas éteindre le Mac ni fermer le capot si cela suspend le traitement.
+
+3. **Le lendemain : lancer les rendus vidéo**
+   - Vérifier que le badge indique **Audio en cache**.
+   - Lancer la génération vidéo : XTTS et WhisperX ne sont pas à refaire si le texte et la voix n’ont pas changé.
+   - FFmpeg doit encore encoder la vidéo ; la durée dépend du clip et des effets appliqués.
+
+Après validation du lot :
+
+- Récupérer les changements en local : `git sync`
+- Poser le tag du lot : `git lottag vX.Y.Z-lotX`
+
 ## 📁 Fichiers importants
 - `.github/workflows/ci.yml` : Lance les tests automatiquement à chaque push.
 - `.github/workflows/rollback.yml` : Le bouton de secours manuel pour revenir à un tag.
