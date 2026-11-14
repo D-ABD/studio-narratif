@@ -1,6 +1,10 @@
 from django.conf import settings
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
+from django.db.models import Q
 from django.utils import timezone
+from pathlib import Path
+import uuid
 
 
 ANIMATION_LEVEL_CHOICES = (
@@ -76,6 +80,26 @@ class Voice(models.Model):
         return self.name
 
 
+def background_track_upload_to(instance, filename):
+    extension = Path(filename).suffix.lower()
+    return f"musics/user_{instance.user_id}/{uuid.uuid4().hex}{extension}"
+
+
+class BackgroundTrack(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="background_tracks")
+    name = models.CharField("nom", max_length=120)
+    audio_file = models.FileField("fichier audio", upload_to=background_track_upload_to)
+    duration = models.FloatField("durée en secondes", validators=[MinValueValidator(0)])
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["name", "id"]
+
+    def __str__(self):
+        return self.name
+
+
 class NarrationProject(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="narration_projects")
     class Status(models.TextChoices):
@@ -97,6 +121,12 @@ class NarrationProject(models.Model):
 
     title = models.CharField("titre", max_length=120, default="Nouvelle narration")
     voice = models.ForeignKey(Voice, null=True, blank=True, on_delete=models.SET_NULL, related_name="projects")
+    background_track = models.ForeignKey(
+        BackgroundTrack, null=True, blank=True, on_delete=models.SET_NULL, related_name="projects",
+    )
+    music_volume = models.IntegerField(
+        default=20, validators=[MinValueValidator(0), MaxValueValidator(100)],
+    )
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.DRAFT)
     queued_at = models.DateTimeField(null=True, blank=True, db_index=True)
     cancel_requested = models.BooleanField(default=False)
@@ -119,6 +149,12 @@ class NarrationProject(models.Model):
 
     class Meta:
         ordering = ["-updated_at", "-id"]
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(music_volume__gte=0) & Q(music_volume__lte=100),
+                name="project_music_volume_0_100",
+            ),
+        ]
 
     def __str__(self):
         return self.title

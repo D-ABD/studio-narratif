@@ -1,0 +1,31 @@
+{% extends "studio/base.html" %}
+{% block title %}Musiques · Petit Studio{% endblock %}
+{% block heading %}Bibliothèque musicale{% endblock %}
+{% block content %}
+<section class="card">
+  <div class="section-title"><div><span class="step-number">♫</span><h2>Ajouter une musique</h2></div></div>
+  <form method="post" action="{% url 'upload_music' %}" enctype="multipart/form-data" class="music-upload-form">
+    {% csrf_token %}
+    <label for="musicName">Nom de la piste</label>
+    <input class="text-input" id="musicName" type="text" name="name" maxlength="120" placeholder="Nom de la musique">
+    <label for="musicFile">Fichier audio · MP3, WAV, M4A ou OGG · 50 Mo maximum</label>
+    <input class="text-input" id="musicFile" type="file" name="audio_file" accept="audio/mpeg,audio/wav,audio/mp4,audio/ogg,.mp3,.wav,.m4a,.ogg" required>
+    <button class="button button-primary" type="submit">Ajouter à ma bibliothèque</button>
+  </form>
+</section>
+<section class="card">
+  <div class="section-title"><div><span class="step-number">♫</span><h2>Mes musiques</h2></div></div>
+  <div class="music-library-list">
+    {% for track in background_tracks %}
+    <article class="music-library-item">
+      <div><strong>{{ track.name }}</strong><span class="muted small">{{ track.duration|floatformat:1 }} s</span></div>
+      <audio controls preload="none" src="{{ track.audio_file.url }}"></audio>
+      <form method="post" action="{% url 'delete_music' track.id %}" onsubmit="return confirm('Supprimer cette musique ? Les projets associés perdront leur sélection.');">
+        {% csrf_token %}<input type="hidden" name="confirm" value="yes">
+        <button class="button button-secondary button-small danger" type="submit">Supprimer</button>
+      </form>
+    </article>
+    {% empty %}<p class="muted">Votre bibliothèque musicale est vide.</p>{% endfor %}
+  </div>
+</section>
+{% endblock %}

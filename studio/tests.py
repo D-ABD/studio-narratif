@@ -16,7 +16,7 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 from PIL import Image
 
-from .models import NarrationProject, NarrationSegment, Voice
+from .models import BackgroundTrack, NarrationProject, NarrationSegment, Voice
 from .services import (
     _assemble_wav, _get_speaker_conditioning, _group_words, _prepare_segment, align_audio,
     cache_key_for, srt_text, wav_duration,
@@ -67,6 +67,61 @@ class VoiceLibraryTests(MediaTestCase):
         self.client.post(f"/voices/{voice.pk}/delete/", {"confirm": "yes"})
         self.assertFalse(Voice.objects.exists())
 
+
+class BackgroundMusicLibraryTests(MediaTestCase):
+    def make_track(self, name="Ambiance"):
+        track = BackgroundTrack(user=self.user, name=name, duration=42.5)
+        track.audio_file.save("sample.mp3", ContentFile(b"test audio bytes"), save=True)
+        return track
+
+    def test_music_library_is_isolated_by_user(self):
+        own_track = self.make_track("À moi")
+        other_user = get_user_model().objects.create_user(username="other-owner", password="SafePass123!x")
+        other_track = BackgroundTrack(user=other_user, name="Privée", duration=12.0)
+        other_track.audio_file.save("other.ogg", ContentFile(b"other audio"), save=True)
+
+        response = self.client.get("/musics/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "À moi")
+        self.assertNotContains(response, "Privée")
+        self.assertEqual(list(response.context["background_tracks"]), [own_track])
+        self.assertEqual(self.client.post(f"/musics/{other_track.pk}/delete/", {"confirm": "yes"}).status_code, 404)
+        self.assertTrue(BackgroundTrack.objects.filter(pk=other_track.pk).exists())
+
+    @patch("studio.views._probe_music_duration", return_value=71.25)
+    def test_upload_music_validates_extension_and_detects_duration(self, probe):
+        upload = SimpleUploadedFile("theme.mp3", b"audio payload", content_type="audio/mpeg")
+        response = self.client.post("/musics/upload/", {"name": "Thème", "audio_file": upload})
+
+        self.assertRedirects(response, "/musics/")
+        track = BackgroundTrack.objects.get(user=self.user)
+        self.assertEqual(track.name, "Thème")
+        self.assertEqual(track.duration, 71.25)
+        self.assertTrue(track.audio_file.name.startswith(f"musics/user_{self.user.pk}/"))
+        self.assertEqual(Path(track.audio_file.name).suffix, ".mp3")
+        probe.assert_called_once()
+
+    def test_deleting_music_used_by_project_detaches_and_invalidates_video(self):
+        track = self.make_track()
+        project = NarrationProject.objects.create(
+            user=self.user, title="Avec musique", background_track=track,
+            status=NarrationProject.Status.READY,
+        )
+        project.video_file.save("ready.mp4", ContentFile(b"old video output"), save=True)
+        old_video_path = Path(project.video_file.path)
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(f"/musics/{track.pk}/delete/", {"confirm": "yes"})
+
+        self.assertRedirects(response, "/musics/")
+        project.refresh_from_db()
+        self.assertIsNone(project.background_track)
+        self.assertFalse(project.video_file)
+        self.assertEqual(project.status, NarrationProject.Status.READY)
+        self.assertIn("musique associée a été supprimée", project.status_message)
+        self.assertFalse(BackgroundTrack.objects.filter(pk=track.pk).exists())
+        self.assertFalse(old_video_path.exists())
 
 class ProjectViewTests(MediaTestCase):
     @patch("studio.services.hash_file", wraps=services.hash_file)

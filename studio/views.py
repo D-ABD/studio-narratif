@@ -1,5 +1,6 @@
 import json
 import logging
+import subprocess
 from functools import wraps
 from pathlib import Path
 import tempfile
@@ -20,7 +21,7 @@ from django.views.decorators.http import require_GET, require_http_methods, requ
 from PIL import Image, UnidentifiedImageError
 
 from .models import (
-    ANIMATION_EFFECTS, ANIMATION_LEVEL_CHOICES, NarrationProject, NarrationSegment, Voice,
+    ANIMATION_EFFECTS, ANIMATION_LEVEL_CHOICES, BackgroundTrack, NarrationProject, NarrationSegment, Voice,
     default_animation_settings, legacy_animation_settings,
 )
 from .services import _voice_sample_digest, cache_key_for, hash_file, normalize_voice_sample, srt_text
@@ -40,6 +41,8 @@ MAX_SAMPLE_BYTES = 25 * 1024 * 1024
 MAX_VIDEO_CLIP_BYTES = 200 * 1024 * 1024
 MAX_IMPORT_BYTES = 500 * 1024 * 1024
 MAX_IMPORT_PIXELS = 100_000_000
+MAX_MUSIC_BYTES = 50 * 1024 * 1024
+ALLOWED_MUSIC_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg"}
 ALLOWED_SAMPLE_EXTENSIONS = {".wav", ".mp3", ".webm", ".m4a", ".ogg"}
 ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm"}
 ANIMATION_EFFECT_DEFINITIONS = (
@@ -191,16 +194,51 @@ def _invalidate_export(project):
         _schedule_storage_cleanup(files_to_delete)
 
 
-def _invalidate_video(project):
+def _invalidate_video(project, extra_update_fields=()):
     update_fields = ["updated_at"]
+    files_to_delete = []
     if project.video_file:
-        project.video_file.delete(save=False)
+        files_to_delete.append((project.video_file.storage, project.video_file.name))
         project.video_file = ""
         update_fields.append("video_file")
     if project.status == NarrationProject.Status.READY:
         project.status_message = "Les réglages vidéo ont changé. Génère une nouvelle vidéo."
         update_fields.append("status_message")
+    update_fields.extend(extra_update_fields)
     project.save(update_fields=update_fields)
+    _schedule_storage_cleanup(files_to_delete)
+
+
+def _probe_music_duration(path):
+    """Validate that ffprobe can read an audio stream and return its duration."""
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-show_entries", "stream=codec_type,duration", "-of", "json", str(path),
+        ],
+        capture_output=True, text=True, check=False, timeout=60,
+    )
+    if result.returncode != 0:
+        raise ValueError("FFprobe ne reconnaît pas ce fichier audio.")
+    try:
+        metadata = json.loads(result.stdout)
+        if not any(stream.get("codec_type") == "audio" for stream in metadata.get("streams", [])):
+            raise ValueError("Le fichier ne contient aucune piste audio.")
+        duration = float(metadata.get("format", {}).get("duration") or 0)
+        if duration <= 0:
+            durations = [
+                float(stream.get("duration") or 0)
+                for stream in metadata.get("streams", [])
+                if stream.get("codec_type") == "audio"
+            ]
+            duration = max(durations, default=0)
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        if isinstance(exc, ValueError) and str(exc).startswith("Le fichier"):
+            raise
+        raise ValueError("Impossible de détecter la durée de cette musique.") from exc
+    if duration <= 0:
+        raise ValueError("Impossible de détecter la durée de cette musique.")
+    return duration
 
 
 def _stream_upload_to_path(upload, destination):
@@ -309,6 +347,86 @@ def home(request):
         "selected_category": category,
         "categories": Voice.Category.choices,
     })
+
+
+@login_required
+def musics(request):
+    return render(request, "studio/musics.html", {
+        "background_tracks": BackgroundTrack.objects.filter(user=request.user),
+        "projects": NarrationProject.objects.filter(user=request.user)[:30],
+    })
+
+
+@login_required
+@require_POST
+def upload_music(request):
+    upload = request.FILES.get("audio_file")
+    if not upload or upload.size <= 0:
+        messages.error(request, "Sélectionne un fichier musical.")
+        return redirect("musics")
+    if upload.size > MAX_MUSIC_BYTES:
+        messages.error(request, "La musique dépasse la limite de 50 Mo.")
+        return redirect("musics")
+    extension = Path(upload.name).suffix.lower()
+    if extension not in ALLOWED_MUSIC_EXTENSIONS:
+        messages.error(request, "Formats acceptés : MP3, WAV, M4A et OGG.")
+        return redirect("musics")
+
+    title = (request.POST.get("name") or Path(upload.name).stem).strip()[:120]
+    if not title:
+        title = "Musique sans titre"
+    try:
+        with tempfile.TemporaryDirectory(prefix="petit-studio-music-") as folder:
+            staged_path = Path(folder) / f"upload{extension}"
+            _stream_upload_to_path(upload, staged_path)
+            duration = _probe_music_duration(staged_path)
+            track = BackgroundTrack(user=request.user, name=title, duration=duration)
+            with staged_path.open("rb") as stream:
+                track.audio_file.save(upload.name, File(stream), save=False)
+            try:
+                track.save()
+            except Exception:
+                if track.audio_file.name:
+                    track.audio_file.storage.delete(track.audio_file.name)
+                raise
+        messages.success(request, f"La musique « {track.name} » a été ajoutée à votre bibliothèque.")
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        messages.error(request, str(exc) or "Impossible d’ajouter cette musique.")
+    except Exception:
+        logger.exception("Échec de l’enregistrement d’une musique pour l’utilisateur %s.", request.user.pk)
+        messages.error(request, "Impossible d’enregistrer cette musique.")
+    return redirect("musics")
+
+
+@login_required
+@require_POST
+def delete_music(request, track_id):
+    track = get_object_or_404(BackgroundTrack, pk=track_id, user=request.user)
+    if request.POST.get("confirm") != "yes":
+        messages.error(request, "La suppression n’a pas été confirmée.")
+        return redirect("musics")
+
+    projects = list(NarrationProject.objects.filter(user=request.user, background_track=track).order_by("pk"))
+    if any(project.status in {NarrationProject.Status.QUEUED, NarrationProject.Status.PROCESSING} for project in projects):
+        messages.error(request, "Cette musique est utilisée par un projet en attente ou en cours de traitement.")
+        return redirect("musics")
+
+    files_to_delete = [(track.audio_file.storage, track.audio_file.name)] if track.audio_file else []
+    with transaction.atomic():
+        for project in projects:
+            if project.video_file:
+                files_to_delete.append((project.video_file.storage, project.video_file.name))
+            project.background_track = None
+            project.video_file = ""
+            fields = ["background_track", "video_file", "updated_at"]
+            if project.status == NarrationProject.Status.READY:
+                project.status_message = "La musique associée a été supprimée. Génère une nouvelle vidéo."
+                fields.append("status_message")
+            project.save(update_fields=fields)
+        track.delete()
+        _schedule_storage_cleanup(files_to_delete)
+    messages.success(request, f"La musique « {track.name} » a été supprimée.")
+    return redirect("musics")
 
 
 @login_required
