@@ -347,6 +347,11 @@
     polling = true;
     try {
       const response = await fetch(`/projects/${projectId}/status/`, {cache: 'no-store'});
+      if (response.status === 401) {
+        const next = encodeURIComponent(window.location.pathname + window.location.search);
+        window.location.assign(`/login/?next=${next}`);
+        return;
+      }
       if (!response.ok) throw new Error('État indisponible');
       const data = await response.json();
       syncCancelControl(data);

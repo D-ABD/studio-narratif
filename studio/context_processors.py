@@ -2,9 +2,12 @@ from .models import NarrationProject
 
 
 def queue_count(request):
-    """Expose the number of queued projects to every template using the base layout."""
+    """Expose only the authenticated user's queued-project count."""
+    if not request.user.is_authenticated:
+        return {"queue_count": 0}
     return {
         "queue_count": NarrationProject.objects.filter(
+            user=request.user,
             status=NarrationProject.Status.QUEUED,
         ).count(),
     }

@@ -120,6 +120,10 @@
     .premium-project-empty { padding: 8px 11px; color: #778294; font-size: 10px; }
     .premium-queue-count { min-width: 20px; margin-left: auto; padding: 2px 6px; border: 1px solid #5A4016; border-radius: 99px; color: #FFC65D; background: #241D12; font-size: 9px; font-weight: 800; text-align: center; }
     .sidebar-collapsed .premium-queue-count { display: none; }
+    .sidebar-collapsed .premium-sidebar-bottom { justify-content: center; gap: 0; padding-right: 0; padding-left: 0; }
+    .sidebar-collapsed .premium-user-name, .sidebar-collapsed .premium-logout-label { display: none; }
+    .sidebar-collapsed .premium-logout-form { margin-left: 0; }
+    .sidebar-collapsed .premium-logout-icon { display: inline; }
     .premium-nav-link, .premium-project-link {
       min-height: 43px;
       display: flex;
@@ -167,6 +171,11 @@
       font-size: 10px;
       white-space: nowrap;
     }
+    .premium-user-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: #A9B2C0; }
+    .premium-logout-form { margin: 0 0 0 auto; }
+    .premium-logout-button { border: 1px solid #303947; border-radius: 8px; padding: 5px 7px; color: #9EA8B7; background: #171D27; font-size: 9px; cursor: pointer; }
+    .premium-logout-button:hover { color: #fff; border-color: #586475; }
+    .premium-logout-icon { display: none; }
     .premium-online-dot {
       width: 7px;
       height: 7px;
@@ -399,7 +408,14 @@
       {% endfor %}
     </nav>
     {% endwith %}
-    <div class="premium-sidebar-bottom"><span class="premium-online-dot"></span><span>Traitement local activé</span></div>
+    <div class="premium-sidebar-bottom">
+      <span class="premium-online-dot" aria-hidden="true"></span>
+      <span class="premium-user-name" title="{{ request.user.get_username }}">{{ request.user.get_username }}</span>
+      <form method="post" action="{% url 'logout' %}" class="premium-logout-form">
+        {% csrf_token %}
+        <button class="premium-logout-button" type="submit" aria-label="Déconnexion" title="Déconnexion"><span class="premium-logout-label">Déconnexion</span><span class="premium-logout-icon">↪</span></button>
+      </form>
+    </div>
   </aside>
   <main class="main premium-main">
     <header class="topbar premium-topbar">
@@ -433,6 +449,6 @@
   });
 })();
 </script>
-<script src="{% static 'studio/app.js' %}?v=8" defer></script>
+<script src="{% static 'studio/app.js' %}?v=9" defer></script>
 </body>
 </html>

@@ -1,10 +1,14 @@
 import json
 import logging
+from functools import wraps
 from pathlib import Path
 import tempfile
 import uuid
 
 from django.contrib import messages
+from django.contrib.auth import login
+from django.contrib.auth.decorators import login_required
+from django.contrib.auth.forms import UserCreationForm
 from django.core.files import File
 from django.core.files.base import ContentFile
 from django.db import transaction
@@ -12,7 +16,7 @@ from django.http import HttpResponse, HttpResponseBadRequest, JsonResponse
 from django.urls import reverse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
-from django.views.decorators.http import require_GET, require_POST
+from django.views.decorators.http import require_GET, require_http_methods, require_POST
 from PIL import Image, UnidentifiedImageError
 
 from .models import (
@@ -22,6 +26,15 @@ from .models import (
 from .services import _voice_sample_digest, cache_key_for, hash_file, normalize_voice_sample, srt_text
 
 logger = logging.getLogger(__name__)
+
+
+def json_login_required(view_func):
+    @wraps(view_func)
+    def wrapped(request, *args, **kwargs):
+        if not request.user.is_authenticated:
+            return JsonResponse({"error": "auth_required"}, status=401)
+        return view_func(request, *args, **kwargs)
+    return wrapped
 
 MAX_SAMPLE_BYTES = 25 * 1024 * 1024
 MAX_VIDEO_CLIP_BYTES = 200 * 1024 * 1024
@@ -263,25 +276,42 @@ def _scene_images(upload, staging_dir, max_scenes=30, remaining_pixels=MAX_IMPOR
     return [(name, source_path)], pixels
 
 
+@require_http_methods(["GET", "POST"])
+def register(request):
+    if request.user.is_authenticated:
+        return redirect("home")
+    if request.method == "POST":
+        form = UserCreationForm(request.POST)
+        if form.is_valid():
+            user = form.save()
+            login(request, user)
+            return redirect("home")
+    else:
+        form = UserCreationForm()
+    return render(request, "registration/register.html", {"form": form})
+
+
+@login_required
 def home(request):
     query = (request.GET.get("q") or "").strip()[:80]
     category = request.GET.get("category", "")
-    voices = Voice.objects.all()
+    voices = Voice.objects.filter(user=request.user)
     if query:
         voices = voices.filter(name__icontains=query)
     if category in Voice.Category.values:
         voices = voices.filter(category=category)
     return render(request, "studio/home.html", {
         "voices": voices,
-        "projects": NarrationProject.objects.all()[:30],
-        "voice_count": Voice.objects.count(),
-        "project_count": NarrationProject.objects.count(),
+        "projects": NarrationProject.objects.filter(user=request.user)[:30],
+        "voice_count": Voice.objects.filter(user=request.user).count(),
+        "project_count": NarrationProject.objects.filter(user=request.user).count(),
         "query": query,
         "selected_category": category,
         "categories": Voice.Category.choices,
     })
 
 
+@login_required
 @require_POST
 def create_voice(request):
     upload = request.FILES.get("sample")
@@ -307,7 +337,7 @@ def create_voice(request):
         return redirect("home")
     try:
         wav_bytes = normalize_voice_sample(upload)
-        voice = Voice(name=name, category=category, consent_confirmed=True)
+        voice = Voice(user=request.user, name=name, category=category, consent_confirmed=True)
         voice.sample.save(f"voice-{timezone.now():%Y%m%d-%H%M%S}.wav", ContentFile(wav_bytes), save=False)
         voice.sample_sha256 = hash_file(voice.sample.path) if voice.sample.name else ""
         voice.save()
@@ -317,9 +347,10 @@ def create_voice(request):
     return redirect("home")
 
 
+@login_required
 @require_POST
 def edit_voice(request, voice_id):
-    voice = get_object_or_404(Voice, pk=voice_id)
+    voice = get_object_or_404(Voice, pk=voice_id, user=request.user)
     name = (request.POST.get("name") or "").strip()[:80]
     category = request.POST.get("category", "")
     if not name or category not in Voice.Category.values:
@@ -332,9 +363,10 @@ def edit_voice(request, voice_id):
     return redirect("home")
 
 
+@login_required
 @require_POST
 def delete_voice(request, voice_id):
-    voice = get_object_or_404(Voice, pk=voice_id)
+    voice = get_object_or_404(Voice, pk=voice_id, user=request.user)
     if voice.projects.filter(status__in=[NarrationProject.Status.QUEUED, NarrationProject.Status.PROCESSING]).exists():
         messages.error(request, "Cette voix est utilisée par un traitement en attente ou en cours.")
         return redirect("home")
@@ -351,20 +383,22 @@ def delete_voice(request, voice_id):
 
 
 
-def _queue_queryset():
+def _queue_queryset(user):
     return NarrationProject.objects.filter(
+        user=user,
         status__in=[NarrationProject.Status.PROCESSING, NarrationProject.Status.QUEUED],
     ).order_by("queued_at", "id")
 
 
+@login_required
 def queue_view(request):
-    active_projects = list(_queue_queryset())
+    active_projects = list(_queue_queryset(request.user))
     processing_projects = [project for project in active_projects if project.status == NarrationProject.Status.PROCESSING]
     waiting_projects = [project for project in active_projects if project.status == NarrationProject.Status.QUEUED]
     return render(request, "studio/queue.html", {
         "processing_projects": processing_projects,
         "waiting_projects": waiting_projects,
-        "projects": NarrationProject.objects.all()[:30],
+        "projects": NarrationProject.objects.filter(user=request.user)[:30],
     })
 
 
@@ -385,8 +419,9 @@ def _queue_project_payload(project, position=None):
 
 
 @require_GET
+@login_required
 def queue_status(request):
-    projects = list(_queue_queryset())
+    projects = list(_queue_queryset(request.user))
     processing = [
         _queue_project_payload(project)
         for project in projects
@@ -407,18 +442,20 @@ def queue_status(request):
     })
 
 
+@login_required
 @require_POST
 def create_project(request):
     title = (request.POST.get("title") or "").strip()[:120]
     if not title:
         title = timezone.localtime().strftime("Projet du %d/%m/%Y à %Hh%M")
-    project = NarrationProject.objects.create(title=title)
+    project = NarrationProject.objects.create(user=request.user, title=title)
     NarrationSegment.objects.create(project=project, position=0)
     return redirect("project_detail", project_id=project.pk)
 
 
+@login_required
 def project_detail(request, project_id):
-    project = get_object_or_404(NarrationProject, pk=project_id)
+    project = get_object_or_404(NarrationProject, pk=project_id, user=request.user)
     segments = list(project.segments.all())
     voice = project.voice if project.voice_id else None
     try:
@@ -448,10 +485,10 @@ def project_detail(request, project_id):
             })
     return render(request, "studio/project_editor.html", {
         "project": project,
-        "projects": NarrationProject.objects.all()[:30],
+        "projects": NarrationProject.objects.filter(user=request.user)[:30],
         "segments": segments,
         "audio_ready": bool(segments and all(segment.ready_for_voice for segment in segments)),
-        "voices": Voice.objects.all(),
+        "voices": Voice.objects.filter(user=request.user),
         "categories": Voice.Category.choices,
         "video_formats": NarrationProject.VideoFormat.choices,
         "motions": NarrationSegment.Motion.choices,
@@ -471,9 +508,10 @@ def project_detail(request, project_id):
     })
 
 
+@login_required
 @require_POST
 def import_scenes(request, project_id):
-    project = get_object_or_404(NarrationProject, pk=project_id)
+    project = get_object_or_404(NarrationProject, pk=project_id, user=request.user)
     if project.status in {NarrationProject.Status.QUEUED, NarrationProject.Status.PROCESSING}:
         return JsonResponse({"ok": False, "error": "Attends la fin du traitement avant d’ajouter des scènes."}, status=409)
     uploads = request.FILES.getlist("files")
@@ -612,9 +650,10 @@ def import_scenes(request, project_id):
     return redirect("project_detail", project_id=project.pk)
 
 
+@login_required
 @require_POST
 def assemble_videos(request, project_id):
-    project = get_object_or_404(NarrationProject, pk=project_id)
+    project = get_object_or_404(NarrationProject, pk=project_id, user=request.user)
     if project.status in {NarrationProject.Status.QUEUED, NarrationProject.Status.PROCESSING}:
         return JsonResponse({"ok": False, "error": "Ce projet est déjà dans la file ou en cours de traitement."}, status=409)
     segments = list(project.segments.order_by("position", "id"))
@@ -638,9 +677,10 @@ def assemble_videos(request, project_id):
     return JsonResponse({"ok": True, "status_url": f"/projects/{project.pk}/status/"})
 
 
+@login_required
 @require_POST
 def save_video_options(request, project_id):
-    project = get_object_or_404(NarrationProject, pk=project_id)
+    project = get_object_or_404(NarrationProject, pk=project_id, user=request.user)
     if project.status in {NarrationProject.Status.QUEUED, NarrationProject.Status.PROCESSING}:
         return JsonResponse({"ok": False, "error": "Attends la fin du traitement avant de modifier les réglages."}, status=409)
     video_format = request.POST.get("video_format")
@@ -657,11 +697,12 @@ def save_video_options(request, project_id):
     return redirect("project_detail", project_id=project.pk)
 
 
+@login_required
 @require_POST
 def set_project_voice(request, project_id):
-    project = get_object_or_404(NarrationProject, pk=project_id)
+    project = get_object_or_404(NarrationProject, pk=project_id, user=request.user)
     voice_id = request.POST.get("voice_id")
-    voice = get_object_or_404(Voice, pk=voice_id, consent_confirmed=True) if voice_id else None
+    voice = get_object_or_404(Voice, pk=voice_id, user=request.user, consent_confirmed=True) if voice_id else None
     if project.status in {NarrationProject.Status.QUEUED, NarrationProject.Status.PROCESSING}:
         return JsonResponse({"ok": False, "error": "Ce projet est déjà dans la file ou en cours de traitement."}, status=409)
     if project.voice_id != (voice.pk if voice else None):
@@ -670,9 +711,10 @@ def set_project_voice(request, project_id):
     return redirect("project_detail", project_id=project.pk)
 
 
+@login_required
 @require_POST
 def add_segment(request, project_id):
-    project = get_object_or_404(NarrationProject, pk=project_id)
+    project = get_object_or_404(NarrationProject, pk=project_id, user=request.user)
     if project.status in {NarrationProject.Status.QUEUED, NarrationProject.Status.PROCESSING}:
         return JsonResponse({"ok": False, "error": "Attends la fin du traitement avant de modifier le projet."}, status=409)
     NarrationSegment.objects.create(project=project, position=project.segments.count())
@@ -680,9 +722,10 @@ def add_segment(request, project_id):
     return redirect("project_detail", project_id=project.pk)
 
 
+@login_required
 @require_POST
 def save_segment(request, project_id, segment_id):
-    project = get_object_or_404(NarrationProject, pk=project_id)
+    project = get_object_or_404(NarrationProject, pk=project_id, user=request.user)
     segment = get_object_or_404(NarrationSegment, pk=segment_id, project=project)
     if project.status in {NarrationProject.Status.QUEUED, NarrationProject.Status.PROCESSING}:
         return JsonResponse({"ok": False, "error": "Attends la fin du traitement avant de modifier le projet."}, status=409)
@@ -734,9 +777,10 @@ def save_segment(request, project_id, segment_id):
     return redirect(f"/projects/{project.pk}/#segment-{segment.pk}")
 
 
+@login_required
 @require_POST
 def delete_segment(request, project_id, segment_id):
-    project = get_object_or_404(NarrationProject, pk=project_id)
+    project = get_object_or_404(NarrationProject, pk=project_id, user=request.user)
     segment = get_object_or_404(NarrationSegment, pk=segment_id, project=project)
     if project.status in {NarrationProject.Status.QUEUED, NarrationProject.Status.PROCESSING}:
         return JsonResponse({"ok": False, "error": "Attends la fin du traitement avant de modifier le projet."}, status=409)
@@ -759,9 +803,10 @@ def delete_segment(request, project_id, segment_id):
     return redirect("project_detail", project_id=project.pk)
 
 
+@login_required
 @require_POST
 def reorder_segments(request, project_id):
-    project = get_object_or_404(NarrationProject, pk=project_id)
+    project = get_object_or_404(NarrationProject, pk=project_id, user=request.user)
     if project.status in {NarrationProject.Status.QUEUED, NarrationProject.Status.PROCESSING}:
         return JsonResponse({"ok": False, "error": "Attends la fin du traitement avant de modifier le projet."}, status=409)
     try:
@@ -778,11 +823,12 @@ def reorder_segments(request, project_id):
     return JsonResponse({"ok": True})
 
 
+@login_required
 @require_POST
 def delete_project(request, project_id):
     with transaction.atomic():
         project = get_object_or_404(
-            NarrationProject.objects.select_for_update(), pk=project_id,
+            NarrationProject.objects.select_for_update(), pk=project_id, user=request.user,
         )
         if project.status == NarrationProject.Status.PROCESSING:
             messages.error(request, "Annule le traitement et attends son arrêt avant de supprimer le projet.")
@@ -799,11 +845,12 @@ def delete_project(request, project_id):
     return redirect("home")
 
 
+@login_required
 @require_POST
 def cancel_job(request, project_id):
     with transaction.atomic():
         project = get_object_or_404(
-            NarrationProject.objects.select_for_update(), pk=project_id,
+            NarrationProject.objects.select_for_update(), pk=project_id, user=request.user,
         )
         if project.status == NarrationProject.Status.QUEUED:
             project.status = NarrationProject.Status.DRAFT
@@ -839,9 +886,10 @@ def cancel_job(request, project_id):
         }, status=409)
 
 
+@login_required
 @require_POST
 def rename_project(request, project_id):
-    project = get_object_or_404(NarrationProject, pk=project_id)
+    project = get_object_or_404(NarrationProject, pk=project_id, user=request.user)
     title = (request.POST.get("title") or "").strip()[:120]
     if not title:
         messages.error(request, "Le nom du projet ne peut pas être vide.")
@@ -852,13 +900,14 @@ def rename_project(request, project_id):
     return redirect("project_detail", project_id=project.pk)
 
 
+@login_required
 @require_POST
 def prepare(request, project_id):
-    project = get_object_or_404(NarrationProject, pk=project_id)
+    project = get_object_or_404(NarrationProject, pk=project_id, user=request.user)
     if project.status in {NarrationProject.Status.QUEUED, NarrationProject.Status.PROCESSING}:
         return JsonResponse({"ok": False, "error": "Ce projet est déjà dans la file ou en cours de traitement."}, status=409)
     voice_id = request.POST.get("voice_id") or project.voice_id
-    voice = get_object_or_404(Voice, pk=voice_id, consent_confirmed=True) if voice_id else None
+    voice = get_object_or_404(Voice, pk=voice_id, user=request.user, consent_confirmed=True) if voice_id else None
     segments = list(project.segments.order_by("position", "id"))
     if not voice:
         return JsonResponse({"ok": False, "error": "Choisis une voix autorisée pour ce projet."}, status=400)
@@ -910,13 +959,14 @@ def prepare(request, project_id):
     return JsonResponse({"ok": True, "status_url": f"/projects/{project.pk}/status/"})
 
 
+@json_login_required
 def project_status(request, project_id):
-    project = get_object_or_404(NarrationProject, pk=project_id)
+    project = get_object_or_404(NarrationProject, pk=project_id, user=request.user)
     elapsed = 0
     if project.started_at:
         end = project.finished_at or timezone.now()
         elapsed = max(0, round((end - project.started_at).total_seconds()))
-    queued = NarrationProject.objects.filter(status=NarrationProject.Status.QUEUED).order_by("queued_at", "id")
+    queued = NarrationProject.objects.filter(user=request.user, status=NarrationProject.Status.QUEUED).order_by("queued_at", "id")
     queue_count = queued.count()
     queue_position = next((index for index, item in enumerate(queued.values_list("id", flat=True), start=1)
                            if item == project.pk), 0)
@@ -937,8 +987,9 @@ def project_status(request, project_id):
     })
 
 
+@login_required
 def segment_subtitles(request, project_id, segment_id):
-    project = get_object_or_404(NarrationProject, pk=project_id)
+    project = get_object_or_404(NarrationProject, pk=project_id, user=request.user)
     segment = get_object_or_404(NarrationSegment, pk=segment_id, project=project)
     if not segment.subtitle_data:
         return HttpResponse("Les sous-titres de ce segment ne sont pas prêts.", status=404)

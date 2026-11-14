@@ -9,6 +9,7 @@ from datetime import timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from django.contrib.auth import get_user_model
 from django.core.files.base import ContentFile
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
@@ -25,6 +26,8 @@ from . import services
 
 class MediaTestCase(TestCase):
     def setUp(self):
+        self.user = get_user_model().objects.create_user(username="test-owner", password="SafePass123!x")
+        self.client.force_login(self.user)
         self.media_dir = tempfile.TemporaryDirectory(prefix="studio-voix-tests-")
         self.override = override_settings(MEDIA_ROOT=self.media_dir.name)
         self.override.enable()
@@ -32,7 +35,7 @@ class MediaTestCase(TestCase):
         self.addCleanup(self.media_dir.cleanup)
 
     def make_voice(self, name="Voix test", category=Voice.Category.OTHER):
-        voice = Voice(name=name, category=category, consent_confirmed=True)
+        voice = Voice(user=self.user, name=name, category=category, consent_confirmed=True)
         voice.sample.save("sample.wav", ContentFile(b"sample voice bytes"), save=True)
         return voice
 
@@ -69,7 +72,7 @@ class ProjectViewTests(MediaTestCase):
     @patch("studio.services.hash_file", wraps=services.hash_file)
     def test_project_detail_hashes_voice_sample_once_for_multiple_segments(self, hash_sample):
         voice = self.make_voice()
-        project = NarrationProject.objects.create(title="Projet", voice=voice)
+        project = NarrationProject.objects.create(user=self.user, title="Projet", voice=voice)
         NarrationSegment.objects.create(project=project, position=0, text="Premier segment.")
         NarrationSegment.objects.create(project=project, position=1, text="Deuxième segment.")
 
@@ -79,7 +82,7 @@ class ProjectViewTests(MediaTestCase):
         hash_sample.assert_called_once_with(voice.sample.path)
 
     def test_changing_project_voice_is_persisted_and_invalidates_complete_exports(self):
-        project = NarrationProject.objects.create(title="Voix différente")
+        project = NarrationProject.objects.create(user=self.user, title="Voix différente")
         voice = self.make_voice("Voix B", Voice.Category.WOMAN)
         project.full_audio.save("old.wav", ContentFile(b"old audio"), save=True)
         project.subtitles.save("old.srt", ContentFile(b"old subtitles"), save=True)
@@ -122,7 +125,7 @@ class ProjectViewTests(MediaTestCase):
 
 class NarrationQueueTests(MediaTestCase):
     def make_queued_project(self, title, voice, queued_at):
-        project = NarrationProject.objects.create(
+        project = NarrationProject.objects.create(user=self.user, 
             title=title, voice=voice, status=NarrationProject.Status.QUEUED, queued_at=queued_at,
         )
         NarrationSegment.objects.create(project=project, position=0, text="Bonjour.")
@@ -130,7 +133,7 @@ class NarrationQueueTests(MediaTestCase):
 
     def test_prepare_adds_project_to_persistent_queue_without_starting_a_thread(self):
         voice = self.make_voice()
-        project = NarrationProject.objects.create(title="À préparer", voice=voice)
+        project = NarrationProject.objects.create(user=self.user, title="À préparer", voice=voice)
         NarrationSegment.objects.create(project=project, position=0, text="Bonjour.")
 
         response = self.client.post(f"/projects/{project.pk}/prepare/", {"voice_id": voice.pk})
@@ -267,7 +270,7 @@ class VideoSceneTests(MediaTestCase):
     def test_animation_settings_defaults_preserve_existing_rendering(self):
         from .video_services import _movement_filters
 
-        project = NarrationProject.objects.create(title="Animation settings")
+        project = NarrationProject.objects.create(user=self.user, title="Animation settings")
         segment = NarrationSegment.objects.create(project=project, position=0)
         self.assertEqual(segment.camera_profile, NarrationSegment.CameraProfile.LINEAR)
         self.assertFalse(segment.light_breathing)
@@ -286,7 +289,7 @@ class VideoSceneTests(MediaTestCase):
         self.assertTrue(any("cos(PI*" in item for item in organic_filters if item.startswith("zoompan=")))
 
     def test_visual_settings_invalidate_only_video(self):
-        project = NarrationProject.objects.create(title="Visual settings", status=NarrationProject.Status.READY)
+        project = NarrationProject.objects.create(user=self.user, title="Visual settings", status=NarrationProject.Status.READY)
         project.full_audio.save("voice.wav", ContentFile(b"audio"), save=True)
         project.subtitles.save("voice.srt", ContentFile(b"1\n"), save=True)
         project.video_file.save("video.mp4", ContentFile(b"video"), save=True)
@@ -314,7 +317,7 @@ class VideoSceneTests(MediaTestCase):
         self.assertFalse(project.video_file.name)
 
     def test_import_image_creates_a_scene_and_reuses_empty_first_segment(self):
-        project = NarrationProject.objects.create(title="Images")
+        project = NarrationProject.objects.create(user=self.user, title="Images")
         first = NarrationSegment.objects.create(project=project, position=0)
         upload = SimpleUploadedFile("coach.png", self.png_bytes(), content_type="image/png")
 
@@ -334,7 +337,7 @@ class VideoSceneTests(MediaTestCase):
         document.new_page(width=160, height=120)
         pdf_data = document.tobytes()
         document.close()
-        project = NarrationProject.objects.create(title="PDF")
+        project = NarrationProject.objects.create(user=self.user, title="PDF")
         NarrationSegment.objects.create(project=project, position=0)
         upload = SimpleUploadedFile("pages.pdf", pdf_data, content_type="application/pdf")
 
@@ -348,7 +351,7 @@ class VideoSceneTests(MediaTestCase):
 
     def test_prepare_queues_video_when_every_scene_has_an_image(self):
         voice = self.make_voice()
-        project = NarrationProject.objects.create(title="Vidéo", voice=voice)
+        project = NarrationProject.objects.create(user=self.user, title="Vidéo", voice=voice)
         scene = NarrationSegment.objects.create(project=project, position=0, text="Bonjour.")
         scene.image.save("scene.png", ContentFile(self.png_bytes()), save=True)
 
@@ -364,7 +367,7 @@ class VideoSceneTests(MediaTestCase):
     def test_video_export_assembles_scene_and_caption(self, run_ffmpeg, _ffmpeg):
         from .video_services import render_project_video
 
-        project = NarrationProject.objects.create(title="Vidéo", status=NarrationProject.Status.PROCESSING)
+        project = NarrationProject.objects.create(user=self.user, title="Vidéo", status=NarrationProject.Status.PROCESSING)
         scene = NarrationSegment.objects.create(
             project=project,
             position=0,
@@ -411,8 +414,8 @@ class CacheAndCaptionTests(MediaTestCase):
     @patch("studio.services._synthesize_segment")
     def test_identical_text_and_voice_reuses_audio_cache_across_segments(self, synthesize, _align):
         voice = self.make_voice()
-        first = NarrationSegment.objects.create(project=NarrationProject.objects.create(title="Premier"), text="Bonjour.")
-        second = NarrationSegment.objects.create(project=NarrationProject.objects.create(title="Second"), text="Bonjour.")
+        first = NarrationSegment.objects.create(project=NarrationProject.objects.create(user=self.user, title="Premier"), text="Bonjour.")
+        second = NarrationSegment.objects.create(project=NarrationProject.objects.create(user=self.user, title="Second"), text="Bonjour.")
         key = cache_key_for("Bonjour.", voice)
 
         def write_test_wav(_text, _voice, destination):
@@ -452,7 +455,7 @@ class CacheAndCaptionTests(MediaTestCase):
         self.assertEqual(_group_words([]), [])
 
     def test_segment_srt_download_uses_its_aligned_caption_data(self):
-        project = NarrationProject.objects.create(title="SRT")
+        project = NarrationProject.objects.create(user=self.user, title="SRT")
         segment = NarrationSegment.objects.create(
             project=project,
             position=0,
@@ -594,7 +597,7 @@ class MultiEffectAnimationTests(MediaTestCase):
     def test_animation_settings_post_rejects_unknown_values_and_persists_unchecked_boxes(self):
         import json
 
-        project = NarrationProject.objects.create(title="Effets")
+        project = NarrationProject.objects.create(user=self.user, title="Effets")
         segment = NarrationSegment.objects.create(project=project, position=0, text="Salut.")
         settings = {
             "version": 1,
@@ -631,7 +634,7 @@ class VideoNarrationModeTests(MediaTestCase):
 
     def test_audio_only_action_queues_audio_job_for_video_clips(self):
         voice = self.make_voice()
-        project = NarrationProject.objects.create(title="Audio d'abord", voice=voice)
+        project = NarrationProject.objects.create(user=self.user, title="Audio d'abord", voice=voice)
         self.add_video_segment(project)
 
         page = self.client.get(f"/projects/{project.pk}/")
@@ -653,7 +656,7 @@ class VideoNarrationModeTests(MediaTestCase):
         from .services import _voice_sample_digest, cache_key_for
 
         voice = self.make_voice()
-        project = NarrationProject.objects.create(title="Audio déjà prêt", voice=voice)
+        project = NarrationProject.objects.create(user=self.user, title="Audio déjà prêt", voice=voice)
         segment = self.add_video_segment(project)
         segment.audio.save("segment-ready.wav", ContentFile(b"audio bytes"), save=False)
         segment.subtitle_data = [{"start": 0.0, "end": 1.0, "text": "Bonjour"}]
@@ -669,7 +672,7 @@ class VideoNarrationModeTests(MediaTestCase):
     def test_audio_worker_stops_after_prepare_without_running_video_renderers(self):
         from .management.commands.run_narration_worker import Command
 
-        project = NarrationProject.objects.create(
+        project = NarrationProject.objects.create(user=self.user, 
             title="Pré-génération seule",
             status=NarrationProject.Status.QUEUED,
             queued_at=timezone.now(),
@@ -725,7 +728,7 @@ class VideoNarrationModeTests(MediaTestCase):
 
     def test_prepare_offers_and_queues_video_narration_for_clips_with_text(self):
         voice = self.make_voice()
-        project = NarrationProject.objects.create(title="Clip narré", voice=voice)
+        project = NarrationProject.objects.create(user=self.user, title="Clip narré", voice=voice)
         segment = self.add_video_segment(project)
 
         page = self.client.get(f"/projects/{project.pk}/")
@@ -742,7 +745,7 @@ class VideoNarrationModeTests(MediaTestCase):
         self.assertEqual(segment.text, "Bonjour, le Shiba arrive.")
 
     def test_classic_assembly_still_queues_assembly_job_for_video_clips(self):
-        project = NarrationProject.objects.create(title="Assemblage classique")
+        project = NarrationProject.objects.create(user=self.user, title="Assemblage classique")
         self.add_video_segment(project, text="")
 
         response = self.client.post(f"/projects/{project.pk}/assemble-videos/")
@@ -775,7 +778,7 @@ class VideoNarrationModeTests(MediaTestCase):
     def test_worker_keeps_classic_assembly_routed_to_existing_renderer(self):
         from .management.commands.run_narration_worker import Command
 
-        project = NarrationProject.objects.create(
+        project = NarrationProject.objects.create(user=self.user, 
             title="Assemblage worker",
             status=NarrationProject.Status.QUEUED,
             queued_at=timezone.now(),
@@ -791,7 +794,7 @@ class VideoNarrationModeTests(MediaTestCase):
     def test_worker_runs_xtts_before_rendering_video_narration(self):
         from .management.commands.run_narration_worker import Command
 
-        project = NarrationProject.objects.create(
+        project = NarrationProject.objects.create(user=self.user, 
             title="Narration vidéo worker",
             status=NarrationProject.Status.QUEUED,
             queued_at=timezone.now(),
@@ -822,7 +825,7 @@ class ProjectLifecycleAndNamingTests(MediaTestCase):
         self.assertRegex(generated.title, r"^Projet du \d{2}/\d{2}/\d{4} à \d{2}h\d{2}$")
 
     def test_project_can_be_renamed_and_home_displays_the_saved_title(self):
-        project = NarrationProject.objects.create(title="Avant")
+        project = NarrationProject.objects.create(user=self.user, title="Avant")
         response = self.client.post(f"/projects/{project.pk}/rename/", {"title": "Après le montage"})
         self.assertEqual(response.status_code, 302)
         project.refresh_from_db()
@@ -849,7 +852,7 @@ class ProjectLifecycleAndNamingTests(MediaTestCase):
         self.assertFalse(process.kill.called)
 
     def test_queued_job_is_cancelled_and_returns_to_draft_immediately(self):
-        project = NarrationProject.objects.create(
+        project = NarrationProject.objects.create(user=self.user, 
             title="À annuler",
             status=NarrationProject.Status.QUEUED,
             queued_at=timezone.now(),
@@ -869,7 +872,7 @@ class ProjectLifecycleAndNamingTests(MediaTestCase):
         from .services import prepare_project
 
         voice = self.make_voice()
-        project = NarrationProject.objects.create(
+        project = NarrationProject.objects.create(user=self.user, 
             title="En cours",
             voice=voice,
             status=NarrationProject.Status.PROCESSING,
@@ -890,7 +893,7 @@ class ProjectLifecycleAndNamingTests(MediaTestCase):
         self.assertEqual(project.status_message, "Traitement annulé proprement.")
 
     def test_delete_project_route_is_post_only_and_removes_project(self):
-        project = NarrationProject.objects.create(title="Projet de test")
+        project = NarrationProject.objects.create(user=self.user, title="Projet de test")
         response = self.client.get(f"/projects/{project.pk}/delete/")
         self.assertEqual(response.status_code, 405)
 
@@ -901,17 +904,17 @@ class ProjectLifecycleAndNamingTests(MediaTestCase):
 class QueueSupervisionTests(MediaTestCase):
     def test_queue_page_and_json_api_sort_waiting_projects_and_show_processing(self):
         now = timezone.now()
-        later = NarrationProject.objects.create(
+        later = NarrationProject.objects.create(user=self.user, 
             title="En attente plus tard",
             status=NarrationProject.Status.QUEUED,
             queued_at=now,
         )
-        earlier = NarrationProject.objects.create(
+        earlier = NarrationProject.objects.create(user=self.user, 
             title="En attente en premier",
             status=NarrationProject.Status.QUEUED,
             queued_at=now - timedelta(minutes=2),
         )
-        processing = NarrationProject.objects.create(
+        processing = NarrationProject.objects.create(user=self.user, 
             title="Projet en cours",
             status=NarrationProject.Status.PROCESSING,
             queued_at=now - timedelta(minutes=1),
@@ -919,7 +922,7 @@ class QueueSupervisionTests(MediaTestCase):
             current_segment=2,
             total_segments=5,
         )
-        NarrationProject.objects.create(title="Brouillon hors file")
+        NarrationProject.objects.create(user=self.user, title="Brouillon hors file")
 
         response = self.client.get("/queue/")
         self.assertEqual(response.status_code, 200)
@@ -944,10 +947,10 @@ class QueueSupervisionTests(MediaTestCase):
         self.assertFalse(payload["is_empty"])
 
     def test_sidebar_queue_count_is_available_globally_and_excludes_processing(self):
-        NarrationProject.objects.create(title="Attente 1", status=NarrationProject.Status.QUEUED)
-        NarrationProject.objects.create(title="Attente 2", status=NarrationProject.Status.QUEUED)
-        NarrationProject.objects.create(title="Traitement actif", status=NarrationProject.Status.PROCESSING)
-        NarrationProject.objects.create(title="Brouillon")
+        NarrationProject.objects.create(user=self.user, title="Attente 1", status=NarrationProject.Status.QUEUED)
+        NarrationProject.objects.create(user=self.user, title="Attente 2", status=NarrationProject.Status.QUEUED)
+        NarrationProject.objects.create(user=self.user, title="Traitement actif", status=NarrationProject.Status.PROCESSING)
+        NarrationProject.objects.create(user=self.user, title="Brouillon")
 
         home_response = self.client.get("/")
         self.assertEqual(home_response.status_code, 200)
@@ -967,3 +970,68 @@ class QueueSupervisionTests(MediaTestCase):
         self.assertTrue(api_response.json()["is_empty"])
 
 
+
+
+class AuthenticationIsolationTests(MediaTestCase):
+    def test_anonymous_visitors_are_redirected_to_login(self):
+        self.client.logout()
+
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(response["Location"].startswith("/login/?next=/"))
+
+    def test_project_status_returns_json_401_for_anonymous_visitors(self):
+        project = NarrationProject.objects.create(user=self.user, title="Privé")
+        self.client.logout()
+
+        response = self.client.get(f"/projects/{project.pk}/status/")
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json(), {"error": "auth_required"})
+
+    def test_user_cannot_view_or_delete_another_users_project(self):
+        other = get_user_model().objects.create_user(
+            username="other-owner", password="OtherSafePass123!x",
+        )
+        project = NarrationProject.objects.create(user=other, title="Projet privé")
+
+        detail = self.client.get(f"/projects/{project.pk}/")
+        deletion = self.client.post(f"/projects/{project.pk}/delete/", {"confirm": "yes"})
+
+        self.assertEqual(detail.status_code, 404)
+        self.assertEqual(deletion.status_code, 404)
+        self.assertTrue(NarrationProject.objects.filter(pk=project.pk, user=other).exists())
+
+    def test_user_cannot_use_or_list_another_users_voice(self):
+        other = get_user_model().objects.create_user(
+            username="voice-owner", password="VoiceSafePass123!x",
+        )
+        project = NarrationProject.objects.create(user=self.user, title="Mon projet")
+        voice = Voice.objects.create(
+            user=other, name="Voix privée", category=Voice.Category.OTHER,
+            sample="voices/private.wav", consent_confirmed=True,
+        )
+
+        page = self.client.get("/")
+        response = self.client.post(
+            f"/projects/{project.pk}/voice/", {"voice_id": voice.pk},
+        )
+
+        self.assertNotContains(page, "Voix privée")
+        self.assertEqual(response.status_code, 404)
+        project.refresh_from_db()
+        self.assertIsNone(project.voice_id)
+
+    def test_registration_creates_and_logs_in_new_user(self):
+        self.client.logout()
+
+        response = self.client.post("/register/", {
+            "username": "new-user",
+            "password1": "LongSecurePass123!x",
+            "password2": "LongSecurePass123!x",
+        })
+
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(get_user_model().objects.filter(username="new-user").exists())
+        self.assertEqual(self.client.get("/").status_code, 200)
