@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.db import models
 from django.utils import timezone
 
@@ -53,6 +54,7 @@ def legacy_animation_settings(motion, camera_profile="linear", light_breathing=F
 
 
 class Voice(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="voices")
     class Category(models.TextChoices):
         SHIBA = "shiba", "Shiba"
         MAN = "homme", "Homme"
@@ -75,6 +77,7 @@ class Voice(models.Model):
 
 
 class NarrationProject(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="narration_projects")
     class Status(models.TextChoices):
         DRAFT = "draft", "Brouillon"
         QUEUED = "queued", "En attente"
