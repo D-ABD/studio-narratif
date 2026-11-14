@@ -19,6 +19,7 @@ from django.db import close_old_connections
 from django.utils import timezone
 
 from .models import NarrationProject, NarrationSegment, Voice
+from .job_control import JobCancelled, check_job_cancellation, mark_job_cancelled
 
 MODEL_ID = "xtts_v2"
 LANGUAGE_CODE = "fr"
@@ -318,7 +319,9 @@ def _attach_cached_segment(segment, expected_key, audio_path, captions, duration
     segment.save(update_fields=["audio", "subtitle_data", "duration_seconds", "cache_key", "updated_at"])
 
 
-def _prepare_segment(segment, voice, expected_key, on_progress=None, timings=None):
+def _prepare_segment(segment, voice, expected_key, on_progress=None, timings=None, cancel_check=None):
+    if cancel_check:
+        cancel_check()
     if _segment_is_cached(segment, expected_key):
         if timings is not None:
             timings.update({"cached": True, "xtts_seconds": 0.0, "whisperx_seconds": 0.0})
@@ -343,11 +346,15 @@ def _prepare_segment(segment, voice, expected_key, on_progress=None, timings=Non
             on_progress("Synthèse XTTS", 0.2)
         synthesis_started = time.perf_counter()
         _synthesize_segment(segment.text, voice, audio_path)
+        if cancel_check:
+            cancel_check()
         synthesis_seconds = time.perf_counter() - synthesis_started
         if on_progress:
             on_progress(f"Alignement WhisperX · XTTS {synthesis_seconds:.1f} s", 0.68)
         alignment_started = time.perf_counter()
         captions = align_audio(audio_path, segment.text)
+        if cancel_check:
+            cancel_check()
         alignment_seconds = time.perf_counter() - alignment_started
         duration = wav_duration(audio_path)
         if timings is not None:
@@ -360,6 +367,8 @@ def _prepare_segment(segment, voice, expected_key, on_progress=None, timings=Non
             "Segment %s préparé : XTTS %.1f s, WhisperX %.1f s.",
             segment.pk, synthesis_seconds, alignment_seconds,
         )
+        if cancel_check:
+            cancel_check()
         cache_audio, cache_metadata = _persistent_cache_paths(expected_key)
         temporary_audio = cache_audio.with_suffix(".wav.tmp")
         temporary_metadata = cache_metadata.with_suffix(".json.tmp")
@@ -441,6 +450,7 @@ def prepare_project(project_id):
             cached_segments = 0
             with tempfile.TemporaryDirectory(prefix=f"petit-studio-project-{project.pk}-") as folder:
                 for index, segment in enumerate(segments, start=1):
+                    check_job_cancellation(project.pk)
                     project.refresh_from_db(fields=["voice_id"])
                     if project.voice_id != voice.pk:
                         raise RuntimeError("La voix du projet a changé pendant le traitement. Relance la préparation.")
@@ -450,6 +460,7 @@ def prepare_project(project_id):
                     expected_key = cache_key_for(segment.text, voice, sample_digest=sample_digest)
 
                     def update_progress(stage, fraction, index=index):
+                        check_job_cancellation(project.pk)
                         percent = round(((index - 1 + max(0.0, min(1.0, fraction))) / len(segments)) * 95)
                         NarrationProject.objects.filter(pk=project.pk).update(
                             status_message=f"Segment {index}/{len(segments)} · {stage}",
@@ -457,14 +468,19 @@ def prepare_project(project_id):
                         )
 
                     segment_timings = {}
-                    _prepare_segment(segment, voice, expected_key, update_progress, segment_timings)
+                    _prepare_segment(
+                        segment, voice, expected_key, update_progress, segment_timings,
+                        cancel_check=lambda: check_job_cancellation(project.pk),
+                    )
                     total_xtts_seconds += segment_timings.get("xtts_seconds", 0.0)
                     total_whisperx_seconds += segment_timings.get("whisperx_seconds", 0.0)
                     cached_segments += int(segment_timings.get("cached", False))
+                    check_job_cancellation(project.pk)
                     target = Path(folder) / f"segment-{index:04}.wav"
                     shutil.copy2(segment.audio.path, target)
                     paths.append(target)
                 project.refresh_from_db()
+                check_job_cancellation(project.pk)
                 output_wav = Path(folder) / "narration-complete.wav"
                 _assemble_wav(paths, output_wav)
                 project.status_message = "Assemblage du WAV et du fichier SRT…"
@@ -474,6 +490,7 @@ def prepare_project(project_id):
                 srt = srt_text(segments)
                 if not srt.strip():
                     raise RuntimeError("Le fichier SRT est vide : aucun sous-titre n’a été exporté.")
+                check_job_cancellation(project.pk)
                 with output_wav.open("rb") as stream:
                     project.full_audio.save(f"narration-{project.pk}.wav", File(stream), save=False)
                 project.subtitles.save(f"narration-{project.pk}.srt", ContentFile(srt.encode("utf-8")), save=False)
@@ -497,11 +514,14 @@ def prepare_project(project_id):
                 project.current_segment = len(segments)
                 project.total_segments = len(segments)
                 project.finished_at = None if generating_video else timezone.now()
+                check_job_cancellation(project.pk)
                 project.save(update_fields=[
                     "full_audio", "subtitles", "duration_seconds", "status", "status_message",
                     "error_message", "progress_percent", "current_segment", "total_segments",
                     "queued_at", "finished_at", "updated_at",
                 ])
+    except JobCancelled:
+        mark_job_cancelled(project_id)
     except Exception as exc:
         NarrationProject.objects.filter(pk=project_id).update(
             status=NarrationProject.Status.ERROR,

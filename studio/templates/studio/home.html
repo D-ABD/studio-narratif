@@ -136,7 +136,13 @@
         </div>
         <h3>{{ item.title }}</h3>
         <p class="home-project-meta">{{ item.segments.count }} segment{{ item.segments.count|pluralize }} <span aria-hidden="true">·</span> Modifié le {{ item.updated_at|date:"d/m/Y à H:i" }}</p>
-        <a class="home-project-open" href="{% url 'project_detail' item.id %}">Ouvrir l’éditeur <span aria-hidden="true">→</span></a>
+        <div class="home-project-actions">
+          <a class="home-project-open" href="{% url 'project_detail' item.id %}">Ouvrir l’éditeur <span aria-hidden="true">→</span></a>
+          <form method="post" action="{% url 'delete_project' item.id %}" onsubmit="return confirm('Supprimer définitivement le projet « {{ item.title|escapejs }} » ?')">
+            {% csrf_token %}
+            <button class="home-project-delete" type="submit" {% if item.status == 'processing' %}disabled title="Annule d’abord le traitement en cours"{% endif %}>Supprimer</button>
+          </form>
+        </div>
       </article>
       {% empty %}
       <div class="home-empty-state home-project-empty">
@@ -149,9 +155,9 @@
 
     <form action="{% url 'create_project' %}" method="post" id="new-project" class="home-create-project">
       {% csrf_token %}
-      <label for="projectTitle">Créer un projet vidéo ou audio</label>
+      <label for="projectTitle">Nom du projet (facultatif)</label>
       <div class="home-create-project-fields">
-        <input class="home-control" id="projectTitle" name="title" maxlength="120" placeholder="Ex. Message de motivation" required>
+        <input class="home-control" id="projectTitle" name="title" maxlength="120" placeholder="Ex. Message de motivation">
         <button class="home-button home-button-primary" type="submit">Créer le projet <span aria-hidden="true">→</span></button>
       </div>
     </form>

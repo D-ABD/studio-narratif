@@ -6,6 +6,7 @@ import subprocess
 import sys
 import threading
 import tempfile
+import time
 from pathlib import Path
 
 from django.conf import settings
@@ -15,6 +16,9 @@ from django.utils import timezone
 
 from .models import NarrationProject, NarrationSegment
 from .services import _ffmpeg_path, wav_duration
+from .job_control import (
+    JobCancelled, cancellation_checker, check_job_cancellation, mark_job_cancelled,
+)
 
 
 FFPROBE_TIMEOUT_SECONDS = 60
@@ -271,35 +275,67 @@ def _animation_filter_chain(settings, width, height, duration, subtitle_file=Non
     return filters
 
 
-def _run_ffmpeg_once(command, cwd, operation):
+def _terminate_subprocess(process, grace_seconds=3):
+    if process.poll() is not None:
+        return
     try:
-        result = subprocess.run(
-            command, cwd=cwd, capture_output=True, text=True, check=False,
-            timeout=FFMPEG_TIMEOUT_SECONDS,
+        process.terminate()
+    except OSError:
+        pass
+    try:
+        process.communicate(timeout=grace_seconds)
+    except subprocess.TimeoutExpired:
+        try:
+            process.kill()
+        except OSError:
+            pass
+        process.communicate()
+
+
+def _run_ffmpeg_once(command, cwd, operation, cancel_check=None):
+    if cancel_check and cancel_check():
+        raise JobCancelled("Traitement annulé à la demande de l’utilisateur.")
+    try:
+        process = subprocess.Popen(
+            command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(
-            f"FFmpeg a dépassé le délai de 10 minutes pendant {operation}."
-        ) from exc
     except OSError as exc:
         raise RuntimeError(f"Impossible de lancer FFmpeg pour {operation} : {exc}") from exc
-    if result.returncode:
-        detail = (result.stderr or "").strip().splitlines()
-        message = detail[-1] if detail else f"code de sortie {result.returncode}"
-        if "No such filter" in (result.stderr or "") and "subtitles" in (result.stderr or ""):
+
+    deadline = time.monotonic() + FFMPEG_TIMEOUT_SECONDS
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _terminate_subprocess(process)
+            raise RuntimeError(f"FFmpeg a dépassé le délai de 10 minutes pendant {operation}.")
+        try:
+            _stdout, stderr = process.communicate(timeout=min(0.5, remaining))
+            break
+        except subprocess.TimeoutExpired:
+            if cancel_check and cancel_check():
+                _terminate_subprocess(process)
+                raise JobCancelled("Traitement annulé à la demande de l’utilisateur.")
+            if time.monotonic() >= deadline:
+                _terminate_subprocess(process)
+                raise RuntimeError(f"FFmpeg a dépassé le délai de 10 minutes pendant {operation}.")
+
+    if process.returncode:
+        detail = (stderr or "").strip().splitlines()
+        message = detail[-1] if detail else f"code de sortie {process.returncode}"
+        if "No such filter" in (stderr or "") and "subtitles" in (stderr or ""):
             raise RuntimeError("FFmpeg ne prend pas en charge l’incrustation des sous-titres (filtre libass). Réinstalle FFmpeg avec le support libass.")
         raise _FFmpegCommandError(f"FFmpeg a échoué pendant {operation} : {message}")
 
 
-def _run_ffmpeg(command, cwd, operation):
+def _run_ffmpeg(command, cwd, operation, cancel_check=None):
     try:
-        _run_ffmpeg_once(command, cwd, operation)
+        _run_ffmpeg_once(command, cwd, operation, cancel_check=cancel_check)
     except _FFmpegCommandError:
         fallback = _software_fallback_command(command)
         if fallback is None:
             raise
         _remove_partial_output(command, cwd)
-        _run_ffmpeg_once(fallback, cwd, operation)
+        _run_ffmpeg_once(fallback, cwd, operation, cancel_check=cancel_check)
 
 
 ASS_PLAY_RES_X = 1080
@@ -569,7 +605,7 @@ def _parallax_frames(image_path, width, height, duration):
         yield bg_frame.convert("RGB").tobytes()
 
 
-def _run_parallax_attempt(command, image_path, output_path, width, height, duration, folder):
+def _run_parallax_attempt(command, image_path, output_path, width, height, duration, folder, cancel_check=None):
     error_log = folder / f"{output_path.stem}-ffmpeg.log"
     try:
         with error_log.open("wb") as log_stream:
@@ -589,13 +625,12 @@ def _run_parallax_attempt(command, image_path, output_path, width, height, durat
             write_error = None
             try:
                 for frame in _parallax_frames(image_path, width, height, duration):
+                    if cancel_check and cancel_check():
+                        raise JobCancelled("Traitement annulé à la demande de l’utilisateur.")
                     process.stdin.write(frame)
             except Exception as exc:
                 write_error = exc
-                try:
-                    process.terminate()
-                except OSError:
-                    pass
+                _terminate_subprocess(process)
             finally:
                 if process.stdin and not process.stdin.closed:
                     try:
@@ -606,11 +641,7 @@ def _run_parallax_attempt(command, image_path, output_path, width, height, durat
             try:
                 return_code = process.wait(timeout=FFMPEG_TIMEOUT_SECONDS)
             except subprocess.TimeoutExpired as exc:
-                try:
-                    process.kill()
-                except OSError:
-                    pass
-                process.wait()
+                _terminate_subprocess(process)
                 timed_out.set()
                 raise RuntimeError(
                     "FFmpeg a dépassé le délai de 10 minutes pendant le rendu par parallaxe."
@@ -637,7 +668,7 @@ def _run_parallax_attempt(command, image_path, output_path, width, height, durat
 
 def _render_parallax_clip(
     ffmpeg, image_path, audio_path, output_path, subtitle_file, width, height, duration, folder,
-    animation_settings=None,
+    animation_settings=None, cancel_check=None,
 ):
     """Encode parallax base frames, then apply the shared camera/light/grade/subtitle chain."""
     command = [
@@ -655,13 +686,13 @@ def _render_parallax_clip(
     ])
 
     try:
-        _run_parallax_attempt(command, image_path, output_path, width, height, duration, folder)
+        _run_parallax_attempt(command, image_path, output_path, width, height, duration, folder, cancel_check=cancel_check)
     except _FFmpegCommandError:
         fallback = _software_fallback_command(command)
         if fallback is None:
             raise
         _remove_partial_output(command, folder)
-        _run_parallax_attempt(fallback, image_path, output_path, width, height, duration, folder)
+        _run_parallax_attempt(fallback, image_path, output_path, width, height, duration, folder, cancel_check=cancel_check)
 
 def _ffprobe_path():
     ffmpeg = Path(_ffmpeg_path())
@@ -712,6 +743,8 @@ def render_video_assembly(project_id):
     close_old_connections()
     try:
         project = NarrationProject.objects.get(pk=project_id)
+        cancel_check = cancellation_checker(project_id)
+        check_job_cancellation(project_id)
         scenes = list(project.segments.order_by("position", "id"))
         if not scenes or any(not scene.video_clip or scene.image for scene in scenes):
             raise RuntimeError("Ajoute uniquement des clips vidéo avant de lancer l’assemblage.")
@@ -722,6 +755,7 @@ def render_video_assembly(project_id):
             clips = []
             total_duration = 0.0
             for index, scene in enumerate(scenes, start=1):
+                check_job_cancellation(project_id)
                 project.status_message = f"Préparation du clip {index}/{len(scenes)}"
                 project.current_segment = index
                 project.progress_percent = round(85 * (index - 1) / len(scenes))
@@ -748,7 +782,7 @@ def render_video_assembly(project_id):
                     "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
                     "-ar", "48000", "-ac", "2", str(clip),
                 ])
-                _run_ffmpeg(command, folder, f"normalisation du clip {index}")
+                _run_ffmpeg(command, folder, f"normalisation du clip {index}", cancel_check=cancel_check)
                 if not clip.is_file() or clip.stat().st_size < 1000:
                     raise RuntimeError(f"FFmpeg n’a pas produit le clip normalisé {index}.")
                 clips.append(clip)
@@ -761,10 +795,11 @@ def render_video_assembly(project_id):
             _run_ffmpeg(
                 [ffmpeg, "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(concat_list),
                  "-c", "copy", "-movflags", "+faststart", str(output)],
-                folder, "assemblage des clips vidéo",
+                folder, "assemblage des clips vidéo", cancel_check=cancel_check,
             )
             if not output.is_file() or output.stat().st_size < 1000:
                 raise RuntimeError("FFmpeg n’a pas produit de fichier MP4 valide.")
+            check_job_cancellation(project_id)
             project.refresh_from_db()
             if project.video_file:
                 project.video_file.delete(save=False)
@@ -782,6 +817,8 @@ def render_video_assembly(project_id):
                 "video_file", "duration_seconds", "status", "status_message", "error_message",
                 "progress_percent", "current_segment", "total_segments", "finished_at", "updated_at",
             ])
+    except JobCancelled:
+        mark_job_cancelled(project_id)
     except Exception as exc:
         NarrationProject.objects.filter(pk=project_id).update(
             status=NarrationProject.Status.ERROR,
@@ -831,6 +868,8 @@ def render_video_narration(project_id):
     close_old_connections()
     try:
         project = NarrationProject.objects.get(pk=project_id)
+        cancel_check = cancellation_checker(project_id)
+        check_job_cancellation(project_id)
         scenes = list(project.segments.order_by("position", "id"))
         if not scenes or any(not scene.video_clip or scene.image for scene in scenes):
             raise RuntimeError("Ajoute uniquement des clips vidéo pour créer une narration vidéo.")
@@ -846,6 +885,7 @@ def render_video_narration(project_id):
             clips = []
             total_voice_duration = 0.0
             for index, scene in enumerate(scenes, start=1):
+                check_job_cancellation(project_id)
                 project.status_message = f"Narration vidéo · scène {index}/{len(scenes)}"
                 project.current_segment = index
                 project.progress_percent = 5 + round(85 * (index - 1) / len(scenes))
@@ -869,7 +909,7 @@ def render_video_narration(project_id):
                     ffmpeg, source, voice_path, clip, width, height,
                     video_duration, voice_duration, subtitle_file,
                 )
-                _run_ffmpeg(command, folder, f"narration vidéo de la scène {index}")
+                _run_ffmpeg(command, folder, f"narration vidéo de la scène {index}", cancel_check=cancel_check)
                 if not clip.is_file() or clip.stat().st_size < 1000:
                     raise RuntimeError(f"FFmpeg n’a pas produit la vidéo narrée de la scène {index}.")
                 clips.append(clip)
@@ -883,10 +923,11 @@ def render_video_narration(project_id):
             _run_ffmpeg(
                 [ffmpeg, "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(concat_list),
                  "-c", "copy", "-movflags", "+faststart", str(output)],
-                folder, "assemblage de la narration vidéo",
+                folder, "assemblage de la narration vidéo", cancel_check=cancel_check,
             )
             if not output.is_file() or output.stat().st_size < 1000:
                 raise RuntimeError("FFmpeg n’a pas produit de fichier MP4 valide.")
+            check_job_cancellation(project_id)
             project.refresh_from_db()
             if project.video_file:
                 project.video_file.delete(save=False)
@@ -904,6 +945,8 @@ def render_video_narration(project_id):
                 "video_file", "duration_seconds", "status", "status_message", "error_message",
                 "progress_percent", "current_segment", "total_segments", "finished_at", "updated_at",
             ])
+    except JobCancelled:
+        mark_job_cancelled(project_id)
     except Exception as exc:
         NarrationProject.objects.filter(pk=project_id).update(
             status=NarrationProject.Status.ERROR,
@@ -920,6 +963,8 @@ def render_project_video(project_id):
     close_old_connections()
     try:
         project = NarrationProject.objects.get(pk=project_id)
+        cancel_check = cancellation_checker(project_id)
+        check_job_cancellation(project_id)
         scenes = list(project.segments.order_by("position", "id"))
         if not scenes or any(not scene.image for scene in scenes):
             raise RuntimeError("Ajoute une image à chaque scène avant de générer la vidéo.")
@@ -932,6 +977,7 @@ def render_project_video(project_id):
             folder = Path(temp)
             clips = []
             for index, scene in enumerate(scenes, start=1):
+                check_job_cancellation(project_id)
                 project.status_message = f"Rendu vidéo · scène {index}/{len(scenes)}"
                 project.current_segment = index
                 project.progress_percent = 5 + round(85 * (index - 1) / len(scenes))
@@ -955,6 +1001,7 @@ def render_project_video(project_id):
                     _render_parallax_clip(
                         ffmpeg, scene.image.path, scene.audio.path, clip, subtitle_file,
                         width, height, duration, folder, animation_settings=animation_settings,
+                        cancel_check=cancel_check,
                     )
                 else:
                     filters = _animation_filter_chain(animation_settings, width, height, duration, subtitle_file)
@@ -965,7 +1012,7 @@ def render_project_video(project_id):
                         "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k", "-ar", "48000",
                         "-ac", "2", "-shortest", str(clip),
                     ]
-                    _run_ffmpeg(command, folder, f"rendu de la scène {index}")
+                    _run_ffmpeg(command, folder, f"rendu de la scène {index}", cancel_check=cancel_check)
                 if not clip.is_file() or clip.stat().st_size < 1000:
                     raise RuntimeError(f"FFmpeg n’a pas produit la vidéo de la scène {index}.")
                 clips.append(clip)
@@ -979,10 +1026,11 @@ def render_project_video(project_id):
             _run_ffmpeg(
                 [ffmpeg, "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(concat_list),
                  "-c", "copy", "-movflags", "+faststart", str(output)],
-                folder, "assemblage des scènes",
+                folder, "assemblage des scènes", cancel_check=cancel_check,
             )
             if not output.is_file() or output.stat().st_size < 1000:
                 raise RuntimeError("FFmpeg n’a pas produit de fichier MP4 valide.")
+            check_job_cancellation(project_id)
             project.refresh_from_db()
             if project.video_file:
                 project.video_file.delete(save=False)
@@ -998,6 +1046,8 @@ def render_project_video(project_id):
                 "video_file", "status", "status_message", "error_message", "progress_percent",
                 "current_segment", "finished_at", "updated_at",
             ])
+    except JobCancelled:
+        mark_job_cancelled(project_id)
     except Exception as exc:
         NarrationProject.objects.filter(pk=project_id).update(
             status=NarrationProject.Status.ERROR,

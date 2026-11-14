@@ -93,8 +93,23 @@
 </style>
 <section class="premium-editor">
   <div class="editor-toolbar">
-    <div class="editor-context"><strong>Éditeur de narration</strong><span>Prépare tes scènes, choisis une voix et lance le rendu.</span></div>
-    <span class="editor-chip"><i aria-hidden="true"></i> Projet · {{ project.get_status_display }}</span>
+    <div class="editor-context">
+      <strong>{{ project.title }}</strong>
+      <span>Prépare tes scènes, choisis une voix et lance le rendu.</span>
+      <form method="post" action="{% url 'rename_project' project.id %}" class="editor-project-title-form">
+        {% csrf_token %}
+        <label class="sr-only" for="projectTitle">Nom du projet</label>
+        <input id="projectTitle" name="title" value="{{ project.title }}" maxlength="120" required>
+        <button class="editor-button" type="submit">Renommer</button>
+      </form>
+    </div>
+    <div class="editor-toolbar-actions">
+      <span class="editor-chip"><i aria-hidden="true"></i> Projet · {{ project.get_status_display }}</span>
+      <form method="post" action="{% url 'delete_project' project.id %}" onsubmit="return confirm('Supprimer définitivement le projet « {{ project.title|escapejs }} » ?')">
+        {% csrf_token %}
+        <button class="editor-button danger" type="submit" {% if project.status == 'processing' %}disabled title="Annule d’abord le traitement en cours"{% endif %}>Supprimer le projet</button>
+      </form>
+    </div>
   </div>
 
   <section class="premium-card" aria-labelledby="importTitle">
@@ -282,6 +297,14 @@
           </div>
           <div class="job-status {% if project.status == 'error' %}error{% elif project.status == 'ready' %}success{% endif %}" id="jobStatus" aria-live="polite">
             {% if project.status == 'ready' %}{{ project.status_message|default:"Export prêt." }}{% elif project.status == 'processing' or project.status == 'queued' %}{{ project.status_message }}{% elif project.status == 'error' %}{{ project.error_message }}{% else %}Le traitement démarre après validation.{% endif %}
+          </div>
+          <div class="cancel-job-row" id="cancelJobContainer" {% if project.status != 'queued' and project.status != 'processing' %}hidden{% endif %}>
+            <form method="post" action="{% url 'cancel_job' project.id %}" id="cancelJobForm">
+              {% csrf_token %}
+              <button class="editor-button danger" type="submit" id="cancelJobButton" {% if project.cancel_requested %}disabled{% endif %}>
+                {% if project.cancel_requested %}Annulation demandée…{% else %}Annuler le traitement{% endif %}
+              </button>
+            </form>
           </div>
           <progress id="jobProgress" max="100" value="{{ project.progress_percent }}" {% if project.status != 'processing' %}hidden{% endif %}></progress>
           <div id="progressDetails" class="progress-details" {% if project.status != 'processing' %}hidden{% endif %}>

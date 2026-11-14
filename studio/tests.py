@@ -360,7 +360,7 @@ class VideoSceneTests(MediaTestCase):
         self.assertEqual(project.status, NarrationProject.Status.QUEUED)
 
     @patch("studio.video_services._ffmpeg_path", return_value="ffmpeg")
-    @patch("studio.video_services.subprocess.run")
+    @patch("studio.video_services.subprocess.Popen")
     def test_video_export_assembles_scene_and_caption(self, run_ffmpeg, _ffmpeg):
         from .video_services import render_project_video
 
@@ -377,7 +377,11 @@ class VideoSceneTests(MediaTestCase):
 
         def make_output(command, **_kwargs):
             Path(command[-1]).write_bytes(b"x" * 2048)
-            return types.SimpleNamespace(returncode=0, stderr="")
+            return types.SimpleNamespace(
+                returncode=0,
+                communicate=Mock(return_value=("", "")),
+                poll=Mock(return_value=0),
+            )
 
         run_ffmpeg.side_effect = make_output
         render_project_video(project.pk)
@@ -713,3 +717,93 @@ class VideoNarrationModeTests(MediaTestCase):
                     Command().handle(once=True, poll_seconds=0.25)
         prepare.assert_called_once_with(project.pk)
         render.assert_called_once_with(project.pk)
+
+
+class ProjectLifecycleAndNamingTests(MediaTestCase):
+    def test_create_project_uses_supplied_title_or_generated_date_title(self):
+        response = self.client.post("/projects/create/", {"title": "  Ma nouvelle vidéo  "})
+        self.assertEqual(response.status_code, 302)
+        named = NarrationProject.objects.get()
+        self.assertEqual(named.title, "Ma nouvelle vidéo")
+
+        response = self.client.post("/projects/create/", {"title": "   "})
+        self.assertEqual(response.status_code, 302)
+        generated = NarrationProject.objects.exclude(pk=named.pk).get()
+        self.assertRegex(generated.title, r"^Projet du \d{2}/\d{2}/\d{4} à \d{2}h\d{2}$")
+
+    def test_project_can_be_renamed_and_home_displays_the_saved_title(self):
+        project = NarrationProject.objects.create(title="Avant")
+        response = self.client.post(f"/projects/{project.pk}/rename/", {"title": "Après le montage"})
+        self.assertEqual(response.status_code, 302)
+        project.refresh_from_db()
+        self.assertEqual(project.title, "Après le montage")
+        self.assertContains(self.client.get("/"), "Après le montage")
+
+
+    def test_ffmpeg_process_is_terminated_when_cancellation_is_requested(self):
+        import subprocess
+        from .job_control import JobCancelled
+        from .video_services import _run_ffmpeg_once
+
+        process = Mock()
+        process.poll.return_value = None
+        process.communicate.side_effect = [subprocess.TimeoutExpired("ffmpeg", 0.5), ("", "")]
+        cancel_check = Mock(side_effect=[False, True])
+
+        with patch("studio.video_services.subprocess.Popen", return_value=process):
+            with self.assertRaises(JobCancelled):
+                _run_ffmpeg_once(["ffmpeg", "-i", "input.mp4"], Path(self.media_dir.name),
+                                 "test cancellation", cancel_check=cancel_check)
+
+        process.terminate.assert_called_once()
+        self.assertFalse(process.kill.called)
+
+    def test_queued_job_is_cancelled_and_returns_to_draft_immediately(self):
+        project = NarrationProject.objects.create(
+            title="À annuler",
+            status=NarrationProject.Status.QUEUED,
+            queued_at=timezone.now(),
+            cancel_requested=True,
+        )
+
+        response = self.client.post(f"/projects/{project.pk}/cancel/")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload["cancel_requested"])
+        project.refresh_from_db()
+        self.assertEqual(project.status, NarrationProject.Status.DRAFT)
+        self.assertIsNone(project.queued_at)
+        self.assertFalse(project.cancel_requested)
+
+    def test_processing_cancellation_is_honored_by_worker_and_returns_to_draft(self):
+        from .services import prepare_project
+
+        voice = self.make_voice()
+        project = NarrationProject.objects.create(
+            title="En cours",
+            voice=voice,
+            status=NarrationProject.Status.PROCESSING,
+        )
+        NarrationSegment.objects.create(project=project, position=0, text="Texte à annuler.")
+
+        response = self.client.post(f"/projects/{project.pk}/cancel/")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["cancel_requested"])
+        project.refresh_from_db()
+        self.assertTrue(project.cancel_requested)
+
+        prepare_project(project.pk)
+
+        project.refresh_from_db()
+        self.assertEqual(project.status, NarrationProject.Status.DRAFT)
+        self.assertFalse(project.cancel_requested)
+        self.assertEqual(project.status_message, "Traitement annulé proprement.")
+
+    def test_delete_project_route_is_post_only_and_removes_project(self):
+        project = NarrationProject.objects.create(title="Projet de test")
+        response = self.client.get(f"/projects/{project.pk}/delete/")
+        self.assertEqual(response.status_code, 405)
+
+        response = self.client.post(f"/projects/{project.pk}/delete/")
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(NarrationProject.objects.filter(pk=project.pk).exists())

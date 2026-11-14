@@ -96,6 +96,7 @@ class NarrationProject(models.Model):
     voice = models.ForeignKey(Voice, null=True, blank=True, on_delete=models.SET_NULL, related_name="projects")
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.DRAFT)
     queued_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    cancel_requested = models.BooleanField(default=False)
     job_type = models.CharField(max_length=16, choices=JobType.choices, default=JobType.AUDIO)
     video_format = models.CharField(max_length=5, choices=VideoFormat.choices, default=VideoFormat.VERTICAL)
     subtitles_enabled = models.BooleanField(default=True)

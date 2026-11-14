@@ -160,3 +160,25 @@
   .home-create-project-fields { grid-template-columns:1fr; }
   .home-create-project-fields .home-button { width:100%; }
 }
+
+
+.home-project-actions { display:flex; align-items:stretch; gap:8px; margin-top:auto; }
+.home-project-actions .home-project-open { flex:1; margin-top:0; }
+.home-project-actions form { display:flex; }
+.home-project-delete { padding:0 10px; border:1px solid #483035; border-radius:8px; color:#E9A5A0; background:#211719; font-size:9px; font-weight:700; cursor:pointer; }
+.home-project-delete:hover:not(:disabled) { border-color:#8D4444; background:#301B1D; }
+.home-project-delete:disabled { opacity:.45; cursor:not-allowed; }
+.editor-toolbar-actions { display:flex; align-items:center; gap:9px; }
+.editor-toolbar-actions form { margin:0; }
+.editor-project-title-form { display:flex; align-items:center; gap:7px; margin-top:9px; }
+.editor-project-title-form input { width:min(320px,48vw); min-height:34px; padding:0 10px; border:1px solid #303948; border-radius:8px; color:#E9EDF4; background:#11161F; font:inherit; font-size:11px; }
+.editor-button.danger { border-color:#603337; color:#F0AAA3; background:#2A1B1B; }
+.editor-button.danger:hover:not(:disabled) { border-color:#9A4B4B; background:#3A2021; }
+.editor-button.danger:disabled { opacity:.45; cursor:not-allowed; }
+.cancel-job-row { display:flex; justify-content:flex-end; margin:8px 0; }
+.cancel-job-row form { margin:0; }
+@media(max-width:620px) {
+  .editor-toolbar-actions { align-items:flex-start; flex-direction:column; }
+  .editor-project-title-form { align-items:stretch; }
+  .editor-project-title-form input { width:100%; }
+}

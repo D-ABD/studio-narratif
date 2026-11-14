@@ -351,7 +351,9 @@ def delete_voice(request, voice_id):
 
 @require_POST
 def create_project(request):
-    title = (request.POST.get("title") or "Nouvelle narration").strip()[:120] or "Nouvelle narration"
+    title = (request.POST.get("title") or "").strip()[:120]
+    if not title:
+        title = timezone.localtime().strftime("Projet du %d/%m/%Y à %Hh%M")
     project = NarrationProject.objects.create(title=title)
     NarrationSegment.objects.create(project=project, position=0)
     return redirect("project_detail", project_id=project.pk)
@@ -562,6 +564,7 @@ def assemble_videos(request, project_id):
     project.status = NarrationProject.Status.QUEUED
     project.queued_at = timezone.now()
     project.job_type = NarrationProject.JobType.ASSEMBLY
+    project.cancel_requested = False
     project.status_message = "Assemblage vidéo ajouté à la file d’attente."
     project.error_message = ""
     project.progress_percent = 0
@@ -570,7 +573,7 @@ def assemble_videos(request, project_id):
     project.started_at = None
     project.finished_at = None
     project.save(update_fields=[
-        "status", "queued_at", "job_type", "status_message", "error_message", "progress_percent",
+        "status", "queued_at", "job_type", "cancel_requested", "status_message", "error_message", "progress_percent",
         "current_segment", "total_segments", "started_at", "finished_at", "updated_at",
     ])
     return JsonResponse({"ok": True, "status_url": f"/projects/{project.pk}/status/"})
@@ -718,18 +721,76 @@ def reorder_segments(request, project_id):
 
 @require_POST
 def delete_project(request, project_id):
-    project = get_object_or_404(NarrationProject, pk=project_id)
-    if project.status == NarrationProject.Status.PROCESSING:
-        messages.error(request, "Attends la fin du traitement avant de supprimer le projet.")
-        return redirect("project_detail", project_id=project.pk)
-    files = [project.full_audio, project.subtitles, project.video_file]
-    files += [file for segment in project.segments.all() for file in (segment.audio, segment.image, segment.video_clip)]
-    project.delete()
-    for file in files:
-        if file:
-            file.delete(save=False)
+    with transaction.atomic():
+        project = get_object_or_404(
+            NarrationProject.objects.select_for_update(), pk=project_id,
+        )
+        if project.status == NarrationProject.Status.PROCESSING:
+            messages.error(request, "Annule le traitement et attends son arrêt avant de supprimer le projet.")
+            return redirect("project_detail", project_id=project.pk)
+        files = [project.full_audio, project.subtitles, project.video_file]
+        files += [
+            file for segment in project.segments.all()
+            for file in (segment.audio, segment.image, segment.video_clip)
+        ]
+        storage_files = [(file.storage, file.name) for file in files if file and file.name]
+        project.delete()
+        _schedule_storage_cleanup(storage_files)
     messages.success(request, "Le projet a été supprimé.")
     return redirect("home")
+
+
+@require_POST
+def cancel_job(request, project_id):
+    with transaction.atomic():
+        project = get_object_or_404(
+            NarrationProject.objects.select_for_update(), pk=project_id,
+        )
+        if project.status == NarrationProject.Status.QUEUED:
+            project.status = NarrationProject.Status.DRAFT
+            project.cancel_requested = False
+            project.queued_at = None
+            project.started_at = None
+            project.finished_at = timezone.now()
+            project.progress_percent = 0
+            project.current_segment = 0
+            project.total_segments = 0
+            project.status_message = "Traitement annulé avant son démarrage."
+            project.error_message = ""
+            project.save(update_fields=[
+                "status", "cancel_requested", "queued_at", "started_at", "finished_at",
+                "progress_percent", "current_segment", "total_segments", "status_message",
+                "error_message", "updated_at",
+            ])
+            return JsonResponse({
+                "ok": True, "status": project.status, "cancel_requested": False,
+                "message": project.status_message,
+            })
+        if project.status == NarrationProject.Status.PROCESSING:
+            if not project.cancel_requested:
+                project.cancel_requested = True
+                project.status_message = "Annulation demandée. Arrêt propre du traitement en cours…"
+                project.save(update_fields=["cancel_requested", "status_message", "updated_at"])
+            return JsonResponse({
+                "ok": True, "status": project.status, "cancel_requested": True,
+                "message": project.status_message,
+            })
+        return JsonResponse({
+            "ok": False, "error": "Ce projet n’a pas de traitement actif à annuler.",
+        }, status=409)
+
+
+@require_POST
+def rename_project(request, project_id):
+    project = get_object_or_404(NarrationProject, pk=project_id)
+    title = (request.POST.get("title") or "").strip()[:120]
+    if not title:
+        messages.error(request, "Le nom du projet ne peut pas être vide.")
+    elif title != project.title:
+        project.title = title
+        project.save(update_fields=["title", "updated_at"])
+        messages.success(request, "Le nom du projet a été mis à jour.")
+    return redirect("project_detail", project_id=project.pk)
 
 
 @require_POST
@@ -765,6 +826,7 @@ def prepare(request, project_id):
     project.status = NarrationProject.Status.QUEUED
     project.queued_at = timezone.now()
     project.job_type = job_type
+    project.cancel_requested = False
     project.status_message = (
         "Narration vidéo ajoutée à la file d’attente."
         if job_type == NarrationProject.JobType.VIDEO_NARRATION
@@ -802,6 +864,7 @@ def project_status(request, project_id):
         "elapsed_seconds": elapsed,
         "queue_position": queue_position,
         "queue_count": queue_count,
+        "cancel_requested": project.cancel_requested,
         "audio_url": project.full_audio.url if project.full_audio else "",
         "subtitles_url": project.subtitles.url if project.subtitles else "",
         "video_url": project.video_file.url if project.video_file else "",

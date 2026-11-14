@@ -262,6 +262,9 @@
   if (!prepareForm && !assembleForm) return;
   const button = document.querySelector('#prepareButton, #assembleButton');
   const status = document.querySelector('#jobStatus');
+  const cancelJobForm = document.querySelector('#cancelJobForm');
+  const cancelJobButton = document.querySelector('#cancelJobButton');
+  const cancelJobContainer = document.querySelector('#cancelJobContainer');
   const progress = document.querySelector('#jobProgress');
   const details = document.querySelector('#progressDetails');
   const currentSegment = document.querySelector('#currentSegment');
@@ -295,6 +298,14 @@
     box.hidden = false;
   };
 
+  const syncCancelControl = data => {
+    if (!cancelJobForm || !cancelJobContainer || !cancelJobButton) return;
+    const active = ['queued', 'processing'].includes(data.status);
+    cancelJobContainer.hidden = !active;
+    cancelJobButton.disabled = !active || Boolean(data.cancel_requested);
+    cancelJobButton.textContent = data.cancel_requested ? 'Annulation demandée…' : 'Annuler le traitement';
+  };
+
   const poll = async () => {
     if (polling) return;
     polling = true;
@@ -302,6 +313,7 @@
       const response = await fetch(`/projects/${projectId}/status/`, {cache: 'no-store'});
       if (!response.ok) throw new Error('État indisponible');
       const data = await response.json();
+      syncCancelControl(data);
       status.textContent = data.error || data.message || 'Traitement en cours…';
       progress.value = Math.max(0, Math.min(100, Number(data.progress) || 0));
       progress.hidden = data.status !== 'processing';
@@ -310,9 +322,11 @@
       elapsedTime.textContent = formatElapsed(data.elapsed_seconds);
       if (data.status === 'queued') {
         status.className = 'job-status';
-        status.textContent = data.queue_position
-          ? `En attente · position ${data.queue_position} sur ${data.queue_count}. Le worker traitera les projets dans l’ordre.`
-          : 'Ajouté à la file. En attente du worker…';
+        status.textContent = data.cancel_requested
+          ? data.message || 'Annulation demandée. Le worker s’arrêtera dès que possible…'
+          : data.queue_position
+            ? `En attente · position ${data.queue_position} sur ${data.queue_count}. Le worker traitera les projets dans l’ordre.`
+            : 'Ajouté à la file. En attente du worker…';
         button.disabled = true;
         progress.hidden = true;
         details.hidden = true;
@@ -369,6 +383,29 @@
       videoOptionsForm.dataset.dirty = 'false';
     }
   };
+
+  cancelJobForm?.addEventListener('submit', async event => {
+    event.preventDefault();
+    cancelJobButton.disabled = true;
+    cancelJobButton.textContent = 'Annulation demandée…';
+    try {
+      const response = await fetch(cancelJobForm.action, {
+        method: 'POST', body: new FormData(cancelJobForm),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Impossible d’annuler le traitement.');
+      syncCancelControl(data);
+      status.className = 'job-status';
+      status.textContent = data.message || 'Annulation demandée…';
+      polling = false;
+      poll();
+    } catch (error) {
+      cancelJobButton.disabled = false;
+      cancelJobButton.textContent = 'Annuler le traitement';
+      status.className = 'job-status error';
+      status.textContent = error.message;
+    }
+  });
 
   const submitJob = async event => {
     event.preventDefault();

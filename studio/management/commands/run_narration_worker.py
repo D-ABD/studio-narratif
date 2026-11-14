@@ -7,6 +7,7 @@ from django.db import close_old_connections, transaction
 from django.utils import timezone
 
 from studio.models import NarrationProject
+from studio.job_control import JobCancelled, mark_job_cancelled
 from studio.services import prepare_project
 from studio.video_services import render_project_video, render_video_assembly, render_video_narration
 
@@ -53,6 +54,8 @@ class Command(BaseCommand):
                     project = NarrationProject.objects.filter(pk=project_id).first()
                     if project and project.status == NarrationProject.Status.PROCESSING:
                         render_project_video(project_id)
+            except JobCancelled:
+                mark_job_cancelled(project_id)
             except Exception as exc:  # prepare_project records errors; protect the worker from unexpected failures.
                 NarrationProject.objects.filter(pk=project_id).update(
                     status=NarrationProject.Status.ERROR,
@@ -69,7 +72,23 @@ class Command(BaseCommand):
 
     def _recover_interrupted_jobs(self):
         now = timezone.now()
-        recovered = NarrationProject.objects.filter(status=NarrationProject.Status.PROCESSING).update(
+        NarrationProject.objects.filter(
+            status=NarrationProject.Status.PROCESSING, cancel_requested=True,
+        ).update(
+            status=NarrationProject.Status.DRAFT,
+            cancel_requested=False,
+            queued_at=None,
+            status_message="Traitement annulé après l’arrêt du worker.",
+            started_at=None,
+            error_message="",
+            progress_percent=0,
+            current_segment=0,
+            total_segments=0,
+            finished_at=now,
+        )
+        recovered = NarrationProject.objects.filter(
+            status=NarrationProject.Status.PROCESSING, cancel_requested=False,
+        ).update(
             status=NarrationProject.Status.QUEUED,
             queued_at=now,
             started_at=None,
@@ -85,14 +104,14 @@ class Command(BaseCommand):
     def _claim_next_job():
         with transaction.atomic():
             project = (NarrationProject.objects
-                       .filter(status=NarrationProject.Status.QUEUED)
+                       .filter(status=NarrationProject.Status.QUEUED, cancel_requested=False)
                        .order_by("queued_at", "id")
                        .first())
             if project is None:
                 return None
             now = timezone.now()
             updated = NarrationProject.objects.filter(
-                pk=project.pk, status=NarrationProject.Status.QUEUED,
+                pk=project.pk, status=NarrationProject.Status.QUEUED, cancel_requested=False,
             ).update(
                 status=NarrationProject.Status.PROCESSING,
                 status_message="Chargement du moteur vocal…",
