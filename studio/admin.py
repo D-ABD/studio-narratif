@@ -1,5 +1,5 @@
 from django.contrib import admin
-from .models import BackgroundTrack, NarrationProject, NarrationSegment, Voice
+from .models import AudioAsset, BackgroundTrack, NarrationProject, NarrationSegment, Voice
 
 
 class NarrationSegmentInline(admin.TabularInline):
@@ -19,6 +19,13 @@ class BackgroundTrackAdmin(admin.ModelAdmin):
     list_display = ("name", "user", "duration", "created_at")
     list_filter = ("created_at",)
     search_fields = ("name", "user__username")
+
+
+@admin.register(AudioAsset)
+class AudioAssetAdmin(admin.ModelAdmin):
+    list_display = ("name", "user", "source", "duration", "project", "created_at")
+    list_filter = ("source", "created_at")
+    search_fields = ("name", "user__username", "text")
 
 
 @admin.register(NarrationProject)

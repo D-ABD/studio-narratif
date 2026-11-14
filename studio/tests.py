@@ -16,7 +16,7 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 from PIL import Image
 
-from .models import BackgroundTrack, NarrationProject, NarrationSegment, Voice
+from .models import AudioAsset, BackgroundTrack, NarrationProject, NarrationSegment, Voice
 from .services import (
     _assemble_wav, _get_speaker_conditioning, _group_words, _prepare_segment, align_audio,
     cache_key_for, srt_text, wav_duration,
@@ -136,6 +136,49 @@ class BackgroundMusicLibraryTests(MediaTestCase):
         self.assertRedirects(response, "/musics/")
         self.assertFalse(BackgroundTrack.objects.exists())
         probe.assert_not_called()
+
+
+class AudioAssetModelTests(MediaTestCase):
+    def test_audio_asset_uses_user_scoped_uuid_path_and_project_defaults_to_xtts(self):
+        project = NarrationProject.objects.create(user=self.user, title="Ancien projet")
+        asset = AudioAsset(user=self.user, name="Narration importée", duration=12.5)
+        asset.audio_file.save("narration.m4a", ContentFile(b"audio data"), save=True)
+
+        self.assertEqual(project.audio_source, NarrationProject.AudioSource.XTTS)
+        self.assertTrue(asset.audio_file.name.startswith(f"audios/user_{self.user.pk}/"))
+        self.assertEqual(Path(asset.audio_file.name).suffix, ".m4a")
+        self.assertEqual(len(Path(asset.audio_file.name).stem), 32)
+
+    def test_audio_asset_cannot_be_deleted_while_a_project_references_it(self):
+        from django.db.models.deletion import ProtectedError
+
+        asset = AudioAsset(user=self.user, name="Narration", duration=12.5)
+        asset.audio_file.save("narration.wav", ContentFile(b"audio data"), save=True)
+        NarrationProject.objects.create(
+            user=self.user, title="Projet protégé", imported_audio=asset,
+            audio_source=NarrationProject.AudioSource.IMPORTED,
+        )
+
+        with self.assertRaises(ProtectedError):
+            asset.delete()
+
+    def test_audio_source_data_migration_sets_every_existing_project_to_xtts(self):
+        from django.apps import apps as django_apps
+        from importlib import import_module
+
+        projects = [
+            NarrationProject.objects.create(user=self.user, title=f"Projet historique {index}")
+            for index in range(3)
+        ]
+        NarrationProject.objects.filter(pk__in=[project.pk for project in projects]).update(audio_source="imported")
+
+        migration = import_module("studio.migrations.0016_audioasset_audio_source")
+        migration.set_existing_projects_to_xtts(django_apps, None)
+
+        self.assertFalse(
+            NarrationProject.objects.filter(pk__in=[project.pk for project in projects])
+            .exclude(audio_source=NarrationProject.AudioSource.XTTS).exists()
+        )
 
 class ProjectViewTests(MediaTestCase):
     @patch("studio.services.hash_file", wraps=services.hash_file)

@@ -85,6 +85,11 @@ def background_track_upload_to(instance, filename):
     return f"musics/user_{instance.user_id}/{uuid.uuid4().hex}{extension}"
 
 
+def audio_asset_upload_to(instance, filename):
+    extension = Path(filename).suffix.lower()
+    return f"audios/user_{instance.user_id}/{uuid.uuid4().hex}{extension}"
+
+
 class BackgroundTrack(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="background_tracks")
     name = models.CharField("nom", max_length=120)
@@ -95,6 +100,33 @@ class BackgroundTrack(models.Model):
 
     class Meta:
         ordering = ["name", "id"]
+
+    def __str__(self):
+        return self.name
+
+
+class AudioAsset(models.Model):
+    class Source(models.TextChoices):
+        UPLOAD = "upload", "Importé"
+        XTTS = "xtts", "Généré par XTTS"
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="audio_assets")
+    name = models.CharField("nom", max_length=160)
+    audio_file = models.FileField("fichier audio", upload_to=audio_asset_upload_to)
+    duration = models.FloatField("durée en secondes", validators=[MinValueValidator(0)])
+    source = models.CharField(max_length=8, choices=Source.choices, default=Source.UPLOAD)
+    text = models.TextField(null=True, blank=True)
+    voice = models.ForeignKey(
+        Voice, null=True, blank=True, on_delete=models.SET_NULL, related_name="audio_assets",
+    )
+    project = models.ForeignKey(
+        "NarrationProject", null=True, blank=True, on_delete=models.SET_NULL, related_name="audio_assets",
+    )
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
 
     def __str__(self):
         return self.name
@@ -119,7 +151,15 @@ class NarrationProject(models.Model):
         ASSEMBLY = "assembly", "Assemblage de clips"
         VIDEO_NARRATION = "video_narration", "Narration vidéo"
 
+    class AudioSource(models.TextChoices):
+        XTTS = "xtts", "Voix générée par XTTS"
+        IMPORTED = "imported", "Audio importé"
+
     title = models.CharField("titre", max_length=120, default="Nouvelle narration")
+    audio_source = models.CharField(max_length=8, choices=AudioSource.choices, default=AudioSource.XTTS)
+    imported_audio = models.ForeignKey(
+        AudioAsset, null=True, blank=True, on_delete=models.PROTECT, related_name="imported_by_projects",
+    )
     voice = models.ForeignKey(Voice, null=True, blank=True, on_delete=models.SET_NULL, related_name="projects")
     background_track = models.ForeignKey(
         BackgroundTrack, null=True, blank=True, on_delete=models.SET_NULL, related_name="projects",
