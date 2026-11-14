@@ -18,8 +18,8 @@ from PIL import Image
 
 from .models import AudioAsset, BackgroundTrack, NarrationProject, NarrationSegment, Voice
 from .services import (
-    _assemble_wav, _get_speaker_conditioning, _group_words, _prepare_segment, align_audio,
-    cache_key_for, srt_text, wav_duration,
+    _assemble_wav, _get_speaker_conditioning, _group_words, _prepare_segment, _scene_timing_map,
+    align_audio, cache_key_for, prepare_imported_audio, srt_text, wav_duration,
 )
 from . import services
 
@@ -989,6 +989,7 @@ class VideoNarrationModeTests(MediaTestCase):
         self.assertEqual(project.job_type, NarrationProject.JobType.VIDEO_NARRATION)
         self.assertEqual(segment.text, "Bonjour, le Shiba arrive.")
 
+
     def test_classic_assembly_still_queues_assembly_job_for_video_clips(self):
         project = NarrationProject.objects.create(user=self.user, title="Assemblage classique")
         self.add_video_segment(project, text="")
@@ -1055,6 +1056,186 @@ class VideoNarrationModeTests(MediaTestCase):
                     Command().handle(once=True, poll_seconds=0.25)
         prepare.assert_called_once_with(project.pk)
         render.assert_called_once_with(project.pk)
+
+
+    def test_worker_routes_imported_audio_around_xtts(self):
+        from .management.commands.run_narration_worker import Command
+
+        asset = AudioAsset(user=self.user, name="Narration importée", duration=8.0)
+        asset.audio_file.save("import.mp3", ContentFile(b"audio"), save=True)
+        project = NarrationProject.objects.create(
+            user=self.user, title="Audio importé worker",
+            audio_source=NarrationProject.AudioSource.IMPORTED,
+            imported_audio=asset,
+            status=NarrationProject.Status.QUEUED,
+            queued_at=timezone.now(),
+            job_type=NarrationProject.JobType.VIDEO,
+        )
+
+        with override_settings(MEDIA_ROOT=Path(self.media_dir.name)):
+            with (
+                patch("studio.management.commands.run_narration_worker.prepare_imported_audio") as prepare_imported,
+                patch("studio.management.commands.run_narration_worker.prepare_project") as prepare_xtts,
+                patch("studio.management.commands.run_narration_worker.render_imported_audio_video") as render,
+            ):
+                Command().handle(once=True, poll_seconds=0.25)
+
+        prepare_imported.assert_called_once_with(project.pk)
+        prepare_xtts.assert_not_called()
+        render.assert_called_once_with(project.pk)
+
+
+class ImportedAudioPipelineTests(MediaTestCase):
+    def make_imported_project(self, *, with_music=False, subtitles_enabled=True):
+        asset = AudioAsset(user=self.user, name="Narration importée", duration=4.0)
+        asset.audio_file.save("narration.mp3", ContentFile(b"imported audio bytes"), save=True)
+        project = NarrationProject.objects.create(
+            user=self.user,
+            title="Projet avec audio importé",
+            audio_source=NarrationProject.AudioSource.IMPORTED,
+            imported_audio=asset,
+            job_type=NarrationProject.JobType.VIDEO,
+            status=NarrationProject.Status.PROCESSING,
+            subtitles_enabled=subtitles_enabled,
+            background_track=self.make_background_track() if with_music else None,
+        )
+        words = [
+            {"word": "Bonjour", "start": 0.2, "end": 0.7},
+            {"word": "le", "start": 0.75, "end": 0.9},
+            {"word": "Shiba", "start": 1.0, "end": 1.5},
+        ]
+        captions = _group_words(words)
+        project.imported_audio_alignment = {
+            "transcript": "Bonjour le Shiba",
+            "captions": captions,
+            "duration": 4.0,
+            "scene_durations": [4.0],
+            "warning": "",
+            "match_ratio": 1.0,
+        }
+        project.imported_audio_cache_key = "f" * 64
+        project.save(update_fields=["imported_audio_alignment", "imported_audio_cache_key"])
+        scene = NarrationSegment.objects.create(project=project, position=0, text="Bonjour le Shiba")
+        scene.video_clip.save("clip.mp4", ContentFile(b"source video"), save=True)
+        return project, asset, scene
+
+    def make_background_track(self):
+        track = BackgroundTrack(user=self.user, name="Musique de fond", duration=15)
+        track.audio_file.save("background.ogg", ContentFile(b"music bytes"), save=True)
+        return track
+
+    def test_imported_alignment_maps_words_to_scenes_and_warns_on_mismatch(self):
+        first = NarrationSegment(position=0, text="Bonjour à tous")
+        second = NarrationSegment(position=1, text="Bienvenue chez nous")
+        words = [
+            {"word": "Bonjour", "start": 0.2, "end": 0.7},
+            {"word": "à", "start": 0.8, "end": 0.9},
+            {"word": "tous", "start": 1.0, "end": 1.4},
+            {"word": "Bienvenue", "start": 2.0, "end": 2.6},
+            {"word": "chez", "start": 2.7, "end": 2.9},
+            {"word": "nous", "start": 3.0, "end": 3.4},
+        ]
+
+        durations, warning, ratio = _scene_timing_map([first, second], words, 4.0)
+
+        self.assertAlmostEqual(sum(durations), 4.0, places=3)
+        self.assertEqual(warning, "")
+        self.assertEqual(ratio, 1.0)
+        _, mismatch_warning, mismatch_ratio = _scene_timing_map(
+            [first, second], [{"word": "Bonjour", "start": 0.2, "end": 0.7}], 4.0,
+        )
+        self.assertTrue(mismatch_warning)
+        self.assertLess(mismatch_ratio, 0.85)
+
+    @patch("studio.services.transcribe_imported_audio")
+    def test_imported_audio_alignment_is_cached_independently_of_music(self, transcribe):
+        asset = AudioAsset(user=self.user, name="Narration", duration=3.0)
+        asset.audio_file.save("narration.wav", ContentFile(b"audio asset bytes"), save=True)
+        project = NarrationProject.objects.create(
+            user=self.user, title="Audio en cache",
+            audio_source=NarrationProject.AudioSource.IMPORTED, imported_audio=asset,
+        )
+        segment = NarrationSegment.objects.create(project=project, position=0, text="Bonjour le Shiba")
+        segment.audio.save("cached-xtts.wav", ContentFile(b"existing xtts cache"), save=True)
+        segment.cache_key = "xtts-cache-key"
+        segment.subtitle_data = [{"start": 0.0, "end": 1.0, "text": "ancien sous-titre"}]
+        segment.save(update_fields=["cache_key", "subtitle_data"])
+        words = [
+            {"word": "Bonjour", "start": 0.1, "end": 0.5},
+            {"word": "le", "start": 0.6, "end": 0.7},
+            {"word": "Shiba", "start": 0.8, "end": 1.2},
+        ]
+        transcribe.return_value = ("Bonjour le Shiba", _group_words(words), 2.0)
+
+        prepare_imported_audio(project.pk)
+        project.refresh_from_db()
+        segment.refresh_from_db()
+        self.assertRegex(project.imported_audio_cache_key, r"^[0-9a-f]{64}$")
+        self.assertTrue(project.imported_audio_alignment["captions"])
+        self.assertTrue(segment.audio.name)
+        self.assertEqual(segment.cache_key, "xtts-cache-key")
+        self.assertEqual(segment.subtitle_data[0]["text"], "ancien sous-titre")
+        cached_key = project.imported_audio_cache_key
+        track = self.make_background_track()
+        project.background_track = track
+        project.save(update_fields=["background_track", "updated_at"])
+
+        with patch("studio.services.transcribe_imported_audio", side_effect=AssertionError("Ne doit pas retraiter l’audio")) as transcribe_again:
+            prepare_imported_audio(project.pk)
+
+        transcribe_again.assert_not_called()
+        project.refresh_from_db()
+        self.assertEqual(project.imported_audio_cache_key, cached_key)
+
+    @patch("studio.video_services._probe_clip", return_value={"duration": 3.0})
+    @patch("studio.video_services._ffmpeg_path", return_value="ffmpeg")
+    @patch("studio.video_services._run_ffmpeg")
+    def test_imported_audio_renders_global_subtitles_without_music(self, run_ffmpeg, _ffmpeg, _probe):
+        from .video_services import render_imported_audio_video
+
+        project, _asset, _scene = self.make_imported_project(subtitles_enabled=True)
+
+        def fake_ffmpeg(command, cwd, operation, cancel_check=None):
+            Path(command[-1]).write_bytes(b"x" * 2048)
+
+        run_ffmpeg.side_effect = fake_ffmpeg
+        render_imported_audio_video(project.pk)
+
+        project.refresh_from_db()
+        self.assertEqual(project.status, NarrationProject.Status.READY)
+        self.assertTrue(project.video_file)
+        final_command = run_ffmpeg.call_args_list[-1].args[0]
+        self.assertIn("subtitles=filename=project.ass", final_command[final_command.index("-vf") + 1])
+
+    @patch("studio.video_services.mix_music_with_video")
+    @patch("studio.video_services._probe_clip", return_value={"duration": 3.0})
+    @patch("studio.video_services._ffmpeg_path", return_value="ffmpeg")
+    @patch("studio.video_services._run_ffmpeg")
+    def test_imported_audio_renders_with_music_and_preserves_video_copy(
+        self, run_ffmpeg, _ffmpeg, _probe, mix_music,
+    ):
+        from .video_services import render_imported_audio_video
+
+        project, _asset, _scene = self.make_imported_project(with_music=True, subtitles_enabled=False)
+
+        def fake_ffmpeg(command, cwd, operation, cancel_check=None):
+            Path(command[-1]).write_bytes(b"x" * 2048)
+
+        def fake_mix(video_path, music_path, volume, duration, output_path, cancel_check=None):
+            output_path.write_bytes(b"mixed" * 512)
+            return output_path
+
+        run_ffmpeg.side_effect = fake_ffmpeg
+        mix_music.side_effect = fake_mix
+        render_imported_audio_video(project.pk)
+
+        project.refresh_from_db()
+        self.assertEqual(project.status, NarrationProject.Status.READY)
+        self.assertTrue(project.video_file)
+        final_command = run_ffmpeg.call_args_list[-1].args[0]
+        self.assertIn("-c:v", final_command)
+        self.assertEqual(final_command[final_command.index("-c:v") + 1], "copy")
+        mix_music.assert_called_once()
 
 
 class ProjectLifecycleAndNamingTests(MediaTestCase):

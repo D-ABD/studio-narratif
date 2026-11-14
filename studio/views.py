@@ -1132,7 +1132,13 @@ def project_status(request, project_id):
         "queue_position": queue_position,
         "queue_count": queue_count,
         "cancel_requested": project.cancel_requested,
-        "audio_url": project.full_audio.url if project.full_audio else "",
+        "audio_url": (
+            project.imported_audio.audio_file.url
+            if project.audio_source == NarrationProject.AudioSource.IMPORTED
+            and project.imported_audio and project.imported_audio.audio_file
+            else project.full_audio.url if project.full_audio else ""
+        ),
+        "audio_warning": project.audio_warning,
         "subtitles_url": project.subtitles.url if project.subtitles else "",
         "video_url": project.video_file.url if project.video_file else "",
     })

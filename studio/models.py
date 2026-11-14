@@ -160,6 +160,9 @@ class NarrationProject(models.Model):
     imported_audio = models.ForeignKey(
         AudioAsset, null=True, blank=True, on_delete=models.PROTECT, related_name="imported_by_projects",
     )
+    imported_audio_cache_key = models.CharField(max_length=64, blank=True)
+    imported_audio_alignment = models.JSONField(default=dict, blank=True)
+    audio_warning = models.TextField(blank=True)
     voice = models.ForeignKey(Voice, null=True, blank=True, on_delete=models.SET_NULL, related_name="projects")
     background_track = models.ForeignKey(
         BackgroundTrack, null=True, blank=True, on_delete=models.SET_NULL, related_name="projects",

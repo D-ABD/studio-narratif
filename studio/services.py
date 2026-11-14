@@ -4,13 +4,16 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
 import threading
 import time
+import unicodedata
 import wave
 from collections import OrderedDict
+from difflib import SequenceMatcher
 
 from django.conf import settings
 from django.core.files import File
@@ -33,6 +36,8 @@ _ALIGNMENT_MODEL = None
 _ALIGNMENT_METADATA = None
 _ALIGNMENT_DEVICE = None
 _ALIGNMENT_BACKEND = None
+_ASR_MODEL = None
+_ASR_MODEL_LOCK = threading.Lock()
 _SPEAKER_CONDITIONING_CACHE = OrderedDict()
 _SPEAKER_CONDITIONING_LOCK = threading.Lock()
 _SPEAKER_CONDITIONING_CACHE_LIMIT = 8
@@ -241,6 +246,228 @@ def align_audio(audio_path, narration_text):
     if not captions:
         raise RuntimeError("WhisperX n’a renvoyé aucun mot aligné. Le texte et l’audio n’ont pas été exportés.")
     return captions
+
+
+def _normalize_word(value):
+    normalized = unicodedata.normalize("NFKD", str(value).casefold())
+    normalized = "".join(char for char in normalized if not unicodedata.combining(char))
+    return re.sub(r"[^a-z0-9']+", "", normalized)
+
+
+def captions_to_words(captions):
+    """Flatten grouped WhisperX captions back into their word timings."""
+    return [word for caption in captions for word in caption.get("words", [])]
+
+
+def _scene_timing_map(scenes, words, duration):
+    """Map recognized words to scene scripts and derive a complete visual timeline."""
+    if duration < max(0.1, len(scenes) * 0.1):
+        raise RuntimeError("L’audio importé est trop court pour attribuer une durée à chaque scène.")
+    expected = []
+    for scene_index, scene in enumerate(scenes):
+        for token in str(scene.text).split():
+            normalized = _normalize_word(token)
+            if normalized:
+                expected.append((normalized, scene_index))
+    recognized_tokens = [_normalize_word(word.get("word", "")) for word in words]
+    expected_tokens = [token for token, _scene_index in expected]
+    matches = SequenceMatcher(a=expected_tokens, b=recognized_tokens, autojunk=False).get_matching_blocks()
+    matched_count = sum(block.size for block in matches)
+    match_ratio = matched_count / max(1, len(expected_tokens), len(recognized_tokens))
+
+    scene_ranges = [None] * len(scenes)
+    for block in matches:
+        for offset in range(block.size):
+            expected_index = block.a + offset
+            recognized_index = block.b + offset
+            scene_index = expected[expected_index][1]
+            word = words[recognized_index]
+            try:
+                start, end = float(word["start"]), float(word["end"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if end <= start:
+                continue
+            current = scene_ranges[scene_index]
+            if current is None:
+                scene_ranges[scene_index] = [start, end]
+            else:
+                current[0] = min(current[0], start)
+                current[1] = max(current[1], end)
+
+    total_expected = max(1, len(expected_tokens))
+    fallback_boundaries = [0.0]
+    cumulative = 0
+    for scene in scenes[:-1]:
+        cumulative += max(1, sum(1 for token in str(scene.text).split() if _normalize_word(token)))
+        fallback_boundaries.append(duration * cumulative / total_expected)
+    fallback_boundaries.append(duration)
+
+    boundaries = [0.0]
+    for boundary_index in range(1, len(scenes)):
+        left_range = scene_ranges[boundary_index - 1]
+        right_range = scene_ranges[boundary_index]
+        if left_range and right_range:
+            proposed = (left_range[1] + right_range[0]) / 2
+        elif left_range:
+            proposed = max(left_range[1], fallback_boundaries[boundary_index])
+        elif right_range:
+            proposed = min(right_range[0], fallback_boundaries[boundary_index])
+        else:
+            proposed = fallback_boundaries[boundary_index]
+        lower = boundaries[-1] + 0.1
+        upper = duration - (len(scenes) - boundary_index) * 0.1
+        boundaries.append(min(max(proposed, lower), upper))
+    boundaries.append(duration)
+    scene_durations = [round(boundaries[index + 1] - boundaries[index], 3) for index in range(len(scenes))]
+
+    warning = ""
+    if match_ratio < 0.85:
+        warning = (
+            f"La transcription audio diffère du texte des scènes "
+            f"(correspondance estimée : {round(match_ratio * 100)} %). "
+            "Les sous-titres suivent l’audio ; le découpage des scènes peut être approximatif."
+        )
+    return scene_durations, warning, round(match_ratio, 4)
+
+
+def transcribe_imported_audio(audio_path):
+    """Transcribe and word-align an uploaded project audio file with WhisperX."""
+    try:
+        import torch
+        import whisperx
+    except ImportError as exc:
+        raise RuntimeError("WhisperX n’est pas installé. Installe les dépendances de requirements-ai.txt.") from exc
+
+    global _ASR_MODEL
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    with _ASR_MODEL_LOCK:
+        if _ASR_MODEL is None:
+            compute_type = "float16" if device == "cuda" else "int8"
+            _ASR_MODEL = whisperx.load_model("small", device=device, compute_type=compute_type)
+        asr_model = _ASR_MODEL
+
+    audio = whisperx.load_audio(str(audio_path))
+    duration = len(audio) / 16000.0
+    try:
+        transcription = asr_model.transcribe(audio, batch_size=4, language=LANGUAGE_CODE)
+        transcript_segments = transcription.get("segments", [])
+        transcript = " ".join(str(item.get("text", "")).strip() for item in transcript_segments).strip()
+        if not transcript_segments or not transcript:
+            raise RuntimeError("WhisperX n’a reconnu aucune parole dans le fichier audio importé.")
+
+        global _ALIGNMENT_MODEL, _ALIGNMENT_METADATA, _ALIGNMENT_DEVICE, _ALIGNMENT_BACKEND
+        with _ALIGN_LOCK:
+            if _ALIGNMENT_MODEL is None or _ALIGNMENT_DEVICE != device or _ALIGNMENT_BACKEND is not whisperx:
+                _ALIGNMENT_MODEL, _ALIGNMENT_METADATA = whisperx.load_align_model(
+                    language_code=LANGUAGE_CODE, device=device,
+                )
+                _ALIGNMENT_DEVICE = device
+                _ALIGNMENT_BACKEND = whisperx
+            aligned = whisperx.align(
+                transcript_segments, _ALIGNMENT_MODEL, _ALIGNMENT_METADATA,
+                audio, device, return_char_alignments=False,
+            )
+        words = [
+            {"word": item.get("word", ""), "start": item.get("start"), "end": item.get("end")}
+            for item in aligned.get("word_segments", [])
+        ]
+        captions = _group_words(words)
+    except Exception as exc:
+        if isinstance(exc, RuntimeError) and str(exc).startswith("WhisperX n’a reconnu"):
+            raise
+        raise RuntimeError(f"WhisperX n’a pas pu transcrire et aligner l’audio importé : {exc}") from exc
+    if not captions:
+        raise RuntimeError("WhisperX n’a renvoyé aucun mot aligné pour l’audio importé.")
+    return transcript, captions, duration
+
+
+def _imported_audio_cache_key(audio_path, scenes):
+    text_payload = json.dumps(
+        [{"id": scene.pk, "text": scene.text.strip()} for scene in scenes],
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    )
+    text_digest = hashlib.sha256(text_payload.encode("utf-8")).hexdigest()
+    source_digest = hash_file(audio_path)
+    return hashlib.sha256(f"imported-audio-v1:{source_digest}:{text_digest}".encode("ascii")).hexdigest()
+
+
+def _srt_from_captions(captions):
+    blocks = []
+    for sequence, caption in enumerate(captions, start=1):
+        start, end = float(caption["start"]), float(caption["end"])
+        if end > start:
+            blocks.append(f"{sequence}\n{_timestamp(start)} --> {_timestamp(end)}\n{caption['text']}\n")
+    return "\n".join(blocks)
+
+
+def prepare_imported_audio(project_id):
+    """Cache WhisperX alignment for an uploaded track without touching XTTS segment audio."""
+    close_old_connections()
+    try:
+        check_job_cancellation(project_id)
+        project = NarrationProject.objects.select_related("imported_audio").get(pk=project_id)
+        scenes = list(project.segments.order_by("position", "id"))
+        asset = project.imported_audio
+        if project.audio_source != NarrationProject.AudioSource.IMPORTED or not asset:
+            raise RuntimeError("Choisis un fichier audio importé avant de lancer le rendu.")
+        if asset.user_id != project.user_id:
+            raise RuntimeError("Le fichier audio importé n’appartient pas au propriétaire du projet.")
+        if not scenes or any(not scene.text.strip() for scene in scenes):
+            raise RuntimeError("Ajoute un texte à chaque scène pour synchroniser l’audio importé.")
+        if not asset.audio_file or not Path(asset.audio_file.path).is_file():
+            raise RuntimeError("Le fichier audio importé est introuvable. Importe-le à nouveau.")
+
+        cache_key = _imported_audio_cache_key(asset.audio_file.path, scenes)
+        cache = project.imported_audio_alignment if project.imported_audio_cache_key == cache_key else {}
+        if not cache.get("captions") or len(cache.get("scene_durations", [])) != len(scenes):
+            project.status_message = "Transcription et alignement WhisperX de l’audio importé…"
+            project.save(update_fields=["status_message", "updated_at"])
+            transcript, captions, duration = transcribe_imported_audio(asset.audio_file.path)
+            check_job_cancellation(project_id)
+            scene_durations, warning, match_ratio = _scene_timing_map(
+                scenes, captions_to_words(captions), duration,
+            )
+            cache = {
+                "transcript": transcript,
+                "captions": captions,
+                "duration": duration,
+                "scene_durations": scene_durations,
+                "warning": warning,
+                "match_ratio": match_ratio,
+            }
+
+        project.imported_audio_cache_key = cache_key
+        project.imported_audio_alignment = cache
+        project.audio_warning = cache.get("warning", "")
+        project.duration_seconds = float(cache["duration"])
+        if project.subtitles:
+            project.subtitles.delete(save=False)
+        srt_content = _srt_from_captions(cache["captions"])
+        if not srt_content.strip():
+            raise RuntimeError("WhisperX n’a produit aucun sous-titre exploitable pour l’audio importé.")
+        project.subtitles.save(
+            f"imported-audio-{project.pk}.srt", ContentFile(srt_content.encode("utf-8")), save=False,
+        )
+        for scene, duration in zip(scenes, cache["scene_durations"]):
+            scene.duration_seconds = float(duration)
+            scene.save(update_fields=["duration_seconds", "updated_at"])
+        project.save(update_fields=[
+            "imported_audio_cache_key", "imported_audio_alignment", "audio_warning", "duration_seconds",
+            "subtitles", "updated_at",
+        ])
+    except JobCancelled:
+        mark_job_cancelled(project_id)
+    except Exception as exc:
+        NarrationProject.objects.filter(pk=project_id).update(
+            status=NarrationProject.Status.ERROR,
+            status_message="L’analyse de l’audio importé a échoué.",
+            error_message=str(exc)[:2000],
+            queued_at=None,
+            finished_at=timezone.now(),
+        )
+    finally:
+        close_old_connections()
 
 
 def _get_speaker_conditioning(model, voice):
