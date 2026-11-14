@@ -1,6 +1,7 @@
 """Local FFmpeg rendering for narrated scenes and imported video clips."""
 import hashlib
 import json
+import shlex
 import shutil
 import subprocess
 import sys
@@ -31,6 +32,11 @@ _VIDEO_ENCODER_LOCK = threading.Lock()
 
 class _FFmpegCommandError(RuntimeError):
     """FFmpeg exited unsuccessfully after starting the selected video encoder."""
+
+    def __init__(self, message, *, stderr="", command=None):
+        super().__init__(message)
+        self.stderr = stderr
+        self.command = command
 
 
 def _video_encoder(ffmpeg):
@@ -292,9 +298,25 @@ def _terminate_subprocess(process, grace_seconds=3):
         process.communicate()
 
 
+def _command_video_encoder(command):
+    try:
+        return command[command.index("-c:v") + 1]
+    except (ValueError, IndexError):
+        try:
+            return command[command.index("-c") + 1]
+        except (ValueError, IndexError):
+            return "default"
+
+
 def _run_ffmpeg_once(command, cwd, operation, cancel_check=None):
     if cancel_check and cancel_check():
         raise JobCancelled("Traitement annulé à la demande de l’utilisateur.")
+    encoder = _command_video_encoder(command)
+    command_line = shlex.join([str(argument) for argument in command])
+    print(
+        f"[FFmpeg] Début · {operation} · encodeur={encoder}\n[FFmpeg] Commande complète : {command_line}",
+        flush=True,
+    )
     try:
         process = subprocess.Popen(
             command, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
@@ -302,38 +324,57 @@ def _run_ffmpeg_once(command, cwd, operation, cancel_check=None):
     except OSError as exc:
         raise RuntimeError(f"Impossible de lancer FFmpeg pour {operation} : {exc}") from exc
 
-    deadline = time.monotonic() + FFMPEG_TIMEOUT_SECONDS
-    while True:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            _terminate_subprocess(process)
-            raise RuntimeError(f"FFmpeg a dépassé le délai de 10 minutes pendant {operation}.")
-        try:
-            _stdout, stderr = process.communicate(timeout=min(0.5, remaining))
-            break
-        except subprocess.TimeoutExpired:
-            if cancel_check and cancel_check():
-                _terminate_subprocess(process)
-                raise JobCancelled("Traitement annulé à la demande de l’utilisateur.")
-            if time.monotonic() >= deadline:
+    started = time.perf_counter()
+    deadline = started + FFMPEG_TIMEOUT_SECONDS
+    stderr = ""
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
                 _terminate_subprocess(process)
                 raise RuntimeError(f"FFmpeg a dépassé le délai de 10 minutes pendant {operation}.")
+            try:
+                _stdout, stderr = process.communicate(timeout=min(0.5, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                if cancel_check and cancel_check():
+                    _terminate_subprocess(process)
+                    raise JobCancelled("Traitement annulé à la demande de l’utilisateur.")
+                if time.monotonic() >= deadline:
+                    _terminate_subprocess(process)
+                    raise RuntimeError(f"FFmpeg a dépassé le délai de 10 minutes pendant {operation}.")
+    finally:
+        elapsed = time.perf_counter() - started
+        print(
+            f"[FFmpeg] Fin · {operation} · encodeur={encoder} · durée={elapsed:.2f}s · "
+            f"code_retour={process.poll()}",
+            flush=True,
+        )
 
     if process.returncode:
-        detail = (stderr or "").strip().splitlines()
-        message = detail[-1] if detail else f"code de sortie {process.returncode}"
-        if "No such filter" in (stderr or "") and "subtitles" in (stderr or ""):
+        complete_stderr = (stderr or "").strip()
+        detail = complete_stderr.splitlines()[-1] if complete_stderr else f"code de sortie {process.returncode}"
+        if "No such filter" in complete_stderr and "subtitles" in complete_stderr:
             raise RuntimeError("FFmpeg ne prend pas en charge l’incrustation des sous-titres (filtre libass). Réinstalle FFmpeg avec le support libass.")
-        raise _FFmpegCommandError(f"FFmpeg a échoué pendant {operation} : {message}")
+        raise _FFmpegCommandError(
+            f"FFmpeg a échoué pendant {operation} : {detail}",
+            stderr=complete_stderr,
+            command=list(command),
+        )
 
 
 def _run_ffmpeg(command, cwd, operation, cancel_check=None):
     try:
         _run_ffmpeg_once(command, cwd, operation, cancel_check=cancel_check)
-    except _FFmpegCommandError:
+    except _FFmpegCommandError as exc:
         fallback = _software_fallback_command(command)
         if fallback is None:
             raise
+        print(
+            f"[FFmpeg] Fallback VideoToolbox → libx264 · opération={operation} · "
+            f"erreur exacte :\n{exc.stderr or str(exc)}",
+            flush=True,
+        )
         _remove_partial_output(command, cwd)
         _run_ffmpeg_once(fallback, cwd, operation, cancel_check=cancel_check)
 
@@ -703,18 +744,37 @@ def _ffprobe_path():
     return path
 
 
+def _parse_fps(value):
+    if not value:
+        return None
+    try:
+        if "/" in value:
+            numerator, denominator = value.split("/", 1)
+            denominator = float(denominator)
+            return float(numerator) / denominator if denominator else None
+        return float(value)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
 def _probe_clip(path):
+    started = time.perf_counter()
     try:
         result = subprocess.run(
-            [_ffprobe_path(), "-v", "error", "-show_entries", "stream=codec_type,duration:format=duration",
+            [_ffprobe_path(), "-v", "error", "-show_entries",
+             "stream=codec_type,duration,width,height,codec_name,avg_frame_rate,r_frame_rate:format=duration",
              "-of", "json", str(path)],
             capture_output=True, text=True, check=False,
             timeout=FFPROBE_TIMEOUT_SECONDS,
         )
     except subprocess.TimeoutExpired as exc:
+        elapsed = time.perf_counter() - started
+        print(f"[ffprobe] {Path(path).name} · timeout · durée={elapsed:.2f}s", flush=True)
         raise RuntimeError(
             f"ffprobe a dépassé le délai de 60 secondes pendant l’analyse du clip « {Path(path).name} »."
         ) from exc
+    elapsed = time.perf_counter() - started
+    print(f"[ffprobe] {Path(path).name} · durée de l’analyse={elapsed:.2f}s", flush=True)
     if result.returncode:
         detail = (result.stderr or "").strip().splitlines()
         raise RuntimeError(f"Le clip « {Path(path).name} » est illisible : {detail[-1] if detail else 'format invalide'}")
@@ -724,8 +784,9 @@ def _probe_clip(path):
         video_streams = [stream for stream in streams if stream.get("codec_type") == "video"]
         if not video_streams:
             raise ValueError("aucune piste vidéo")
+        video = video_streams[0]
         try:
-            duration = float(video_streams[0].get("duration"))
+            duration = float(video.get("duration"))
         except (TypeError, ValueError):
             duration = 0.0
         if duration <= 0:
@@ -733,9 +794,34 @@ def _probe_clip(path):
         if duration <= 0:
             raise ValueError("durée inconnue")
         has_audio = any(stream.get("codec_type") == "audio" for stream in streams)
-        return duration, has_audio
+        width = video.get("width")
+        height = video.get("height")
+        codec = video.get("codec_name") or "inconnu"
+        fps_raw = video.get("avg_frame_rate")
+        fps = _parse_fps(fps_raw)
+        if fps is None:
+            fps_raw = video.get("r_frame_rate")
+            fps = _parse_fps(fps_raw)
+        metadata = {
+            "duration": duration,
+            "has_audio": has_audio,
+            "width": width,
+            "height": height,
+            "codec": codec,
+            "fps": fps,
+            "fps_raw": fps_raw,
+            "probe_seconds": elapsed,
+        }
+        resolution = f"{width}x{height}" if width and height else "inconnue"
+        fps_label = f"{fps:.3f}" if fps is not None else f"inconnu ({fps_raw or 'non fourni'})"
+        print(
+            f"[ffprobe] {Path(path).name} · résolution={resolution} · codec={codec} · "
+            f"fps={fps_label} · durée vidéo={duration:.3f}s · audio={has_audio}",
+            flush=True,
+        )
+        return metadata
     except (TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"Impossible de lire la durée du clip « {Path(path).name} » : {exc}") from exc
+        raise RuntimeError(f"Impossible de lire les métadonnées du clip « {Path(path).name} » : {exc}") from exc
 
 
 def render_video_assembly(project_id):
@@ -761,7 +847,9 @@ def render_video_assembly(project_id):
                 project.progress_percent = round(85 * (index - 1) / len(scenes))
                 project.save(update_fields=["status_message", "current_segment", "progress_percent", "updated_at"])
                 source = Path(scene.video_clip.path)
-                duration, has_audio = _probe_clip(source)
+                clip_metadata = _probe_clip(source)
+                duration = clip_metadata["duration"]
+                has_audio = clip_metadata["has_audio"]
                 total_duration += duration
                 clip = folder / f"clip-{index:04}.mp4"
                 command = [ffmpeg, "-y", "-v", "error", "-i", str(source)]
@@ -893,7 +981,13 @@ def render_video_narration(project_id):
 
                 source = Path(scene.video_clip.path)
                 voice_path = Path(scene.audio.path)
-                video_duration, _has_source_audio = _probe_clip(source)
+                clip_metadata = _probe_clip(source)
+                video_duration = clip_metadata["duration"]
+                print(
+                    f"[Narration vidéo] Projet {project_id} · scène {index}/{len(scenes)} · "
+                    f"ffprobe={clip_metadata['probe_seconds']:.2f}s",
+                    flush=True,
+                )
                 voice_duration = wav_duration(voice_path)
                 total_voice_duration += voice_duration
                 subtitle_file = None
@@ -909,7 +1003,13 @@ def render_video_narration(project_id):
                     ffmpeg, source, voice_path, clip, width, height,
                     video_duration, voice_duration, subtitle_file,
                 )
+                encode_started = time.perf_counter()
                 _run_ffmpeg(command, folder, f"narration vidéo de la scène {index}", cancel_check=cancel_check)
+                print(
+                    f"[Narration vidéo] Projet {project_id} · scène {index}/{len(scenes)} · "
+                    f"encodage terminé en {time.perf_counter() - encode_started:.2f}s",
+                    flush=True,
+                )
                 if not clip.is_file() or clip.stat().st_size < 1000:
                     raise RuntimeError(f"FFmpeg n’a pas produit la vidéo narrée de la scène {index}.")
                 clips.append(clip)
@@ -920,10 +1020,16 @@ def render_video_narration(project_id):
             project.status_message = "Assemblage de la narration vidéo…"
             project.progress_percent = 93
             project.save(update_fields=["status_message", "progress_percent", "updated_at"])
+            concat_started = time.perf_counter()
             _run_ffmpeg(
                 [ffmpeg, "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(concat_list),
                  "-c", "copy", "-movflags", "+faststart", str(output)],
                 folder, "assemblage de la narration vidéo", cancel_check=cancel_check,
+            )
+            print(
+                f"[Narration vidéo] Projet {project_id} · concaténation finale en "
+                f"{time.perf_counter() - concat_started:.2f}s",
+                flush=True,
             )
             if not output.is_file() or output.stat().st_size < 1000:
                 raise RuntimeError("FFmpeg n’a pas produit de fichier MP4 valide.")

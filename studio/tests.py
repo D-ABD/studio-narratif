@@ -628,6 +628,33 @@ class MultiEffectAnimationTests(MediaTestCase):
 
 
 class VideoNarrationModeTests(MediaTestCase):
+    def test_probe_clip_extracts_source_video_metadata(self):
+        from .video_services import _probe_clip
+
+        result = Mock(
+            returncode=0,
+            stdout='{"streams":[{"codec_type":"video","duration":"12.5","width":1920,"height":1080,"codec_name":"h264","avg_frame_rate":"24000/1001"},{"codec_type":"audio"}],"format":{"duration":"12.5"}}',
+            stderr="",
+        )
+        with (
+            patch("studio.video_services._ffprobe_path", return_value="/fake/ffprobe"),
+            patch("studio.video_services.subprocess.run", return_value=result) as probe,
+        ):
+            metadata = _probe_clip("source.mp4")
+
+        self.assertIn("width", metadata)
+        self.assertIn("height", metadata)
+        self.assertIn("codec", metadata)
+        self.assertIn("fps", metadata)
+        self.assertIn("duration", metadata)
+        self.assertEqual(metadata["width"], 1920)
+        self.assertEqual(metadata["height"], 1080)
+        self.assertEqual(metadata["codec"], "h264")
+        self.assertAlmostEqual(metadata["fps"], 24000 / 1001)
+        self.assertEqual(metadata["duration"], 12.5)
+        self.assertTrue(metadata["has_audio"])
+        probe.assert_called_once()
+
     def add_video_segment(self, project, text="Bonjour, le Shiba arrive."):
         segment = NarrationSegment(project=project, position=0, text=text)
         segment.video_clip.save("heygen.mp4", ContentFile(b"video bytes"), save=True)

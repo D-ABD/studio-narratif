@@ -430,6 +430,7 @@ def _assemble_wav(segment_paths, output_path):
 def prepare_project(project_id):
     """Prepare only uncached or modified segments, then persist complete WAV and SRT exports."""
     close_old_connections()
+    pipeline_started = time.perf_counter()
     try:
         with _PIPELINE_LOCK:
             project = NarrationProject.objects.get(pk=project_id)
@@ -468,9 +469,19 @@ def prepare_project(project_id):
                         )
 
                     segment_timings = {}
+                    segment_started = time.perf_counter()
                     _prepare_segment(
                         segment, voice, expected_key, update_progress, segment_timings,
                         cancel_check=lambda: check_job_cancellation(project.pk),
+                    )
+                    segment_elapsed = time.perf_counter() - segment_started
+                    print(
+                        f"[Préparation] Projet {project.pk} · segment {index}/{len(segments)} · "
+                        f"XTTS {segment_timings.get('xtts_seconds', 0.0):.2f}s · "
+                        f"WhisperX {segment_timings.get('whisperx_seconds', 0.0):.2f}s · "
+                        f"préparation segment {segment_elapsed:.2f}s · "
+                        f"cache={'oui' if segment_timings.get('cached') else 'non'}",
+                        flush=True,
                     )
                     total_xtts_seconds += segment_timings.get("xtts_seconds", 0.0)
                     total_whisperx_seconds += segment_timings.get("whisperx_seconds", 0.0)
@@ -479,6 +490,11 @@ def prepare_project(project_id):
                     target = Path(folder) / f"segment-{index:04}.wav"
                     shutil.copy2(segment.audio.path, target)
                     paths.append(target)
+                print(
+                    f"[Préparation] Projet {project.pk} · totaux XTTS {total_xtts_seconds:.2f}s · "
+                    f"WhisperX {total_whisperx_seconds:.2f}s · cache {cached_segments}/{len(segments)}",
+                    flush=True,
+                )
                 project.refresh_from_db()
                 check_job_cancellation(project.pk)
                 output_wav = Path(folder) / "narration-complete.wav"
@@ -531,4 +547,9 @@ def prepare_project(project_id):
             finished_at=timezone.now(),
         )
     finally:
+        print(
+            f"[Préparation] Projet {project_id} · prepare_project terminé en "
+            f"{time.perf_counter() - pipeline_started:.2f}s",
+            flush=True,
+        )
         close_old_connections()
