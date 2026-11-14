@@ -1,4 +1,26 @@
 (() => {
+  let submitJobHandler = null;
+
+  // Capture les soumissions tôt, même si une autre initialisation de la page échoue.
+  document.addEventListener('submit', event => {
+    const form = event.target;
+    if (!(form instanceof HTMLFormElement) || !form.matches('#prepareForm, #audioOnlyForm')) return;
+
+    event.preventDefault();
+    if (submitJobHandler) {
+      submitJobHandler(event, form);
+      return;
+    }
+
+    const status = document.querySelector('#jobStatus');
+    if (status) {
+      status.className = 'job-status error';
+      status.textContent = 'Le formulaire a été intercepté, mais son gestionnaire n’a pas pu être initialisé. Consulte la console.';
+    }
+    console.error('Le gestionnaire de soumission des formulaires de génération n’a pas été initialisé.');
+  }, true);
+
+  try {
   const csrfToken = () => document.querySelector('[name=csrfmiddlewaretoken]')?.value || '';
   const wordCount = value => (value.trim() ? value.trim().split(/\s+/).length : 0);
 
@@ -417,9 +439,8 @@
     }
   });
 
-  const submitJob = async event => {
+  const submitJob = async (event, form) => {
     event.preventDefault();
-    const form = event.currentTarget;
     const button = form.querySelector('button[type="submit"]');
     if (!button) return;
     const isAssembly = form === assembleForm;
@@ -456,14 +477,15 @@
       setJobButtonsDisabled(false);
     }
   };
-  prepareForm?.addEventListener('submit', submitJob);
-  audioOnlyForm?.addEventListener('submit', submitJob);
-  assembleForm?.addEventListener('submit', submitJob);
+  submitJobHandler = submitJob;
 
   if (['processing', 'queued'].includes(document.body.dataset.projectStatus)) {
     setJobButtonsDisabled(true);
     progress.hidden = document.body.dataset.projectStatus !== 'processing';
     details.hidden = document.body.dataset.projectStatus !== 'processing';
     poll();
+  }
+  } catch (error) {
+    console.error('Erreur pendant l’initialisation de app.js', error);
   }
 })();
