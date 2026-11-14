@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0B0E14">
   <title>{% block title %}Petit Studio{% endblock %}</title>
-  <link rel="stylesheet" href="{% static 'studio/app.css' %}?v=5">
+  <link rel="stylesheet" href="{% static 'studio/app.css' %}?v=6">
   <style>
     :root {
       color-scheme: dark;
@@ -386,6 +386,7 @@
     <nav class="premium-nav">
       <a class="premium-nav-link{% if request.resolver_match.url_name == 'home' %} active{% endif %}" href="{% url 'home' %}#voices"><span class="premium-icon" aria-hidden="true">♫</span><span class="premium-link-label">Bibliothèque de voix</span></a>
       <a class="premium-nav-link{% if request.resolver_match.url_name == 'musics' %} active{% endif %}" href="{% url 'musics' %}"><span class="premium-icon" aria-hidden="true">♪</span><span class="premium-link-label">Bibliothèque musicale</span></a>
+      <a class="premium-nav-link{% if request.resolver_match.url_name == 'audios' %} active{% endif %}" href="{% url 'audios' %}"><span class="premium-icon" aria-hidden="true">◖</span><span class="premium-link-label">Audios</span></a>
       <a class="premium-nav-link" href="{% url 'home' %}#projects"><span class="premium-icon" aria-hidden="true">▤</span><span class="premium-link-label">Mes narrations</span></a>
       <a class="premium-nav-link{% if request.resolver_match.url_name == 'queue_view' %} active{% endif %}" href="{% url 'queue_view' %}">
         <span class="premium-icon" aria-hidden="true">☷</span><span class="premium-link-label">File d'attente</span>
@@ -450,6 +451,6 @@
   });
 })();
 </script>
-<script src="{% static 'studio/app.js' %}?v=9" defer></script>
+<script src="{% static 'studio/app.js' %}?v=10" defer></script>
 </body>
 </html>

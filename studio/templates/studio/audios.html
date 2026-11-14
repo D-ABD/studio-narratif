@@ -1,0 +1,23 @@
+{% extends "studio/base.html" %}
+{% block title %}Audios · Petit Studio{% endblock %}
+{% block heading %}Bibliothèque audio{% endblock %}
+{% block content %}
+<section class="card">
+  <div class="section-title"><div><span class="step-number">♫</span><h2>Mes fichiers audio</h2></div></div>
+  <p class="muted">La gestion complète de la bibliothèque audio arrivera dans un prochain lot. Les fichiers associés à tes projets restent disponibles ici.</p>
+  <div class="music-library-list">
+    {% for asset in audio_assets %}
+    <article class="music-library-item">
+      <div>
+        <strong>{{ asset.name }}</strong>
+        <span class="muted small">{{ asset.duration|floatformat:1 }} s · {{ asset.get_source_display }}</span>
+      </div>
+      <audio controls preload="none" src="{{ asset.audio_file.url }}"></audio>
+      <span class="muted small">{% if asset.project %}{{ asset.project.title }}{% else %}Fichier audio{% endif %}</span>
+    </article>
+    {% empty %}
+    <p class="muted">Aucun fichier audio importé pour le moment. Associe un audio à un projet depuis son éditeur.</p>
+    {% endfor %}
+  </div>
+</section>
+{% endblock %}

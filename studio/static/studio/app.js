@@ -24,6 +24,18 @@
   const csrfToken = () => document.querySelector('[name=csrfmiddlewaretoken]')?.value || '';
   const wordCount = value => (value.trim() ? value.trim().split(/\s+/).length : 0);
 
+  const projectAudioSourceForm = document.querySelector('#projectAudioSourceForm');
+  const importedAudioPanel = document.querySelector('#importedAudioPanel');
+  const syncAudioSourcePanel = () => {
+    if (!projectAudioSourceForm || !importedAudioPanel) return;
+    const selected = projectAudioSourceForm.querySelector('input[name="audio_source"]:checked');
+    importedAudioPanel.hidden = selected?.value !== 'imported';
+  };
+  projectAudioSourceForm?.querySelectorAll('input[name="audio_source"]').forEach(input => {
+    input.addEventListener('change', syncAudioSourcePanel);
+  });
+  syncAudioSourcePanel();
+
   const sceneFiles = document.querySelector('#sceneFiles');
   const importPreview = document.querySelector('#importPreview');
   const importPreviewHeading = document.querySelector('#importPreviewHeading');
@@ -320,6 +332,12 @@
     if (!audioUrl || !box || !audio) return;
     audio.src = audioUrl;
     audioDownload.href = audioUrl;
+    if (document.body.dataset.audioSource === 'imported') {
+      const extension = document.body.dataset.audioExtension || '.mp3';
+      audioDownload.download = 'audio-importe' + extension;
+      const label = document.querySelector('#fullAudioLabel');
+      if (label) label.textContent = 'Audio importé';
+    }
     srtDownload.href = subtitlesUrl;
     box.hidden = false;
   };
@@ -454,8 +472,9 @@
     if (!button) return;
     const isAssembly = form === assembleForm;
     const isAudioOnly = form === audioOnlyForm;
+    const isImportedAudio = form.dataset.audioSource === 'imported';
     const voiceIdInput = form.querySelector('input[name="voice_id"]');
-    if (!isAssembly && !voiceIdInput?.value) {
+    if (!isAssembly && !isAudioOnly && !isImportedAudio && !voiceIdInput?.value) {
       status.className = 'job-status error';
       status.textContent = 'Choisis d’abord une voix autorisée.';
       return;
@@ -467,7 +486,9 @@
       ? 'Enregistrement des réglages…'
       : isAudioOnly
         ? 'Pré-génération audio XTTS et WhisperX…'
-        : 'Enregistrement des textes…';
+        : isImportedAudio
+          ? 'Préparation de l’audio importé et des sous-titres…'
+          : 'Enregistrement des textes…';
     try {
       await saveDirtySegments();
       const response = await fetch(form.action, {method: 'POST', body: new FormData(form)});
@@ -477,7 +498,9 @@
       details.hidden = false;
       status.textContent = isAudioOnly
         ? 'Pré-génération audio ajoutée à la file…'
-        : 'Ajout du projet à la file…';
+        : isImportedAudio
+          ? 'Rendu avec l’audio importé ajouté à la file…'
+          : 'Ajout du projet à la file…';
       polling = false;
       poll();
     } catch (error) {
