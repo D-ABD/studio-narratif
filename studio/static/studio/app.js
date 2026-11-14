@@ -81,8 +81,12 @@
     const card = textarea.closest('.segment-card');
     const update = () => {
       const count = wordCount(textarea.value);
-      card.querySelector('.word-count').textContent = count;
-      card.querySelector('.duration-estimate').textContent = count ? `~${Math.max(1, Math.ceil(count / 2.35))}` : '0';
+      const wordCountElement = card.querySelector('.word-count');
+      if (wordCountElement) wordCountElement.textContent = count;
+      const durationEstimateElement = card.querySelector('.duration-estimate');
+      if (durationEstimateElement) {
+        durationEstimateElement.textContent = count ? `~${Math.max(1, Math.ceil(count / 2.35))}` : '0';
+      }
       textarea.dataset.dirty = textarea.value !== textarea.defaultValue ? 'true' : 'false';
     };
     textarea.addEventListener('input', update);
