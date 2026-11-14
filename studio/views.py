@@ -607,6 +607,7 @@ def project_detail(request, project_id):
         "segments": segments,
         "audio_ready": bool(segments and all(segment.ready_for_voice for segment in segments)),
         "voices": Voice.objects.filter(user=request.user),
+        "background_tracks": BackgroundTrack.objects.filter(user=request.user),
         "categories": Voice.Category.choices,
         "video_formats": NarrationProject.VideoFormat.choices,
         "motions": NarrationSegment.Motion.choices,
@@ -826,6 +827,38 @@ def set_project_voice(request, project_id):
     if project.voice_id != (voice.pk if voice else None):
         project.voice = voice
         _invalidate_export(project)
+    return redirect("project_detail", project_id=project.pk)
+
+
+@login_required
+@require_POST
+def set_project_music(request, project_id):
+    project = get_object_or_404(NarrationProject, pk=project_id, user=request.user)
+    if project.status in {NarrationProject.Status.QUEUED, NarrationProject.Status.PROCESSING}:
+        return JsonResponse({"ok": False, "error": "Ce projet est déjà dans la file ou en cours de traitement."}, status=409)
+
+    raw_volume = request.POST.get("music_volume", "20")
+    try:
+        volume = int(raw_volume)
+    except (TypeError, ValueError):
+        return HttpResponseBadRequest("Le volume de musique doit être un nombre entier entre 0 et 100.")
+    if not 0 <= volume <= 100:
+        return HttpResponseBadRequest("Le volume de musique doit être compris entre 0 et 100.")
+
+    track_id = (request.POST.get("background_track_id") or "").strip()
+    track = get_object_or_404(BackgroundTrack, pk=track_id, user=request.user) if track_id else None
+    changed_fields = []
+    if project.background_track_id != (track.pk if track else None):
+        project.background_track = track
+        changed_fields.append("background_track")
+    if project.music_volume != volume:
+        project.music_volume = volume
+        changed_fields.append("music_volume")
+    if changed_fields:
+        _invalidate_video(project, extra_update_fields=changed_fields)
+        messages.success(request, "La musique de fond et son volume ont été enregistrés. La voix en cache est conservée.")
+    else:
+        messages.info(request, "Les réglages de musique n’ont pas changé.")
     return redirect("project_detail", project_id=project.pk)
 
 

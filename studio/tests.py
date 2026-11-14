@@ -123,6 +123,20 @@ class BackgroundMusicLibraryTests(MediaTestCase):
         self.assertFalse(BackgroundTrack.objects.filter(pk=track.pk).exists())
         self.assertFalse(old_video_path.exists())
 
+    @patch("studio.views._probe_music_duration")
+    def test_music_upload_rejects_unsupported_format_and_oversize_before_probing(self, probe):
+        unsupported = SimpleUploadedFile("theme.flac", b"audio", content_type="audio/flac")
+        response = self.client.post("/musics/upload/", {"audio_file": unsupported})
+        self.assertRedirects(response, "/musics/")
+        self.assertFalse(BackgroundTrack.objects.exists())
+
+        with patch("studio.views.MAX_MUSIC_BYTES", 4):
+            oversized = SimpleUploadedFile("large.mp3", b"12345", content_type="audio/mpeg")
+            response = self.client.post("/musics/upload/", {"audio_file": oversized})
+        self.assertRedirects(response, "/musics/")
+        self.assertFalse(BackgroundTrack.objects.exists())
+        probe.assert_not_called()
+
 class ProjectViewTests(MediaTestCase):
     @patch("studio.services.hash_file", wraps=services.hash_file)
     def test_project_detail_hashes_voice_sample_once_for_multiple_segments(self, hash_sample):
@@ -151,6 +165,91 @@ class ProjectViewTests(MediaTestCase):
         self.assertEqual(project.status, NarrationProject.Status.DRAFT)
         self.assertFalse(project.full_audio)
         self.assertFalse(project.subtitles)
+
+    def test_changing_background_music_invalidates_only_the_video_export(self):
+        track = BackgroundTrack(user=self.user, name="Fond doux", duration=30.0)
+        track.audio_file.save("music.mp3", ContentFile(b"music bytes"), save=True)
+        project = NarrationProject.objects.create(
+            user=self.user, title="Cache audio conservé", status=NarrationProject.Status.READY,
+        )
+        project.full_audio.save("full.wav", ContentFile(b"voice cache"), save=True)
+        project.subtitles.save("captions.srt", ContentFile(b"subtitle cache"), save=True)
+        project.video_file.save("old.mp4", ContentFile(b"old video"), save=True)
+        segment = NarrationSegment.objects.create(
+            project=project, position=0, text="Bonjour.", subtitle_data=[{"start": 0, "end": 1}],
+            cache_key="voice-cache-key",
+        )
+        segment.audio.save("segment.wav", ContentFile(b"segment audio"), save=True)
+        audio_name = segment.audio.name
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(f"/projects/{project.pk}/music/", {
+                "background_track_id": track.pk, "music_volume": "35",
+            })
+
+        self.assertEqual(response.status_code, 302)
+        project.refresh_from_db()
+        segment.refresh_from_db()
+        self.assertEqual(project.background_track_id, track.pk)
+        self.assertEqual(project.music_volume, 35)
+        self.assertFalse(project.video_file)
+        self.assertTrue(project.full_audio)
+        self.assertTrue(project.subtitles)
+        self.assertEqual(segment.audio.name, audio_name)
+        self.assertEqual(segment.cache_key, "voice-cache-key")
+
+    def test_background_music_selection_rejects_other_users_tracks_and_bad_volume(self):
+        other_user = get_user_model().objects.create_user(username="music-owner", password="SafePass123!x")
+        track = BackgroundTrack(user=other_user, name="Privée", duration=12.0)
+        track.audio_file.save("private.ogg", ContentFile(b"private audio"), save=True)
+        project = NarrationProject.objects.create(user=self.user, title="Mon projet")
+
+        self.assertEqual(self.client.post(f"/projects/{project.pk}/music/", {
+            "background_track_id": track.pk, "music_volume": "20",
+        }).status_code, 404)
+        self.assertEqual(self.client.post(f"/projects/{project.pk}/music/", {
+            "background_track_id": "", "music_volume": "101",
+        }).status_code, 400)
+
+
+class BackgroundMusicMixTests(MediaTestCase):
+    def test_music_mix_uses_looped_input_fades_volume_and_video_copy(self):
+        from .video_services import _music_mix_command
+
+        command = _music_mix_command(
+            "ffmpeg", "/tmp/final.mp4", "/tmp/theme.mp3", "/tmp/mixed.mp4", 20, 10.0,
+        )
+        self.assertLess(command.index("-stream_loop"), command.index("-i", command.index("-stream_loop")))
+        self.assertEqual(command[command.index("-stream_loop") + 1], "-1")
+        self.assertIn("volume=0.200", command[command.index("-filter_complex") + 1])
+        self.assertIn("afade=t=in:st=0:d=1.500", command[command.index("-filter_complex") + 1])
+        self.assertIn("afade=t=out:st=8.500:d=1.500", command[command.index("-filter_complex") + 1])
+        self.assertEqual(command[command.index("-c:v") + 1], "copy")
+        self.assertEqual(command[command.index("-c:a") + 1], "aac")
+        self.assertIn("-shortest", command)
+
+    @patch("studio.video_services._ffmpeg_path", return_value="ffmpeg")
+    @patch("studio.video_services._run_ffmpeg")
+    def test_mix_music_with_video_runs_audio_only_final_pass(self, run_ffmpeg, _ffmpeg):
+        from .video_services import mix_music_with_video
+
+        with tempfile.TemporaryDirectory(prefix="music-mix-test-") as folder:
+            video = Path(folder) / "video.mp4"
+            music = Path(folder) / "music.mp3"
+            output = Path(folder) / "mixed.mp4"
+            video.write_bytes(b"video input")
+            music.write_bytes(b"music input")
+
+            def produce_output(command, *_args, **_kwargs):
+                Path(command[-1]).write_bytes(b"x" * 2048)
+
+            run_ffmpeg.side_effect = produce_output
+            result = mix_music_with_video(video, music, 25, 4.0, output)
+
+        self.assertEqual(result, output)
+        command = run_ffmpeg.call_args.args[0]
+        self.assertEqual(command[command.index("-c:v") + 1], "copy")
+        self.assertEqual(command[command.index("-c:a") + 1], "aac")
 
     def test_create_add_edit_delete_and_reorder_segments(self):
         response = self.client.post("/projects/create/", {"title": "Mon message"})
@@ -422,7 +521,12 @@ class VideoSceneTests(MediaTestCase):
     def test_video_export_assembles_scene_and_caption(self, run_ffmpeg, _ffmpeg):
         from .video_services import render_project_video
 
-        project = NarrationProject.objects.create(user=self.user, title="Vidéo", status=NarrationProject.Status.PROCESSING)
+        track = BackgroundTrack(user=self.user, name="Fond", duration=10.0)
+        track.audio_file.save("music.mp3", ContentFile(b"music"), save=True)
+        project = NarrationProject.objects.create(
+            user=self.user, title="Vidéo", status=NarrationProject.Status.PROCESSING,
+            background_track=track, music_volume=18,
+        )
         scene = NarrationSegment.objects.create(
             project=project,
             position=0,
@@ -448,12 +552,53 @@ class VideoSceneTests(MediaTestCase):
         self.assertEqual(project.status, NarrationProject.Status.READY)
         self.assertTrue(project.video_file.name.endswith(".mp4"))
         self.assertTrue(Path(project.video_file.path).is_file())
-        self.assertEqual(run_ffmpeg.call_count, 2)
+        self.assertEqual(run_ffmpeg.call_count, 3)
         scene_command = run_ffmpeg.call_args_list[0].args[0]
         filters = scene_command[scene_command.index("-vf") + 1]
         self.assertIn("subtitles=filename=scene-0001.ass", filters)
         self.assertLess(filters.index("vignette="), filters.index("subtitles="))
         self.assertIn("s=1080x1920", filters)
+        music_command = run_ffmpeg.call_args_list[-1].args[0]
+        self.assertEqual(music_command[music_command.index("-c:v") + 1], "copy")
+        self.assertEqual(music_command[music_command.index("-stream_loop") + 1], "-1")
+
+
+    @patch("studio.video_services._ffmpeg_path", return_value="ffmpeg")
+    @patch("studio.video_services._probe_clip", return_value={"duration": 0.8, "probe_seconds": 0.0})
+    @patch("studio.video_services.wav_duration", return_value=1.0)
+    @patch("studio.video_services.subprocess.Popen")
+    def test_video_narration_mixes_music_after_final_concat(self, run_ffmpeg, _duration, _probe, _ffmpeg):
+        from .video_services import render_video_narration
+
+        track = BackgroundTrack(user=self.user, name="Fond vidéo", duration=15.0)
+        track.audio_file.save("music.ogg", ContentFile(b"music"), save=True)
+        project = NarrationProject.objects.create(
+            user=self.user, title="Narration vidéo", status=NarrationProject.Status.PROCESSING,
+            background_track=track, music_volume=22, subtitles_enabled=False,
+        )
+        scene = NarrationSegment.objects.create(project=project, position=0, text="Bonjour.")
+        scene.video_clip.save("clip.mp4", ContentFile(b"video input"), save=True)
+        scene.audio.save("voice.wav", ContentFile(b"voice input"), save=True)
+        commands = []
+
+        def make_output(command, **_kwargs):
+            commands.append(command)
+            Path(command[-1]).write_bytes(b"x" * 2048)
+            return types.SimpleNamespace(
+                returncode=0,
+                communicate=Mock(return_value=("", "")),
+                poll=Mock(return_value=0),
+            )
+
+        run_ffmpeg.side_effect = make_output
+        render_video_narration(project.pk)
+
+        self.assertEqual(len(commands), 3)
+        self.assertEqual(commands[-1][commands[-1].index("-c:v") + 1], "copy")
+        self.assertEqual(commands[-1][commands[-1].index("-stream_loop") + 1], "-1")
+        project.refresh_from_db()
+        self.assertEqual(project.status, NarrationProject.Status.READY)
+        self.assertTrue(project.video_file)
 
 
 class CacheAndCaptionTests(MediaTestCase):

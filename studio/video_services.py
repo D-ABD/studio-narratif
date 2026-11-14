@@ -951,6 +951,47 @@ def _video_narration_command(
     ]
 
 
+def _music_mix_command(ffmpeg, video_path, music_path, output_path, volume, duration):
+    """Build a final audio-only re-encode, preserving the completed video bitstream."""
+    volume = int(volume)
+    duration = float(duration)
+    if not 0 <= volume <= 100:
+        raise ValueError("Le volume de musique doit être compris entre 0 et 100.")
+    if duration <= 0:
+        raise ValueError("La durée de la vidéo doit être supérieure à zéro pour le mixage musical.")
+
+    fade_duration = min(1.5, duration / 2)
+    fade_out_start = max(0.0, duration - fade_duration)
+    music_volume = volume / 100
+    filter_complex = (
+        "[0:a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[voice];"
+        f"[1:a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,"
+        f"volume={music_volume:.3f},afade=t=in:st=0:d={fade_duration:.3f},"
+        f"afade=t=out:st={fade_out_start:.3f}:d={fade_duration:.3f}[music];"
+        "[voice][music]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[mixed]"
+    )
+    return [
+        ffmpeg, "-y", "-v", "error",
+        "-i", str(video_path),
+        "-stream_loop", "-1", "-i", str(music_path),
+        "-filter_complex", filter_complex,
+        "-map", "0:v:0", "-map", "[mixed]",
+        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2",
+        "-t", f"{duration:.3f}", "-shortest", "-movflags", "+faststart", str(output_path),
+    ]
+
+
+def mix_music_with_video(video_path, music_path, volume, duration, output_path, cancel_check=None):
+    """Mix a looped, faded music bed under the finished narration without re-encoding video."""
+    ffmpeg = _ffmpeg_path()
+    output_path = Path(output_path)
+    command = _music_mix_command(ffmpeg, video_path, music_path, output_path, volume, duration)
+    _run_ffmpeg(command, output_path.parent, "mixage de la musique de fond", cancel_check=cancel_check)
+    if not output_path.is_file() or output_path.stat().st_size < 1000:
+        raise RuntimeError("FFmpeg n’a pas produit la vidéo avec musique de fond.")
+    return output_path
+
+
 def render_video_narration(project_id):
     """Replace imported clip audio with XTTS WAVs and burn WhisperX-aligned ASS captions."""
     close_old_connections()
@@ -1033,6 +1074,12 @@ def render_video_narration(project_id):
             )
             if not output.is_file() or output.stat().st_size < 1000:
                 raise RuntimeError("FFmpeg n’a pas produit de fichier MP4 valide.")
+            if project.background_track_id:
+                mixed_output = folder / "narration-video-musique.mp4"
+                output = mix_music_with_video(
+                    output, project.background_track.audio_file.path, project.music_volume,
+                    total_voice_duration, mixed_output, cancel_check=cancel_check,
+                )
             check_job_cancellation(project_id)
             project.refresh_from_db()
             if project.video_file:
@@ -1079,6 +1126,7 @@ def render_project_video(project_id):
 
         ffmpeg = _ffmpeg_path()
         width, height = _dimensions(project.video_format)
+        total_duration = sum(max(0.1, float(scene.duration_seconds)) for scene in scenes)
         with tempfile.TemporaryDirectory(prefix=f"petit-studio-video-{project.pk}-") as temp:
             folder = Path(temp)
             clips = []
@@ -1136,6 +1184,12 @@ def render_project_video(project_id):
             )
             if not output.is_file() or output.stat().st_size < 1000:
                 raise RuntimeError("FFmpeg n’a pas produit de fichier MP4 valide.")
+            if project.background_track_id:
+                mixed_output = folder / "narration-musique.mp4"
+                output = mix_music_with_video(
+                    output, project.background_track.audio_file.path, project.music_volume,
+                    total_duration, mixed_output, cancel_check=cancel_check,
+                )
             check_job_cancellation(project_id)
             project.refresh_from_db()
             if project.video_file:
