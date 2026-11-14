@@ -176,6 +176,7 @@
 .editor-button.danger:hover:not(:disabled) { border-color:#9A4B4B; background:#3A2021; }
 .editor-button.danger:disabled { opacity:.45; cursor:not-allowed; }
 .cancel-job-row { display:flex; justify-content:flex-end; margin:8px 0; }
+.cancel-job-row[hidden] { display:none !important; }
 .cancel-job-row form { margin:0; }
 @media(max-width:620px) {
   .editor-toolbar-actions { align-items:flex-start; flex-direction:column; }

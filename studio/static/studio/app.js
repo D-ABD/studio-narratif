@@ -260,7 +260,13 @@
   const prepareForm = document.querySelector('#prepareForm');
   const assembleForm = document.querySelector('#assembleForm');
   if (!prepareForm && !assembleForm) return;
-  const button = document.querySelector('#prepareButton, #assembleButton');
+  const jobButtons = [prepareForm, assembleForm]
+    .filter(Boolean)
+    .map(form => form.querySelector('button[type="submit"]'))
+    .filter(Boolean);
+  const setJobButtonsDisabled = disabled => {
+    jobButtons.forEach(button => { button.disabled = disabled; });
+  };
   const status = document.querySelector('#jobStatus');
   const cancelJobForm = document.querySelector('#cancelJobForm');
   const cancelJobButton = document.querySelector('#cancelJobButton');
@@ -327,7 +333,7 @@
           : data.queue_position
             ? `En attente · position ${data.queue_position} sur ${data.queue_count}. Le worker traitera les projets dans l’ordre.`
             : 'Ajouté à la file. En attente du worker…';
-        button.disabled = true;
+        setJobButtonsDisabled(true);
         progress.hidden = true;
         details.hidden = true;
         window.setTimeout(() => { polling = false; poll(); }, 2500);
@@ -338,24 +344,24 @@
         status.textContent = data.message || 'Narration prête à écouter et à télécharger.';
         showFullExport(data.audio_url, data.subtitles_url);
         showVideoExport(data.video_url);
-        button.disabled = false;
+        setJobButtonsDisabled(false);
         return;
       }
       if (data.status === 'error') {
         status.className = 'job-status error';
-        button.disabled = false;
+        setJobButtonsDisabled(false);
         return;
       }
       if (data.status === 'processing') {
-        button.disabled = true;
+        setJobButtonsDisabled(true);
         window.setTimeout(() => { polling = false; poll(); }, 1300);
         return;
       }
-      button.disabled = false;
+      setJobButtonsDisabled(false);
     } catch {
       status.className = 'job-status error';
       status.textContent = 'Impossible de lire l’état du traitement. Recharge le projet pour vérifier.';
-      button.disabled = false;
+      setJobButtonsDisabled(false);
     } finally {
       polling = false;
     }
@@ -410,6 +416,8 @@
   const submitJob = async event => {
     event.preventDefault();
     const form = event.currentTarget;
+    const button = form.querySelector('button[type="submit"]');
+    if (!button) return;
     const isAssembly = form === assembleForm;
     if (!isAssembly && !voiceIdInput?.value) {
       status.className = 'job-status error';
@@ -417,6 +425,7 @@
       return;
     }
     button.disabled = true;
+    setJobButtonsDisabled(true);
     status.className = 'job-status';
     status.textContent = isAssembly ? 'Enregistrement des réglages…' : 'Enregistrement des textes…';
     try {
@@ -432,14 +441,14 @@
     } catch (error) {
       status.className = 'job-status error';
       status.textContent = error.message;
-      button.disabled = false;
+      setJobButtonsDisabled(false);
     }
   };
   prepareForm?.addEventListener('submit', submitJob);
   assembleForm?.addEventListener('submit', submitJob);
 
   if (['processing', 'queued'].includes(document.body.dataset.projectStatus)) {
-    button.disabled = true;
+    setJobButtonsDisabled(true);
     progress.hidden = document.body.dataset.projectStatus !== 'processing';
     details.hidden = document.body.dataset.projectStatus !== 'processing';
     poll();
