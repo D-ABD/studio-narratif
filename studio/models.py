@@ -90,6 +90,11 @@ def audio_asset_upload_to(instance, filename):
     return f"audios/user_{instance.user_id}/{uuid.uuid4().hex}{extension}"
 
 
+def audio_session_upload_to(instance, filename):
+    extension = Path(filename).suffix.lower()
+    return f"audio-sessions/user_{instance.user_id}/{uuid.uuid4().hex}{extension}"
+
+
 class BackgroundTrack(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="background_tracks")
     name = models.CharField("nom", max_length=120)
@@ -137,6 +142,31 @@ class AudioAsset(models.Model):
 
     def __str__(self):
         return self.name
+
+
+class AudioSession(models.Model):
+    class SourceKind(models.TextChoices):
+        UPLOAD = "upload", "Importé"
+        FROM_MUSIC = "from_music", "Bibliothèque musicale"
+        FROM_AUDIO = "from_audio", "Bibliothèque audio"
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="audio_sessions",
+    )
+    source_file = models.FileField("source audio", upload_to=audio_session_upload_to)
+    source_kind = models.CharField(max_length=12, choices=SourceKind.choices)
+    operations = models.JSONField(default=list, blank=True)
+    current_preview_file = models.FileField(
+        "aperçu audio", upload_to=audio_session_upload_to, blank=True,
+    )
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at", "-id"]
+
+    def __str__(self):
+        return f"Session audio #{self.pk} · {self.user}"
 
 
 class StudioBatch(models.Model):
