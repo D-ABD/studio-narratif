@@ -24,6 +24,13 @@
   .queue-empty strong { display: block; margin-bottom: 4px; color: #E7EAF0; font-size: 13px; }
   .queue-subempty { color: #778294; font-size: 10px; text-align: center; }
   .queue-refresh-note { margin: 12px 2px 0; color: #778294; font-size: 9px; text-align: right; }
+  .queue-history { margin-top: 16px; padding: 19px; border: 1px solid #29313E; border-radius: 16px; background: #151A22; }
+  .queue-history-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:12px; }
+  .queue-history-heading h2 { margin:0; color:#E7EAF0; font-size:12px; letter-spacing:.5px; }
+  .queue-history-list { display:grid; gap:7px; margin:0; padding:0; list-style:none; }
+  .queue-history-item { display:flex; justify-content:space-between; gap:12px; padding:10px 12px; border:1px solid #2B3441; border-radius:9px; color:#AAB3C1; background:#11161F; font-size:10px; }
+  .queue-history-item strong { color:#DCE1E9; }
+  .queue-history-empty { color:#929BAA; font-size:11px; }
   .queue-page [hidden] { display: none !important; }
   @media(max-width:800px) { .queue-grid { grid-template-columns: minmax(0,1fr); } }
 </style>
@@ -85,6 +92,29 @@
     <strong>La file est vide.</strong>
     Aucun projet n'est en cours ni en attente.
   </div>
+  <section class="queue-history" aria-labelledby="queueHistoryTitle">
+    <div class="queue-history-heading">
+      <h2 id="queueHistoryTitle">HISTORIQUE DES LOTS STUDIO TERMINÉS ({{ terminal_batch_count }})</h2>
+      {% if terminal_batch_count %}
+      <form method="post" action="{% url 'dismiss_completed_batches' %}" {% if terminal_batch_count > 1 %}onsubmit="return confirm('Effacer les {{ terminal_batch_count }} lots Studio terminés ? Les audios générés seront conservés.')"{% endif %}>
+        {% csrf_token %}
+        <button class="button button-secondary button-small danger" type="submit">Effacer les tâches terminées</button>
+      </form>
+      {% endif %}
+    </div>
+    {% if terminal_batches %}
+    <ul class="queue-history-list">
+      {% for batch in terminal_batches %}
+      <li class="queue-history-item">
+        <span><strong>{% if batch.name_prefix %}{{ batch.name_prefix }}{% else %}Lot #{{ batch.id }}{% endif %}</strong> · {{ batch.total_items }} narration{{ batch.total_items|pluralize:"s" }} · {{ batch.get_status_display }}</span>
+        {% if batch.finished_at %}<time datetime="{{ batch.finished_at|date:'c' }}">{{ batch.finished_at|date:"d/m/Y H:i" }}</time>{% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="queue-history-empty">Aucun lot Studio terminé à effacer.</p>
+    {% endif %}
+  </section>
   <p class="queue-refresh-note" id="queueRefreshNote" role="status">Actualisation automatique toutes les 2,5 secondes.</p>
 </section>
 

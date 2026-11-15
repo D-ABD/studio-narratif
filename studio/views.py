@@ -13,8 +13,9 @@ from django.contrib.auth.decorators import login_required
 from django.contrib.auth.forms import UserCreationForm
 from django.core.files import File
 from django.core.files.base import ContentFile
+from django.core.paginator import Paginator
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Count, Q
 from django.db.models.deletion import ProtectedError
 from django.http import Http404, HttpResponse, HttpResponseBadRequest, JsonResponse
 from django.urls import reverse
@@ -362,6 +363,25 @@ def register(request):
     return render(request, "registration/register.html", {"form": form})
 
 
+def _get_page(queryset, page_number, per_page):
+    paginator = Paginator(queryset, per_page)
+    try:
+        requested_page = int(page_number)
+    except (TypeError, ValueError):
+        requested_page = 1
+    return paginator.get_page(max(requested_page, 1))
+
+
+def _page_or_redirect(request, queryset, per_page):
+    page = _get_page(queryset, request.GET.get("page"), per_page)
+    requested_page = request.GET.get("page")
+    if requested_page is not None and requested_page != str(page.number):
+        query = request.GET.copy()
+        query["page"] = str(page.number)
+        return None, redirect(f"{request.path}?{query.urlencode()}")
+    return page, None
+
+
 @login_required
 def home(request):
     query = (request.GET.get("q") or "").strip()[:80]
@@ -383,19 +403,46 @@ def home(request):
 
 
 @login_required
+def project_list(request):
+    projects = NarrationProject.objects.filter(user=request.user).annotate(
+        segment_count=Count("segments"),
+    ).order_by("-updated_at", "-id")
+    project_page, page_response = _page_or_redirect(request, projects, 20)
+    if page_response:
+        return page_response
+    return render(request, "studio/projects.html", {
+        "project_page": project_page,
+        "project_total": project_page.paginator.count,
+        "projects": project_page.object_list,
+    })
+
+
+@login_required
 def musics(request):
+    music_page, page_response = _page_or_redirect(
+        request, BackgroundTrack.objects.filter(user=request.user), 20,
+    )
+    if page_response:
+        return page_response
     return render(request, "studio/musics.html", {
-        "background_tracks": BackgroundTrack.objects.filter(user=request.user),
+        "background_tracks": music_page.object_list,
+        "music_page": music_page,
         "projects": NarrationProject.objects.filter(user=request.user)[:30],
     })
 
 
-def _studio_page_context(request, *, texts=None, selected_voice_id="", name_prefix=""):
+def _studio_page_context(request, *, texts=None, selected_voice_id="", name_prefix="", studio_page=None):
+    if studio_page is None:
+        studio_page = _get_page(
+            StudioBatch.objects.filter(user=request.user).select_related("voice").prefetch_related(
+                "items__audio_asset",
+            ),
+            request.GET.get("page"), 10,
+        )
     return {
         "voices": Voice.objects.filter(user=request.user, consent_confirmed=True),
-        "studio_batches": StudioBatch.objects.filter(user=request.user).select_related("voice").prefetch_related(
-            "items__audio_asset",
-        )[:10],
+        "studio_batches": studio_page.object_list,
+        "studio_page": studio_page,
         "projects": NarrationProject.objects.filter(user=request.user)[:30],
         "texts": texts or [""],
         "selected_voice_id": str(selected_voice_id),
@@ -407,7 +454,13 @@ def _studio_page_context(request, *, texts=None, selected_voice_id="", name_pref
 
 @login_required
 def studio_home(request):
-    return render(request, "studio/studio.html", _studio_page_context(request))
+    batches = StudioBatch.objects.filter(user=request.user).select_related("voice").prefetch_related(
+        "items__audio_asset",
+    )
+    studio_page, page_response = _page_or_redirect(request, batches, 10)
+    if page_response:
+        return page_response
+    return render(request, "studio/studio.html", _studio_page_context(request, studio_page=studio_page))
 
 
 @login_required
@@ -499,18 +552,27 @@ def studio_batch_status(request, batch_id):
 
 @login_required
 def audios(request):
-    return _audio_library_response(request)
-
-
-def _audio_library_response(request, *, status=200):
-    audio_assets = list(
-        AudioAsset.objects.filter(user=request.user).order_by("-created_at", "-id")
+    audio_page, page_response = _page_or_redirect(
+        request, AudioAsset.objects.filter(user=request.user).order_by("-created_at", "-id"), 20,
     )
+    if page_response:
+        return page_response
+    return _audio_library_response(request, audio_page=audio_page)
+
+
+def _audio_library_response(request, *, status=200, audio_page=None):
+    if audio_page is None:
+        audio_page = _get_page(
+            AudioAsset.objects.filter(user=request.user).order_by("-created_at", "-id"),
+            request.GET.get("page"), 20,
+        )
+    audio_assets = audio_page.object_list
     for asset in audio_assets:
         minutes, seconds = divmod(max(0, round(asset.duration)), 60)
         asset.duration_mmss = f"{minutes:02d}:{seconds:02d}"
     return render(request, "studio/audios.html", {
         "audio_assets": audio_assets,
+        "audio_page": audio_page,
         "projects": NarrationProject.objects.filter(user=request.user)[:30],
     }, status=status)
 
@@ -784,11 +846,41 @@ def queue_view(request):
     active_projects = list(_queue_queryset(request.user))
     processing_projects = [project for project in active_projects if project.status == NarrationProject.Status.PROCESSING]
     waiting_projects = [project for project in active_projects if project.status == NarrationProject.Status.QUEUED]
+    terminal_batches = StudioBatch.objects.filter(
+        user=request.user,
+        status__in=[
+            StudioBatch.Status.COMPLETED,
+            StudioBatch.Status.PARTIAL,
+            StudioBatch.Status.FAILED,
+        ],
+    ).select_related("voice").order_by("-finished_at", "-updated_at", "-id")
     return render(request, "studio/queue.html", {
         "processing_projects": processing_projects,
         "waiting_projects": waiting_projects,
+        "terminal_batches": terminal_batches,
+        "terminal_batch_count": terminal_batches.count(),
         "projects": NarrationProject.objects.filter(user=request.user)[:30],
     })
+
+
+@login_required
+@require_POST
+def dismiss_completed_batches(request):
+    terminal_batches = StudioBatch.objects.filter(
+        user=request.user,
+        status__in=[
+            StudioBatch.Status.COMPLETED,
+            StudioBatch.Status.PARTIAL,
+            StudioBatch.Status.FAILED,
+        ],
+    )
+    batch_count = terminal_batches.count()
+    if batch_count:
+        terminal_batches.delete()
+        messages.success(request, f"{batch_count} lot(s) Studio terminé(s) ont été effacés. Les audios générés sont conservés.")
+    else:
+        messages.info(request, "Aucun lot Studio terminé à effacer.")
+    return redirect("queue_view")
 
 
 def _queue_project_payload(project, position=None):

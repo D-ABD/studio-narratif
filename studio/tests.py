@@ -506,6 +506,178 @@ class StudioBatchGenerationTests(MediaTestCase):
         self.assertEqual(batch.status, StudioBatch.Status.PROCESSING)
 
 
+class ListPaginationAndBatchDismissTests(MediaTestCase):
+    def make_audio_asset(self, name):
+        asset = AudioAsset.objects.create(user=self.user, name=name, duration=12.0)
+        asset.audio_file.save(f"{name}.wav", ContentFile(b"audio bytes"), save=True)
+        return asset
+
+    def make_music(self, name):
+        track = BackgroundTrack.objects.create(user=self.user, name=name, duration=12.0)
+        track.audio_file.save(f"{name}.mp3", ContentFile(b"music bytes"), save=True)
+        return track
+
+    def test_pagination_controls_are_hidden_when_lists_fit_on_one_page(self):
+        self.make_audio_asset("Audio unique")
+        self.make_music("Musique unique")
+        voice = self.make_voice()
+        StudioBatch.objects.create(user=self.user, voice=voice, name_prefix="Lot unique")
+
+        audio_response = self.client.get("/audios/")
+        music_response = self.client.get("/musics/")
+        studio_response = self.client.get("/studio/")
+
+        self.assertNotContains(audio_response, 'aria-label="Pagination de la bibliothèque audio"')
+        self.assertNotContains(music_response, 'aria-label="Pagination de la bibliothèque musicale"')
+        self.assertNotContains(studio_response, 'aria-label="Pagination des lots Studio"')
+
+    def test_audio_library_paginates_by_twenty_and_redirects_invalid_pages(self):
+        for index in range(21):
+            self.make_audio_asset(f"Audio {index:02d}")
+
+        page_two = self.client.get("/audios/?page=2")
+        self.assertEqual(page_two.status_code, 200)
+        self.assertEqual(page_two.context["audio_page"].number, 2)
+        self.assertEqual(len(page_two.context["audio_assets"]), 1)
+        self.assertContains(page_two, "Audio 00")
+        self.assertContains(page_two, "Page 2 / 2")
+        self.assertContains(page_two, 'href="">↻ Actualiser</a>')
+
+        self.assertRedirects(self.client.get("/audios/?page=999"), "/audios/?page=2", fetch_redirect_response=False)
+        self.assertRedirects(self.client.get("/audios/?page=0"), "/audios/?page=1", fetch_redirect_response=False)
+        self.assertRedirects(self.client.get("/audios/?page=invalid"), "/audios/?page=1", fetch_redirect_response=False)
+
+    def test_music_library_paginates_by_twenty_and_redirects_invalid_pages(self):
+        for index in range(21):
+            self.make_music(f"Musique {index:02d}")
+
+        page_two = self.client.get("/musics/?page=2")
+        self.assertEqual(page_two.status_code, 200)
+        self.assertEqual(page_two.context["music_page"].number, 2)
+        self.assertEqual(len(page_two.context["background_tracks"]), 1)
+        self.assertContains(page_two, "Musique 20")
+        self.assertContains(page_two, "Page 2 / 2")
+        self.assertContains(page_two, 'href="">↻ Actualiser</a>')
+
+        self.assertRedirects(self.client.get("/musics/?page=999"), "/musics/?page=2", fetch_redirect_response=False)
+        self.assertRedirects(self.client.get("/musics/?page=0"), "/musics/?page=1", fetch_redirect_response=False)
+        self.assertRedirects(self.client.get("/musics/?page=invalid"), "/musics/?page=1", fetch_redirect_response=False)
+
+    def test_studio_batches_and_projects_have_independent_pagination(self):
+        voice = self.make_voice()
+        for index in range(11):
+            batch = StudioBatch.objects.create(
+                user=self.user, voice=voice, name_prefix=f"Lot {index:02d}",
+                status=StudioBatch.Status.COMPLETED, total_items=1,
+                finished_at=timezone.now() + timedelta(seconds=index),
+            )
+            StudioBatch.objects.filter(pk=batch.pk).update(
+                created_at=timezone.now() + timedelta(seconds=index),
+            )
+        for index in range(21):
+            project = NarrationProject.objects.create(user=self.user, title=f"Projet {index:02d}")
+            NarrationProject.objects.filter(pk=project.pk).update(
+                updated_at=timezone.now() + timedelta(seconds=index),
+            )
+
+        studio_page = self.client.get("/studio/?page=2")
+        self.assertEqual(studio_page.status_code, 200)
+        self.assertEqual(studio_page.context["studio_page"].number, 2)
+        self.assertEqual(len(studio_page.context["studio_batches"]), 1)
+        self.assertEqual(studio_page.context["studio_batches"][0].name_prefix, "Lot 00")
+        self.assertContains(studio_page, 'href="">↻ Actualiser</a>')
+        self.assertRedirects(self.client.get("/studio/?page=999"), "/studio/?page=2", fetch_redirect_response=False)
+
+        projects_page = self.client.get("/projects/?page=2")
+        self.assertEqual(projects_page.status_code, 200)
+        self.assertEqual(projects_page.context["project_page"].number, 2)
+        self.assertEqual(len(projects_page.context["project_page"].object_list), 1)
+        self.assertEqual(projects_page.context["project_total"], 21)
+        self.assertContains(projects_page, "Projet 00")
+        self.assertRedirects(self.client.get("/projects/?page=999"), "/projects/?page=2", fetch_redirect_response=False)
+        self.assertRedirects(self.client.get("/projects/?page=invalid"), "/projects/?page=1", fetch_redirect_response=False)
+
+    def test_sidebar_shows_only_fifteen_recent_projects_and_total_link(self):
+        for index in range(17):
+            project = NarrationProject.objects.create(user=self.user, title=f"Projet sidebar {index:02d}")
+            NarrationProject.objects.filter(pk=project.pk).update(
+                updated_at=timezone.now() + timedelta(seconds=index),
+            )
+
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content.decode().count("data-sidebar-project"), 15)
+        self.assertContains(response, "Voir tous les projets (17)")
+        self.assertContains(response, 'href="" aria-label="Actualiser la page"')
+        self.assertEqual(len(response.context["sidebar_projects"]), 15)
+        self.assertEqual(response.context["sidebar_project_count"], 17)
+
+    def test_all_projects_page_is_scoped_to_the_logged_in_user(self):
+        own_project = NarrationProject.objects.create(user=self.user, title="Projet à moi")
+        other_user = get_user_model().objects.create_user(username="projects-private", password="SafePass123!x")
+        NarrationProject.objects.create(user=other_user, title="Projet privé")
+
+        response = self.client.get("/projects/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, own_project.title)
+        self.assertNotContains(response, "Projet privé")
+        self.assertEqual(response.context["project_total"], 1)
+
+    def test_queue_dismiss_removes_only_own_terminal_batches_and_preserves_assets_and_projects(self):
+        terminal_statuses = [
+            StudioBatch.Status.COMPLETED,
+            StudioBatch.Status.PARTIAL,
+            StudioBatch.Status.FAILED,
+        ]
+        terminal_batches = [
+            StudioBatch.objects.create(
+                user=self.user, name_prefix=f"Terminé {index}", status=status,
+                total_items=1, finished_at=timezone.now(),
+            )
+            for index, status in enumerate(terminal_statuses)
+        ]
+        generated_asset = AudioAsset.objects.create(
+            user=self.user, name="Audio conservé", duration=8.0, source=AudioAsset.Source.XTTS,
+        )
+        StudioBatchItem.objects.create(
+            batch=terminal_batches[0], position=0, text="Narration terminée", asset_name="Audio conservé",
+            status=StudioBatchItem.Status.COMPLETED, audio_asset=generated_asset,
+        )
+        pending_batch = StudioBatch.objects.create(
+            user=self.user, name_prefix="En attente", status=StudioBatch.Status.PENDING,
+        )
+        processing_batch = StudioBatch.objects.create(
+            user=self.user, name_prefix="En cours", status=StudioBatch.Status.PROCESSING,
+        )
+        other_user = get_user_model().objects.create_user(username="dismiss-private", password="SafePass123!x")
+        foreign_batch = StudioBatch.objects.create(
+            user=other_user, name_prefix="Lot privé", status=StudioBatch.Status.COMPLETED,
+        )
+        ready_project = NarrationProject.objects.create(
+            user=self.user, title="Projet prêt", status=NarrationProject.Status.READY,
+        )
+        error_project = NarrationProject.objects.create(
+            user=self.user, title="Projet en erreur", status=NarrationProject.Status.ERROR,
+        )
+
+        queue_page = self.client.get("/queue/")
+        self.assertContains(queue_page, "HISTORIQUE DES LOTS STUDIO TERMINÉS (3)")
+        self.assertContains(queue_page, "Effacer les tâches terminées")
+        self.assertContains(queue_page, "confirm('Effacer les 3 lots Studio terminés ?")
+
+        response = self.client.post("/queue/dismiss-completed/")
+
+        self.assertRedirects(response, "/queue/", fetch_redirect_response=False)
+        self.assertFalse(StudioBatch.objects.filter(pk__in=[batch.pk for batch in terminal_batches]).exists())
+        self.assertTrue(StudioBatch.objects.filter(pk=pending_batch.pk).exists())
+        self.assertTrue(StudioBatch.objects.filter(pk=processing_batch.pk).exists())
+        self.assertTrue(StudioBatch.objects.filter(pk=foreign_batch.pk).exists())
+        self.assertTrue(AudioAsset.objects.filter(pk=generated_asset.pk).exists())
+        self.assertTrue(NarrationProject.objects.filter(pk__in=[ready_project.pk, error_project.pk]).exists())
+
+
 class RemoveImportedAudioMigrationTests(TestCase):
     def test_migration_clears_external_audio_state_and_resets_projects_to_xtts(self):
         from importlib import import_module

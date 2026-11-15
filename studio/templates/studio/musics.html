@@ -27,7 +27,7 @@
   </form>
 </section>
 <section class="card">
-  <div class="section-title"><div><span class="step-number">♫</span><h2>Mes musiques</h2></div></div>
+  <div class="section-title"><div><span class="step-number">♫</span><h2>Mes musiques</h2></div><span class="muted small">{{ music_page.paginator.count }} piste{{ music_page.paginator.count|pluralize:"s" }}</span><a class="button button-secondary button-small" href="">↻ Actualiser</a></div>
   <div class="music-library-list">
     {% for track in background_tracks %}
     <article class="music-library-item">
@@ -40,6 +40,13 @@
     </article>
     {% empty %}<p class="muted">Votre bibliothèque musicale est vide.</p>{% endfor %}
   </div>
+  {% if music_page.has_other_pages %}
+  <nav class="pagination-controls" aria-label="Pagination de la bibliothèque musicale">
+    {% if music_page.has_previous %}<a href="?page={{ music_page.previous_page_number }}" rel="prev">← Précédent</a>{% endif %}
+    <span>Page {{ music_page.number }} / {{ music_page.paginator.num_pages }}</span>
+    {% if music_page.has_next %}<a href="?page={{ music_page.next_page_number }}" rel="next">Suivant →</a>{% endif %}
+  </nav>
+  {% endif %}
 </section>
 <div><a class="text-link" href="{% url 'home' %}">← Retour à l’accueil</a></div>
 </div>

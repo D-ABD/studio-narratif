@@ -67,7 +67,7 @@
   </section>
 
   <section class="card">
-    <div class="section-title"><div><span class="step-number">▤</span><h2>Mes lots</h2></div></div>
+    <div class="section-title"><div><span class="step-number">▤</span><h2>Mes lots</h2></div><span class="muted small">{{ studio_page.paginator.count }} lot{{ studio_page.paginator.count|pluralize:"s" }}</span><a class="button button-secondary button-small" href="">↻ Actualiser</a></div>
     <div class="studio-batch-list">
       {% for batch in studio_batches %}
       <article class="studio-batch-card" data-studio-batch-card data-status-url="{% url 'studio_batch_status' batch.id %}" data-status="{{ batch.status }}">
@@ -86,6 +86,13 @@
       </article>
       {% empty %}<p class="studio-empty">Aucun lot pour le moment.</p>{% endfor %}
     </div>
+    {% if studio_page.has_other_pages %}
+    <nav class="pagination-controls" aria-label="Pagination des lots Studio">
+      {% if studio_page.has_previous %}<a href="?page={{ studio_page.previous_page_number }}" rel="prev">← Précédent</a>{% endif %}
+      <span>Page {{ studio_page.number }} / {{ studio_page.paginator.num_pages }}</span>
+      {% if studio_page.has_next %}<a href="?page={{ studio_page.next_page_number }}" rel="next">Suivant →</a>{% endif %}
+    </nav>
+    {% endif %}
   </section>
 </div>
 <script>

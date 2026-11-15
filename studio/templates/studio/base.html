@@ -118,6 +118,12 @@
     .premium-create-button { width: 100%; border-color: #3A321F; color: #FFD178; background: #201A11; text-align: left; cursor: pointer; }
     .premium-create-button:hover { border-color: #805514; background: #2A2113; }
     .premium-project-empty { padding: 8px 11px; color: #778294; font-size: 10px; }
+    .premium-refresh-link { display: inline-grid; width: 26px; height: 26px; margin-left: auto; place-items: center; border: 1px solid #303A49; border-radius: 8px; color: #AAB3C1; background: #151B25; font-size: 15px; line-height: 1; }
+    .premium-projects-title { display: flex; align-items: center; gap: 8px; }
+    .premium-refresh-link:hover { color: #FFC65D; border-color: #70501D; }
+    .pagination-controls { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 10px; margin-top: 16px; color: #929BAA; font-size: 11px; }
+    .pagination-controls a { padding: 7px 10px; border: 1px solid #303A49; border-radius: 8px; color: #E1E5EB; background: #111720; }
+    .pagination-controls a:hover { border-color: #805514; color: #FFC65D; }
     .premium-project-row { position: relative; display: flex; align-items: center; min-width: 0; border-radius: 11px; }
     .premium-project-link { flex: 1 1 auto; min-width: 0; }
     .premium-project-link .premium-link-label { overflow: hidden; text-overflow: ellipsis; }
@@ -390,7 +396,7 @@
       .premium-nav { display: flex; flex-wrap: wrap; gap: 5px; margin: 10px 0 0; }
       .premium-nav-link { min-height: 36px; }
       .premium-section-title:not(.premium-projects-title), .premium-sidebar-bottom { display: none; }
-      .premium-projects-title { display: block; padding: 12px 10px 6px; }
+      .premium-projects-title { display: flex; padding: 12px 10px 6px; }
       .premium-projects { display: grid; max-height: 28vh; overflow-y: auto; }
       .premium-project-menu-toggle { opacity: 1; pointer-events: auto; }
       .premium-project-link { justify-content: flex-start; padding: 0 8px; }
@@ -398,7 +404,7 @@
       .sidebar-collapsed .premium-project-link { justify-content: flex-start; padding: 0 8px; }
       .sidebar-collapsed .premium-project-link .premium-icon { width: 22px; flex-basis: 22px; }
       .sidebar-collapsed .premium-project-menu-toggle { right: -3px; }
-      .sidebar-collapsed .premium-projects-title { display: block; }
+      .sidebar-collapsed .premium-projects-title { display: flex; }
       .sidebar-collapsed .premium-brand-row { justify-content: flex-start; }
       .sidebar-collapsed .premium-wordmark { display: block; opacity: 1; }
       .sidebar-collapsed .premium-toggle { position: static; margin-left: auto; transform: none; }
@@ -447,10 +453,10 @@
         <button class="premium-nav-link premium-create-button" type="submit"><span class="premium-icon" aria-hidden="true">＋</span><span class="premium-link-label">Nouvelle narration</span></button>
       </form>
     </nav>
-    <div class="premium-section-title premium-projects-title">PROJETS RÉCENTS</div>
+    <div class="premium-section-title premium-projects-title">PROJETS RÉCENTS<a class="premium-refresh-link" href="" aria-label="Actualiser la page">↻</a></div>
     {% with current_project=project %}
     <nav class="premium-projects" aria-label="Projets récents">
-      {% for project in projects %}
+      {% for project in sidebar_projects %}
       <div class="premium-project-row" data-sidebar-project data-project-id="{{ project.id }}">
         <a class="premium-project-link{% if current_project and current_project.id == project.id %} selected{% endif %}" href="{% url 'project_detail' project.id %}">
           <span class="premium-icon" aria-hidden="true">◈</span><span class="premium-link-label" data-project-title>{{ project.title }}</span>
@@ -473,6 +479,9 @@
       <span class="premium-project-empty">Aucun projet pour le moment.</span>
       {% endfor %}
     </nav>
+    {% if sidebar_project_count > 15 %}
+    <a class="premium-project-empty" href="{% url 'project_list' %}">Voir tous les projets ({{ sidebar_project_count }}) →</a>
+    {% endif %}
     {% endwith %}
     <div class="premium-sidebar-bottom">
       <span class="premium-online-dot" aria-hidden="true"></span>
