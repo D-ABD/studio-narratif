@@ -240,7 +240,7 @@
         <div class="editor-card-body">
           <form method="post" action="{% url 'render_assembly' project.id %}" id="assemblyRenderForm">
             {% csrf_token %}
-            <button class="editor-button primary" type="submit" disabled>Rendu activé dans l’étape suivante</button>
+            <button class="editor-button primary" type="submit" {% if project.status == 'queued' or project.status == 'processing' %}disabled{% endif %}>Rendre la vidéo ✦</button>
           </form>
           <div class="job-status {% if project.status == 'error' %}error{% elif project.status == 'ready' %}success{% endif %}" id="jobStatus" aria-live="polite">
             {% if project.status == 'ready' %}{{ project.status_message|default:"Export prêt." }}{% elif project.status == 'processing' or project.status == 'queued' %}{{ project.status_message }}{% elif project.status == 'error' %}{{ project.error_message }}{% else %}Sélectionne l’audio et les images nécessaires.{% endif %}
@@ -249,6 +249,10 @@
             <form method="post" action="{% url 'cancel_job' project.id %}" id="cancelJobForm">{% csrf_token %}<button class="editor-button danger" type="submit" id="cancelJobButton">Annuler le traitement</button></form>
           </div>
           <progress id="jobProgress" max="100" value="{{ project.progress_percent }}" {% if project.status != 'processing' %}hidden{% endif %}></progress>
+          <div id="progressDetails" class="progress-details" {% if project.status != 'processing' %}hidden{% endif %}>
+            <span id="currentSegment">Scène {{ project.current_segment }}/{{ project.total_segments }}</span>
+            <span id="elapsedTime">00:00 écoulées</span>
+          </div>
           <div class="full-export video-export" id="videoExport" {% if not project.video_file %}hidden{% endif %}>
             <label>Vidéo MP4 · {{ project.get_video_format_display }}</label>
             <video id="projectVideo" controls preload="metadata" {% if project.video_file %}src="{{ project.video_file.url }}"{% endif %}></video>

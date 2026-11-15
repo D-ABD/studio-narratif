@@ -4,7 +4,7 @@
   // Capture les soumissions tôt, même si une autre initialisation de la page échoue.
   document.addEventListener('submit', event => {
     const form = event.target;
-    if (!(form instanceof HTMLFormElement) || !form.matches('#prepareForm, #audioOnlyForm')) return;
+    if (!(form instanceof HTMLFormElement) || !form.matches('#prepareForm, #audioOnlyForm, #assemblyRenderForm')) return;
 
     event.preventDefault();
     if (submitJobHandler) {
@@ -281,6 +281,7 @@
   const prepareForm = document.querySelector('#prepareForm');
   const audioOnlyForm = document.querySelector('#audioOnlyForm');
   const assembleForm = document.querySelector('#assembleForm');
+  const assemblyRenderForm = document.querySelector('#assemblyRenderForm');
   const voiceIdInputs = [prepareForm, audioOnlyForm]
     .filter(Boolean)
     .map(form => form.querySelector('input[name="voice_id"]'))
@@ -289,8 +290,8 @@
     voiceIdInputs.forEach(input => { input.value = projectVoice.value; });
   });
 
-  if (!prepareForm && !audioOnlyForm && !assembleForm) return;
-  const jobButtons = [prepareForm, audioOnlyForm, assembleForm]
+  if (!prepareForm && !audioOnlyForm && !assembleForm && !assemblyRenderForm) return;
+  const jobButtons = [prepareForm, audioOnlyForm, assembleForm, assemblyRenderForm]
     .filter(Boolean)
     .map(form => form.querySelector('button[type="submit"]'))
     .filter(Boolean);
@@ -453,9 +454,10 @@
     const button = form.querySelector('button[type="submit"]');
     if (!button) return;
     const isAssembly = form === assembleForm;
+    const isLibraryAssembly = form === assemblyRenderForm;
     const isAudioOnly = form === audioOnlyForm;
     const voiceIdInput = form.querySelector('input[name="voice_id"]');
-    if (!isAssembly && !isAudioOnly && !voiceIdInput?.value) {
+    if (!isAssembly && !isLibraryAssembly && !isAudioOnly && !voiceIdInput?.value) {
       status.className = 'job-status error';
       status.textContent = 'Choisis d’abord une voix autorisée.';
       return;
@@ -463,7 +465,9 @@
     button.disabled = true;
     setJobButtonsDisabled(true);
     status.className = 'job-status';
-    status.textContent = isAssembly
+    status.textContent = isLibraryAssembly
+      ? 'Validation de l’assemblage…'
+      : isAssembly
       ? 'Enregistrement des réglages…'
       : isAudioOnly
         ? 'Pré-génération audio XTTS et WhisperX…'
@@ -477,7 +481,9 @@
       details.hidden = false;
       status.textContent = isAudioOnly
         ? 'Pré-génération audio ajoutée à la file…'
-        : 'Ajout du projet à la file…';
+        : isLibraryAssembly
+          ? 'Assemblage ajouté à la file…'
+          : 'Ajout du projet à la file…';
       polling = false;
       poll();
     } catch (error) {

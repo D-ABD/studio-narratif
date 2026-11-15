@@ -27,6 +27,7 @@ from .models import (
     default_animation_settings, legacy_animation_settings,
 )
 from .services import _voice_sample_digest, cache_key_for, hash_file, normalize_voice_sample, srt_text
+from .video_services import validate_assembly_project
 
 logger = logging.getLogger(__name__)
 
@@ -990,12 +991,36 @@ def save_assembly_image(request, project_id):
 @login_required
 @require_POST
 def render_assembly(request, project_id):
-    """Reserved endpoint for the direct FFmpeg render, enabled in phase 3.8 commit 2."""
+    """Queue a direct FFmpeg render from a user-owned AudioAsset and visual slots."""
     project = get_object_or_404(NarrationProject, pk=project_id, user=request.user)
     if project.mode != NarrationProject.Mode.ASSEMBLY:
-        return HttpResponseBadRequest("Passe le projet en mode Assemblage avant de lancer le rendu.")
-    messages.info(request, "Le rendu Assemblage sera activé dans la prochaine étape de la phase 3.8.")
-    return redirect("project_detail", project_id=project.pk)
+        return JsonResponse({"ok": False, "error": "Passe le projet en mode Assemblage avant de lancer le rendu."}, status=400)
+    if project.status in {NarrationProject.Status.QUEUED, NarrationProject.Status.PROCESSING}:
+        return JsonResponse({"ok": False, "error": "Ce projet est déjà dans la file ou en cours de traitement."}, status=409)
+    if project.audio_asset_id and project.audio_asset.user_id != request.user.id:
+        raise Http404
+    try:
+        inputs = validate_assembly_project(project)
+    except ValueError as exc:
+        return JsonResponse({"ok": False, "error": str(exc)}, status=400)
+
+    now = timezone.now()
+    project.status = NarrationProject.Status.QUEUED
+    project.queued_at = now
+    project.job_type = NarrationProject.JobType.AUDIO_ASSEMBLY
+    project.cancel_requested = False
+    project.status_message = "Rendu Assemblage ajouté à la file d’attente."
+    project.error_message = ""
+    project.progress_percent = 0
+    project.current_segment = 0
+    project.total_segments = len(inputs["boundaries"])
+    project.started_at = None
+    project.finished_at = None
+    project.save(update_fields=[
+        "status", "queued_at", "job_type", "cancel_requested", "status_message", "error_message",
+        "progress_percent", "current_segment", "total_segments", "started_at", "finished_at", "updated_at",
+    ])
+    return JsonResponse({"ok": True, "status_url": f"/projects/{project.pk}/status/"})
 
 
 @login_required
@@ -1144,6 +1169,8 @@ def import_scenes(request, project_id):
 @require_POST
 def assemble_videos(request, project_id):
     project = get_object_or_404(NarrationProject, pk=project_id, user=request.user)
+    if project.mode != NarrationProject.Mode.SCENES:
+        return JsonResponse({"ok": False, "error": "L’assemblage de clips est réservé au mode Scènes."}, status=400)
     if project.status in {NarrationProject.Status.QUEUED, NarrationProject.Status.PROCESSING}:
         return JsonResponse({"ok": False, "error": "Ce projet est déjà dans la file ou en cours de traitement."}, status=409)
     segments = list(project.segments.order_by("position", "id"))
@@ -1426,6 +1453,8 @@ def rename_project(request, project_id):
 @require_POST
 def prepare(request, project_id):
     project = get_object_or_404(NarrationProject, pk=project_id, user=request.user)
+    if project.mode == NarrationProject.Mode.ASSEMBLY:
+        return JsonResponse({"ok": False, "error": "Utilise le bouton Rendre la vidéo du mode Assemblage."}, status=400)
     if project.status in {NarrationProject.Status.QUEUED, NarrationProject.Status.PROCESSING}:
         return JsonResponse({"ok": False, "error": "Ce projet est déjà dans la file ou en cours de traitement."}, status=409)
     voice_id = request.POST.get("voice_id") or project.voice_id

@@ -9,7 +9,9 @@ from django.utils import timezone
 from studio.models import NarrationProject, StudioBatch, StudioBatchItem
 from studio.job_control import JobCancelled, mark_job_cancelled
 from studio.services import generate_studio_batch, prepare_project
-from studio.video_services import render_project_video, render_video_assembly, render_video_narration
+from studio.video_services import (
+    render_project_assembly, render_project_video, render_video_assembly, render_video_narration,
+)
 
 
 class Command(BaseCommand):
@@ -29,7 +31,7 @@ class Command(BaseCommand):
             raise CommandError("Un worker de narration tourne déjà pour ce dossier média.") from exc
 
         self.stdout.write(self.style.SUCCESS(
-            "Worker prêt · mode XTTS uniquement pour les projets, lots Studio en série. En attente de narrations…"
+            "Worker prêt · Scènes XTTS, rendus Assemblage directs, lots Studio en série. En attente de tâches…"
         ))
         self._recover_interrupted_jobs()
         self._recover_interrupted_studio_batches()
@@ -65,8 +67,18 @@ class Command(BaseCommand):
             project_id = task_id
             self.stdout.write(f"Préparation du projet {project_id}…")
             try:
-                job_type = NarrationProject.objects.filter(pk=project_id).values_list("job_type", flat=True).first()
-                if job_type == NarrationProject.JobType.ASSEMBLY:
+                project_data = NarrationProject.objects.filter(pk=project_id).values("job_type", "mode").first()
+                if not project_data:
+                    raise RuntimeError("Le projet a été supprimé de la file.")
+                job_type = project_data["job_type"]
+                project_mode = project_data["mode"]
+                if job_type == NarrationProject.JobType.AUDIO_ASSEMBLY:
+                    if project_mode != NarrationProject.Mode.ASSEMBLY:
+                        raise RuntimeError("Le job d’assemblage audio exige le mode Assemblage.")
+                    render_project_assembly(project_id)
+                elif project_mode == NarrationProject.Mode.ASSEMBLY:
+                    raise RuntimeError("Le mode Assemblage doit être lancé avec son type de job dédié.")
+                elif job_type == NarrationProject.JobType.ASSEMBLY:
                     render_video_assembly(project_id)
                 else:
                     prepare_project(project_id)

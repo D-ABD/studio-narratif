@@ -1278,7 +1278,7 @@ class VideoNarrationModeTests(MediaTestCase):
         video_narration.assert_not_called()
         render_video.assert_not_called()
 
-    def test_worker_startup_announces_xtts_only_mode(self):
+    def test_worker_startup_announces_scene_and_assembly_modes(self):
         from .management.commands.run_narration_worker import Command
 
         command = Command()
@@ -1286,7 +1286,7 @@ class VideoNarrationModeTests(MediaTestCase):
         with override_settings(MEDIA_ROOT=Path(self.media_dir.name)):
             command.handle(once=True, poll_seconds=0.25)
 
-        self.assertIn("mode XTTS uniquement", command.stdout.getvalue())
+        self.assertIn("Scènes XTTS, rendus Assemblage directs", command.stdout.getvalue())
 
     def test_probe_clip_extracts_source_video_metadata(self):
         from .video_services import _probe_clip

@@ -1,6 +1,7 @@
 """Local FFmpeg rendering for narrated scenes and imported video clips."""
 import hashlib
 import json
+import math
 import shlex
 import shutil
 import subprocess
@@ -15,7 +16,7 @@ from django.core.files import File
 from django.db import close_old_connections
 from django.utils import timezone
 
-from .models import NarrationProject, NarrationSegment
+from .models import AudioAsset, NarrationProject, NarrationSegment
 from .services import _ffmpeg_path, wav_duration
 from .job_control import (
     JobCancelled, cancellation_checker, check_job_cancellation, mark_job_cancelled,
@@ -549,6 +550,100 @@ def _ass_text(segment, width=ASS_PLAY_RES_X, height=ASS_PLAY_RES_Y):
     return "\n".join(header + dialogue) + "\n"
 
 
+def _ass_text_from_words(words, width=ASS_PLAY_RES_X, height=ASS_PLAY_RES_Y):
+    """Build one global ASS track from the AudioAsset's project-relative word timings."""
+    class WordCaptions:
+        subtitle_data = [{"words": words}]
+
+    return _ass_text(WordCaptions(), width, height)
+
+
+def validate_assembly_project(project):
+    """Validate every database and media input before an assembly render starts."""
+    asset = project.audio_asset
+    if asset is None:
+        raise ValueError("Sélectionne un audio dans la bibliothèque.")
+    if asset.user_id != project.user_id or asset.source != AudioAsset.Source.XTTS:
+        raise ValueError("Cet audio n'a pas de timings utilisables.")
+    try:
+        duration = float(asset.duration)
+    except (TypeError, ValueError):
+        raise ValueError("Cet audio n'a pas de timings utilisables.")
+    if not math.isfinite(duration) or duration <= 0:
+        raise ValueError("Cet audio n'a pas de timings utilisables.")
+
+    timings = asset.timings
+    if not isinstance(timings, dict) or timings.get("version") != 1:
+        raise ValueError("Cet audio n'a pas de timings utilisables.")
+    words = timings.get("words")
+    if words is None or words == []:
+        raise ValueError("Impossible de générer les sous-titres (words manquants).")
+    if not isinstance(words, list):
+        raise ValueError("Cet audio n'a pas de timings utilisables.")
+    previous_start = -1.0
+    for word in words:
+        if not isinstance(word, dict) or not isinstance(word.get("word"), str) or not word["word"].strip():
+            raise ValueError("Cet audio n'a pas de timings utilisables.")
+        try:
+            start, end = float(word["start"]), float(word["end"])
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("Cet audio n'a pas de timings utilisables.")
+        if (not math.isfinite(start) or not math.isfinite(end) or start < 0 or end <= start
+                or end > duration + 0.1 or start < previous_start):
+            raise ValueError("Cet audio n'a pas de timings utilisables.")
+        previous_start = start
+
+    boundaries = timings.get("scene_boundaries")
+    if boundaries is None or boundaries == []:
+        raise ValueError("Impossible de générer la séquence (boundaries manquantes).")
+    if not isinstance(boundaries, list) or len(boundaries) > 30:
+        raise ValueError("Cet audio n'a pas de timings utilisables.")
+    normalized_boundaries = []
+    previous_end = 0.0
+    for index, boundary in enumerate(boundaries):
+        if not isinstance(boundary, dict) or type(boundary.get("scene_index")) is not int:
+            raise ValueError("Cet audio n'a pas de timings utilisables.")
+        try:
+            start, end = float(boundary["start"]), float(boundary["end"])
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("Cet audio n'a pas de timings utilisables.")
+        if (boundary["scene_index"] != index or not math.isfinite(start) or not math.isfinite(end)
+                or start < 0 or end <= start or end > duration + 0.1
+                or abs(start - previous_end) > 0.1):
+            raise ValueError("Cet audio n'a pas de timings utilisables.")
+        normalized_boundaries.append({"scene_index": index, "start": start, "end": end})
+        previous_end = end
+    if abs(normalized_boundaries[0]["start"]) > 0.1 or abs(previous_end - duration) > 0.1:
+        raise ValueError("Cet audio n'a pas de timings utilisables.")
+
+    segments_by_position = {}
+    for segment in project.segments.filter(position__gte=0, position__lt=len(normalized_boundaries)).order_by("position", "id"):
+        segments_by_position.setdefault(segment.position, segment)
+    missing_positions = [
+        position for position in range(len(normalized_boundaries))
+        if position not in segments_by_position
+        or not segments_by_position[position].image
+        or not Path(segments_by_position[position].image.path).is_file()
+    ]
+    if missing_positions:
+        raise ValueError(
+            f"Il manque {len(missing_positions)} image(s) pour les {len(normalized_boundaries)} scènes."
+        )
+
+    if not asset.audio_file or not Path(asset.audio_file.path).is_file():
+        raise ValueError("Le fichier audio sélectionné est introuvable dans la bibliothèque.")
+    if project.background_track and project.background_track.user_id != project.user_id:
+        raise ValueError("La musique sélectionnée n'appartient pas à ce compte.")
+    return {
+        "asset": asset,
+        "audio_path": Path(asset.audio_file.path),
+        "duration": duration,
+        "words": words,
+        "boundaries": normalized_boundaries,
+        "images": [Path(segments_by_position[index].image.path) for index in range(len(normalized_boundaries))],
+    }
+
+
 def _subtitle_filter(subtitle_file):
     return "subtitles=filename=" + Path(subtitle_file).name
 
@@ -990,6 +1085,130 @@ def mix_music_with_video(video_path, music_path, volume, duration, output_path, 
     if not output_path.is_file() or output_path.stat().st_size < 1000:
         raise RuntimeError("FFmpeg n’a pas produit la vidéo avec musique de fond.")
     return output_path
+
+
+def render_project_assembly(project_id):
+    """Render a project from library audio, its boundary images, global ASS, and optional music."""
+    close_old_connections()
+    try:
+        project = NarrationProject.objects.select_related("audio_asset", "background_track").get(pk=project_id)
+        if project.mode != NarrationProject.Mode.ASSEMBLY:
+            raise ValueError("Le projet n’est plus en mode Assemblage.")
+        cancel_check = cancellation_checker(project_id)
+        check_job_cancellation(project_id)
+
+        # All validation occurs before creating the FFmpeg command or output files.
+        inputs = validate_assembly_project(project)
+        boundaries = inputs["boundaries"]
+        width, height = _dimensions(project.video_format)
+        ffmpeg = _ffmpeg_path()
+        project.status_message = "Préparation de l’assemblage audio…"
+        project.total_segments = len(boundaries)
+        project.current_segment = 0
+        project.progress_percent = 5
+        project.save(update_fields=["status_message", "total_segments", "current_segment", "progress_percent", "updated_at"])
+
+        with tempfile.TemporaryDirectory(prefix=f"petit-studio-audio-assembly-{project.pk}-") as temp:
+            folder = Path(temp)
+            subtitle_file = None
+            if project.subtitles_enabled:
+                subtitle_file = folder / "assembly.ass"
+                subtitle_file.write_text(
+                    _ass_text_from_words(inputs["words"], width, height), encoding="utf-8",
+                )
+
+            command = [ffmpeg, "-y", "-v", "error"]
+            filter_parts = []
+            video_labels = []
+            for index, (image_path, boundary) in enumerate(zip(inputs["images"], boundaries)):
+                clip_duration = boundary["end"] - boundary["start"]
+                command.extend([
+                    "-loop", "1", "-framerate", "24", "-t", f"{clip_duration:.3f}",
+                    "-i", str(image_path),
+                ])
+                filters = (
+                    f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+                    f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,"
+                    f"fps=24,setsar=1,trim=duration={clip_duration:.3f},setpts=PTS-STARTPTS"
+                )
+                label = f"visual{index}"
+                filter_parts.append(f"[{index}:v]{filters}[{label}]")
+                video_labels.append(f"[{label}]")
+
+            audio_input_index = len(inputs["images"])
+            command.extend(["-i", str(inputs["audio_path"])])
+            filter_parts.append(
+                "".join(video_labels) + f"concat=n={len(video_labels)}:v=1:a=0[visual]"
+            )
+            video_filter = "[visual]"
+            if subtitle_file:
+                filter_parts.append(f"[visual]{_subtitle_filter(subtitle_file)}[video_out]")
+                video_filter = "[video_out]"
+            command.extend([
+                "-filter_complex", ";".join(filter_parts),
+                "-map", video_filter,
+                "-map", f"{audio_input_index}:a:0",
+                "-af", "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo",
+                "-t", f"{inputs['duration']:.3f}", "-r", "24",
+                *_video_encoder_args(ffmpeg, width, height),
+                "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+                "-ar", "48000", "-ac", "2", "-shortest", "-movflags", "+faststart",
+            ])
+            output = folder / "assembly.mp4"
+            command.append(str(output))
+            project.status_message = "Encodage de l’assemblage avec sous-titres…"
+            project.progress_percent = 15
+            project.save(update_fields=["status_message", "progress_percent", "updated_at"])
+            _run_ffmpeg(command, folder, "rendu direct de l’assemblage", cancel_check=cancel_check)
+            if not output.is_file() or output.stat().st_size < 1000:
+                raise RuntimeError("FFmpeg n’a pas produit de vidéo d’assemblage valide.")
+
+            if project.background_track_id:
+                project.status_message = "Mixage de la musique de fond…"
+                project.progress_percent = 90
+                project.save(update_fields=["status_message", "progress_percent", "updated_at"])
+                mixed_output = folder / "assembly-music.mp4"
+                output = mix_music_with_video(
+                    output,
+                    project.background_track.audio_file.path,
+                    project.music_volume,
+                    inputs["duration"],
+                    mixed_output,
+                    cancel_check=cancel_check,
+                )
+
+            check_job_cancellation(project_id)
+            project.refresh_from_db()
+            if project.video_file:
+                project.video_file.delete(save=False)
+            with output.open("rb") as stream:
+                project.video_file.save(f"assemblage-{project.pk}.mp4", File(stream), save=False)
+            project.duration_seconds = inputs["duration"]
+            project.status = NarrationProject.Status.READY
+            project.status_message = (
+                f"Assemblage prêt · {len(boundaries)} scène(s) · audio de la bibliothèque · {project.video_format}."
+            )
+            project.error_message = ""
+            project.progress_percent = 100
+            project.current_segment = len(boundaries)
+            project.total_segments = len(boundaries)
+            project.finished_at = timezone.now()
+            project.save(update_fields=[
+                "video_file", "duration_seconds", "status", "status_message", "error_message",
+                "progress_percent", "current_segment", "total_segments", "finished_at", "updated_at",
+            ])
+    except JobCancelled:
+        mark_job_cancelled(project_id)
+    except Exception as exc:
+        NarrationProject.objects.filter(pk=project_id).update(
+            status=NarrationProject.Status.ERROR,
+            status_message="Le rendu Assemblage a échoué.",
+            error_message=str(exc)[:2000],
+            queued_at=None,
+            finished_at=timezone.now(),
+        )
+    finally:
+        close_old_connections()
 
 
 def render_video_narration(project_id):
