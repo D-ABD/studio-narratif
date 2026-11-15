@@ -39,4 +39,300 @@
   .queue-history-heading h2 { margin:0; color:#E7EAF0; font-size:12px; letter-spacing:.5px; }
   .queue-history-list { display:grid; gap:7px; margin:0; padding:0; list-style:none; }
   .queue-history-item { display:flex; justify-content:space-between; gap:12px; padding:10px 12px; border:1px solid #2B3441; border-radius:9px; color:#AAB3C1; background:#11161F; font-size:10px; }
-  .queu
+  .queue-history-item strong { color:#DCE1E9; }
+  .queue-history-empty { color:#929BAA; font-size:11px; }
+  .queue-page [hidden] { display: none !important; }
+  @media(max-width:800px) { .queue-grid { grid-template-columns: minmax(0,1fr); } }
+</style>
+
+<section class="queue-page" id="queuePage" data-status-url="{% url 'queue_status' %}" data-csrf-token="{{ csrf_token }}">
+  <p class="queue-intro">Suivi des traitements et annulation depuis une seule page.</p>
+  <div class="queue-grid">
+    <section class="queue-section" aria-labelledby="queueProcessingTitle">
+      <h2 id="queueProcessingTitle">EN COURS</h2>
+      <div class="queue-list" id="processingList">
+        {% for project in processing_projects %}
+        <article class="queue-row is-processing" data-job-id="{{ project.id }}">
+          <div class="queue-row-main"><button id="queue-summary-{{ project.id }}" class="list-accordion-trigger queue-row-summary" type="button" data-list-accordion-trigger aria-expanded="false" aria-controls="queue-details-{{ project.id }}"><span class="queue-project-link" data-job-title>{{ project.title }}</span><span class="queue-row-status" data-job-status>{{ project.get_status_display }}</span><span class="queue-row-summary-progress" data-job-summary-progress>{{ project.progress_percent }} %</span><span class="list-accordion-chevron" aria-hidden="true">▸</span></button></div>
+          <div class="queue-row-panel" id="queue-details-{{ project.id }}" role="region" aria-labelledby="queue-summary-{{ project.id }}" hidden>
+            <progress data-job-progress max="100" value="{{ project.progress_percent }}" aria-label="Progression de {{ project.title }}"></progress>
+            <div class="queue-row-details"><span data-job-segment>Segment {{ project.current_segment }}/{{ project.total_segments }}</span><span data-job-percent>{{ project.progress_percent }} %</span></div>
+            <a data-job-link href="{% url 'project_detail' project.id %}">Ouvrir le projet</a>
+          <div class="queue-row-actions">
+            <form method="post" action="{% url 'cancel_job' project.id %}" data-cancel-form>
+              {% csrf_token %}
+              <button class="queue-cancel-button" type="submit" {% if project.cancel_requested %}disabled{% endif %}>
+                {% if project.cancel_requested %}Annulation demandée…{% else %}Annuler{% endif %}
+              </button>
+            </form>
+          </div></div>
+        </article>
+        {% endfor %}
+      </div>
+      <p class="queue-subempty" id="processingEmpty" {% if processing_projects or not waiting_projects %}hidden{% endif %}>Aucun projet en cours.</p>
+    </section>
+
+    <section class="queue-section" aria-labelledby="queueWaitingTitle">
+      <h2>EN ATTENTE <span class="premium-queue-count" id="queuePageCount">{{ queue_count }}</span></h2>
+      <div class="queue-list" id="waitingList">
+        {% for project in waiting_projects %}
+        <article class="queue-row is-queued" data-job-id="{{ project.id }}">
+          <div class="queue-row-main"><button id="queue-summary-{{ project.id }}" class="list-accordion-trigger queue-row-summary" type="button" data-list-accordion-trigger aria-expanded="false" aria-controls="queue-details-{{ project.id }}"><span class="queue-project-link" data-job-title>{{ project.title }}</span><span class="queue-row-status" data-job-status>Position {{ forloop.counter }}</span><span class="queue-row-summary-progress" data-job-summary-progress hidden></span><span class="list-accordion-chevron" aria-hidden="true">▸</span></button></div>
+          <div class="queue-row-panel" id="queue-details-{{ project.id }}" role="region" aria-labelledby="queue-summary-{{ project.id }}" hidden>
+            <div class="queue-row-details"><span data-job-message>{{ project.status_message|default:"En attente du worker" }}</span><span>En file</span></div>
+            <a data-job-link href="{% url 'project_detail' project.id %}">Ouvrir le projet</a>
+          <div class="queue-row-actions">
+            <form method="post" action="{% url 'cancel_job' project.id %}" data-cancel-form>
+              {% csrf_token %}
+              <button class="queue-cancel-button" type="submit" {% if project.cancel_requested %}disabled{% endif %}>
+                {% if project.cancel_requested %}Annulation demandée…{% else %}Annuler{% endif %}
+              </button>
+            </form>
+          </div></div>
+        </article>
+        {% endfor %}
+      </div>
+      <p class="queue-subempty" id="waitingEmpty" {% if waiting_projects or not processing_projects %}hidden{% endif %}>Aucun projet en attente.</p>
+    </section>
+  </div>
+
+  <div class="queue-empty" id="queueEmpty" {% if processing_projects or waiting_projects %}hidden{% endif %}>
+    <strong>La file est vide.</strong>
+    Aucun projet n'est en cours ni en attente.
+  </div>
+  <section class="queue-history" aria-labelledby="queueHistoryTitle">
+    <div class="queue-history-heading">
+      <h2 id="queueHistoryTitle">HISTORIQUE DES LOTS STUDIO TERMINÉS ({{ terminal_batch_count }})</h2>
+      {% if terminal_batch_count %}
+      <form method="post" action="{% url 'dismiss_completed_batches' %}" {% if terminal_batch_count > 1 %}onsubmit="return confirm('Effacer les {{ terminal_batch_count }} lots Studio terminés ? Les audios générés seront conservés.')"{% endif %}>
+        {% csrf_token %}
+        <button class="button button-secondary button-small danger" type="submit">Effacer les tâches terminées</button>
+      </form>
+      {% endif %}
+    </div>
+    {% if terminal_batches %}
+    <ul class="queue-history-list">
+      {% for batch in terminal_batches %}
+      <li class="queue-history-item">
+        <button id="queue-batch-summary-{{ batch.id }}" class="list-accordion-trigger queue-history-summary" type="button" data-list-accordion-trigger aria-expanded="false" aria-controls="queue-batch-details-{{ batch.id }}"><span><strong>{% if batch.name_prefix %}{{ batch.name_prefix }}{% else %}Lot #{{ batch.id }}{% endif %}</strong> · {{ batch.total_items }} narration{{ batch.total_items|pluralize:"s" }} · {{ batch.get_status_display }}</span>{% if batch.finished_at %}<time datetime="{{ batch.finished_at|date:'c' }}">{{ batch.finished_at|date:"d/m/Y H:i" }}</time>{% endif %}<span class="list-accordion-chevron" aria-hidden="true">▸</span></button>
+        <div class="queue-history-panel" id="queue-batch-details-{{ batch.id }}" role="region" aria-labelledby="queue-batch-summary-{{ batch.id }}" hidden>
+          {% for item in batch.items.all %}<p><strong>{{ forloop.counter }}. {{ item.asset_name }}</strong> · {{ item.get_status_display }}{% if item.error_message %}<span class="queue-history-error"> · {{ item.error_message }}</span>{% endif %}{% if item.audio_asset and item.audio_asset.audio_file %} · <a href="{{ item.audio_asset.audio_file.url }}" download>WAV ↓</a>{% endif %}</p>{% empty %}<p>Aucune narration dans ce lot.</p>{% endfor %}
+        </div>
+      </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+    <p class="queue-history-empty">Aucun lot Studio terminé à effacer.</p>
+    {% endif %}
+  </section>
+  <p class="queue-refresh-note" id="queueRefreshNote" role="status">Actualisation automatique toutes les 2,5 secondes.</p>
+</section>
+
+<script>
+(() => {
+  const page = document.getElementById('queuePage');
+  if (!page) return;
+  const processingList = document.getElementById('processingList');
+  const waitingList = document.getElementById('waitingList');
+  const processingEmpty = document.getElementById('processingEmpty');
+  const waitingEmpty = document.getElementById('waitingEmpty');
+  const queueEmpty = document.getElementById('queueEmpty');
+  const pageCount = document.getElementById('queuePageCount');
+  const sidebarCount = document.getElementById('queueCountBadge');
+  const refreshNote = document.getElementById('queueRefreshNote');
+  const csrfToken = page.dataset.csrfToken || document.querySelector('[name=csrfmiddlewaretoken]')?.value || '';
+  let refreshing = false;
+
+  const makeProjectRow = project => {
+    const article = document.createElement('article');
+    article.className = 'queue-row';
+    article.dataset.jobId = String(project.id);
+    const main = document.createElement('div');
+    main.className = 'queue-row-main';
+    const summary = document.createElement('button');
+    summary.type = 'button';
+    summary.className = 'list-accordion-trigger queue-row-summary';
+    summary.dataset.listAccordionTrigger = '';
+    summary.setAttribute('aria-expanded', 'false');
+    summary.id = 'queue-summary-' + project.id;
+    summary.setAttribute('aria-controls', 'queue-details-' + project.id);
+    const title = document.createElement('span');
+    title.className = 'queue-project-link';
+    title.dataset.jobTitle = '';
+    const status = document.createElement('span');
+    status.className = 'queue-row-status';
+    status.dataset.jobStatus = '';
+    const summaryProgress = document.createElement('span');
+    summaryProgress.className = 'queue-row-summary-progress';
+    summaryProgress.dataset.jobSummaryProgress = '';
+    const chevron = document.createElement('span');
+    chevron.className = 'list-accordion-chevron';
+    chevron.setAttribute('aria-hidden', 'true');
+    chevron.textContent = '▸';
+    summary.append(title, status, summaryProgress, chevron);
+    main.append(summary);
+    article.append(main);
+
+    const panel = document.createElement('div');
+    panel.className = 'queue-row-panel';
+    panel.id = 'queue-details-' + project.id;
+    panel.setAttribute('role', 'region');
+    panel.setAttribute('aria-labelledby', summary.id);
+    panel.hidden = true;
+    const progress = document.createElement('progress');
+    progress.dataset.jobProgress = '';
+    progress.max = 100;
+    const details = document.createElement('div');
+    details.className = 'queue-row-details';
+    const segment = document.createElement('span');
+    segment.dataset.jobSegment = '';
+    const percent = document.createElement('span');
+    percent.dataset.jobPercent = '';
+    details.append(segment, percent);
+    const message = document.createElement('p');
+    message.dataset.jobMessage = '';
+    const projectLink = document.createElement('a');
+    projectLink.dataset.jobLink = '';
+    projectLink.textContent = 'Ouvrir le projet';
+    panel.append(progress, details, message, projectLink);
+    const actions = document.createElement('div');
+    actions.className = 'queue-row-actions';
+    const form = document.createElement('form');
+    form.method = 'post';
+    form.action = project.cancel_url;
+    form.dataset.cancelForm = '';
+    const csrf = document.createElement('input');
+    csrf.type = 'hidden';
+    csrf.name = 'csrfmiddlewaretoken';
+    csrf.value = csrfToken;
+    const button = document.createElement('button');
+    button.className = 'queue-cancel-button';
+    button.type = 'submit';
+    button.disabled = Boolean(project.cancel_requested);
+    button.textContent = project.cancel_requested ? 'Annulation demandée…' : 'Annuler';
+    form.append(csrf, button);
+    actions.append(form);
+    panel.append(actions);
+    article.append(panel);
+    return article;
+  };
+
+  const updateProjectRow = (article, project, isProcessing, position) => {
+    article.className = 'queue-row ' + (isProcessing ? 'is-processing' : 'is-queued');
+    article.dataset.jobId = String(project.id);
+    const summary = article.querySelector('[data-list-accordion-trigger]');
+    const title = article.querySelector('[data-job-title]');
+    const status = article.querySelector('[data-job-status]');
+    const summaryProgress = article.querySelector('[data-job-summary-progress]');
+    const progress = article.querySelector('[data-job-progress]');
+    const segment = article.querySelector('[data-job-segment]');
+    const percent = article.querySelector('[data-job-percent]');
+    const message = article.querySelector('[data-job-message]');
+    const link = article.querySelector('[data-job-link]');
+    const form = article.querySelector('[data-cancel-form]');
+    const cancelButton = form?.querySelector('button[type="submit"]');
+    if (title) title.textContent = project.title;
+    if (status) status.textContent = isProcessing ? project.status_label : 'Position ' + position;
+    if (summaryProgress) {
+      summaryProgress.textContent = isProcessing ? project.progress + ' %' : '';
+      summaryProgress.hidden = !isProcessing;
+    }
+    if (progress) {
+      progress.value = Math.max(0, Math.min(100, Number(project.progress) || 0));
+      progress.setAttribute('aria-label', 'Progression de ' + project.title);
+      progress.hidden = !isProcessing;
+    }
+    if (segment) segment.textContent = isProcessing ? 'Segment ' + project.current_segment + '/' + project.total_segments : 'En attente';
+    if (percent) percent.textContent = isProcessing ? project.progress + ' %' : 'En file';
+    if (message) message.textContent = project.status_message || project.status_label || 'En attente du worker';
+    if (link) link.href = project.detail_url;
+    if (form) form.action = project.cancel_url;
+    if (cancelButton) {
+      cancelButton.disabled = Boolean(project.cancel_requested);
+      cancelButton.textContent = project.cancel_requested ? 'Annulation demandée…' : 'Annuler';
+    }
+    if (summary) summary.setAttribute('aria-expanded', String(!article.querySelector('.queue-row-panel')?.hidden));
+  };
+
+  const reconcileRows = (container, projects, isProcessing, existingRows) => {
+    const retained = new Set();
+    projects.forEach((project, index) => {
+      const key = String(project.id);
+      const row = existingRows.get(key) || makeProjectRow(project);
+      updateProjectRow(row, project, isProcessing, index + 1);
+      retained.add(key);
+      const currentAtPosition = container.children[index];
+      if (currentAtPosition !== row) container.insertBefore(row, currentAtPosition || null);
+    });
+    Array.from(container.children).forEach(row => {
+      if (!retained.has(row.dataset.jobId)) row.remove();
+    });
+  };
+
+  const refreshQueue = async () => {
+    if (refreshing) return;
+    refreshing = true;
+    try {
+      const currentParams = new URLSearchParams(window.location.search);
+      const pollParams = new URLSearchParams();
+      ['per_page', 'page'].forEach(key => {
+        if (currentParams.has(key)) pollParams.set(key, currentParams.get(key));
+      });
+      const pollUrl = new URL(page.dataset.statusUrl, window.location.origin);
+      pollUrl.search = pollParams.toString();
+      const response = await fetch(pollUrl.toString(), {
+        headers: {Accept: 'application/json'},
+        cache: 'no-store',
+      });
+      if (!response.ok) throw new Error('Statut HTTP ' + response.status);
+      const data = await response.json();
+      const existingRows = new Map();
+      [processingList, waitingList].forEach(list => Array.from(list.children).forEach(row => existingRows.set(row.dataset.jobId, row)));
+      reconcileRows(processingList, data.processing, true, existingRows);
+      reconcileRows(waitingList, data.waiting, false, existingRows);
+      const isEmpty = data.processing.length === 0 && data.waiting.length === 0;
+      processingEmpty.hidden = isEmpty || data.processing.length > 0;
+      waitingEmpty.hidden = isEmpty || data.waiting.length > 0;
+      queueEmpty.hidden = !isEmpty;
+      pageCount.textContent = String(data.queue_count);
+      if (sidebarCount) {
+        sidebarCount.textContent = String(data.queue_count);
+        sidebarCount.setAttribute('aria-label', data.queue_count + ' projet(s) en attente');
+      }
+      refreshNote.textContent = 'Mis à jour à ' + new Date().toLocaleTimeString('fr-FR', {hour: '2-digit', minute: '2-digit', second: '2-digit'});
+    } catch (error) {
+      refreshNote.textContent = 'Actualisation impossible. Nouvelle tentative automatique.';
+    } finally {
+      refreshing = false;
+    }
+  };
+
+  document.addEventListener('submit', async event => {
+    const form = event.target.closest('form[data-cancel-form]');
+    if (!form) return;
+    event.preventDefault();
+    const button = form.querySelector('button[type="submit"]');
+    if (!button) return;
+    button.disabled = true;
+    button.textContent = 'Annulation…';
+    try {
+      const response = await fetch(form.action, {
+        method: 'POST',
+        body: new FormData(form),
+        headers: {'X-CSRFToken': csrfToken},
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Impossible d’annuler ce traitement.');
+      await refreshQueue();
+    } catch (error) {
+      button.disabled = false;
+      button.textContent = 'Annuler';
+      refreshNote.textContent = error.message;
+    }
+  });
+
+  refreshQueue();
+  window.setInterval(refreshQueue, 2500);
+})();
+</script>
+{% endblock %}

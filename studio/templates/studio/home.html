@@ -59,4 +59,131 @@
           <summary>Modifier la voix <span aria-hidden="true">⌄</span></summary>
           <form method="post" action="{% url 'edit_voice' voice.id %}" class="home-edit-voice-form">
             {% csrf_token %}
-            <label>Nom de la voix<input class="home-control" type="text" name="name" value="{{ voice.name }}" maxleng
+            <label>Nom de la voix<input class="home-control" type="text" name="name" value="{{ voice.name }}" maxlength="80" required></label>
+            <label>Catégorie
+              <select class="home-control" name="category">
+                {% for value,label in categories %}<option value="{{ value }}" {% if voice.category == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
+              </select>
+            </label>
+            <button class="home-button home-button-secondary" type="submit">Enregistrer</button>
+          </form>
+          <form method="post" action="{% url 'delete_voice' voice.id %}" onsubmit="return confirm('Supprimer définitivement la voix « {{ voice.name|escapejs }} » et son échantillon ?')">
+            {% csrf_token %}
+            <input type="hidden" name="confirm" value="yes">
+            <button class="home-delete-button" type="submit">Supprimer la voix</button>
+          </form>
+        </details>
+      </article>
+      {% empty %}
+      <div class="home-empty-state">
+        <span aria-hidden="true">♫</span>
+        <h3>Aucune voix trouvée</h3>
+        <p>Ajoute une voix ou modifie tes critères de recherche.</p>
+      </div>
+      {% endfor %}
+    </div>
+
+    <details class="home-add-voice" id="add-voice">
+      <summary><span class="home-add-icon" aria-hidden="true">＋</span><span><b>Ajouter ou enregistrer une voix</b><small>Importe un échantillon ou utilise ton microphone.</small></span><span class="home-disclosure-icon" aria-hidden="true">⌄</span></summary>
+      <form action="{% url 'create_voice' %}" method="post" enctype="multipart/form-data" class="home-voice-form" id="voiceForm">
+        {% csrf_token %}
+        <div class="home-form-fields">
+          <label>Nom de la voix
+            <input required class="home-control" type="text" name="name" maxlength="80" placeholder="Ex. Ma voix">
+          </label>
+          <label>Catégorie
+            <select class="home-control" name="category">
+              {% for value,label in categories %}<option value="{{ value }}" {% if value == "autre" %}selected{% endif %}>{{ label }}</option>{% endfor %}
+            </select>
+          </label>
+        </div>
+        <label class="home-audio-upload">
+          <span class="home-upload-icon" aria-hidden="true">↑</span>
+          <strong>Choisir un échantillon audio</strong>
+          <span>WAV ou MP3 · 25 Mo maximum</span>
+          <input type="file" name="sample" id="sampleInput" accept="audio/wav,audio/mpeg,audio/mp3,.wav,.mp3,.webm,.m4a,.ogg" required>
+        </label>
+        <div class="home-record-controls">
+          <button type="button" id="recordButton" class="home-button home-button-secondary">● Enregistrer avec le micro</button>
+          <span id="recordStatus" class="home-helper-text">Écoute l’échantillon avant de l’enregistrer.</span>
+        </div>
+        <audio id="samplePreview" class="home-sample-preview" controls hidden></audio>
+        <label class="home-consent">
+          <input type="checkbox" name="voice_consent" required>
+          <span>Je confirme être autorisé·e à cloner et utiliser cette voix.</span>
+        </label>
+        <button class="home-button home-button-primary" type="submit">Enregistrer la voix <span aria-hidden="true">→</span></button>
+      </form>
+    </details>
+  </section>
+
+  <section class="home-section home-projects-section" id="projects" aria-labelledby="projectsTitle">
+    <div class="home-section-heading">
+      <div>
+        <span class="home-eyebrow">TES CRÉATIONS</span>
+        <h2 id="projectsTitle">Mes projets</h2>
+        <p>Reprends un projet sauvegardé ou démarre une nouvelle narration.</p>
+      </div>
+      <span class="home-section-count">{{ project_count }} projets</span>
+      <form class="list-page-size" method="get" action="{% url 'home' %}#projects">
+        {% if query %}<input type="hidden" name="q" value="{{ query }}">{% endif %}
+        {% if selected_category %}<input type="hidden" name="category" value="{{ selected_category }}">{% endif %}
+        <label for="homeProjectPageSize">Par page</label>
+        <select id="homeProjectPageSize" name="per_page">
+          <option value="5" {% if project_per_page == 5 %}selected{% endif %}>5</option>
+          <option value="10" {% if project_per_page == 10 %}selected{% endif %}>10</option>
+          <option value="20" {% if project_per_page == 20 %}selected{% endif %}>20</option>
+        </select>
+        <button type="submit">Appliquer</button>
+      </form>
+    </div>
+
+    <div class="home-project-grid">
+      {% for item in projects %}
+      <article class="home-project-card">
+        <button class="list-accordion-trigger home-project-card-top" type="button" data-list-accordion-trigger aria-expanded="false" aria-controls="home-project-{{ item.id }}">
+          <span class="home-project-icon" aria-hidden="true">{% if item.status == 'ready' %}▶{% else %}♫{% endif %}</span>
+          <span class="home-project-summary-title">{{ item.title }}</span>
+          <span class="home-status-badge {{ item.status }}">{{ item.get_status_display }}</span>
+          <span class="list-accordion-chevron" aria-hidden="true">▸</span>
+        </button>
+        <div class="home-project-meta">{{ item.segments.count }} segment{{ item.segments.count|pluralize }} <span aria-hidden="true">·</span> Modifié le {{ item.updated_at|date:"d/m/Y à H:i" }} <span class="home-mode-badge">{{ item.get_mode_display }}</span></div>
+        <div class="home-project-panel" id="home-project-{{ item.id }}" role="region" aria-label="Détails de {{ item.title }}" hidden>
+          <div class="home-project-actions">
+            <a class="home-project-open" href="{% url 'project_detail' item.id %}">Ouvrir l’éditeur <span aria-hidden="true">→</span></a>
+            <form method="post" action="{% url 'delete_project' item.id %}" onsubmit="return confirm('Supprimer définitivement le projet « {{ item.title|escapejs }} » ?')">
+              {% csrf_token %}
+              <input type="hidden" name="confirm" value="1">
+              <input type="hidden" name="next" value="{{ request.get_full_path }}">
+              <button class="home-project-delete" type="submit" {% if item.status == 'processing' %}disabled title="Annule d’abord le traitement en cours"{% endif %}>Supprimer</button>
+            </form>
+          </div>
+        </div>
+      </article>
+      {% empty %}
+      <div class="home-empty-state home-project-empty">
+        <span aria-hidden="true">▤</span>
+        <h3>Pas encore de projet</h3>
+        <p>Crée ton premier projet pour commencer une narration.</p>
+      </div>
+      {% endfor %}
+    </div>
+    {% if project_page.has_other_pages %}
+    <nav class="pagination-controls" aria-label="Pagination des projets de l’accueil">
+      {% if project_page.has_previous %}<a href="?{{ pagination_params }}&amp;page={{ project_page.previous_page_number }}#projects" rel="prev">← Précédent</a>{% endif %}
+      <span>Page {{ project_page.number }} / {{ project_page.paginator.num_pages }}</span>
+      {% if project_page.has_next %}<a href="?{{ pagination_params }}&amp;page={{ project_page.next_page_number }}#projects" rel="next">Suivant →</a>{% endif %}
+    </nav>
+    {% endif %}
+
+    <form action="{% url 'create_project' %}" method="post" id="new-project" class="home-create-project">
+      {% csrf_token %}
+      <label for="projectTitle">Nom du projet (facultatif)</label>
+      <div class="home-create-project-fields">
+        <input class="home-control" id="projectTitle" name="title" maxlength="120" placeholder="Ex. Message de motivation">
+        <button class="home-button home-button-primary" type="submit">Créer le projet <span aria-hidden="true">→</span></button>
+      </div>
+    </form>
+  </section>
+</div>
+{% endblock %}

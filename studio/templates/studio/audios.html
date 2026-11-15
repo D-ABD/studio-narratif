@@ -39,4 +39,59 @@
 
   <section class="card">
     <div class="section-title"><div><span class="step-number">♫</span><h2>Mes audios</h2></div><span class="muted small">{{ audio_page.paginator.count }} fichier{{ audio_page.paginator.count|pluralize:"s" }}</span>
-      <form class="list-page-size" method="get" action="{% url 'audios' %}"><label for="audioPageSize">Par page</label><select id="audioPageSize" name="per_page"><option value="5" {% if audio_per_page == 5 %}sel
+      <form class="list-page-size" method="get" action="{% url 'audios' %}"><label for="audioPageSize">Par page</label><select id="audioPageSize" name="per_page"><option value="5" {% if audio_per_page == 5 %}selected{% endif %}>5</option><option value="10" {% if audio_per_page == 10 %}selected{% endif %}>10</option><option value="20" {% if audio_per_page == 20 %}selected{% endif %}>20</option></select><button type="submit">Appliquer</button></form>
+      <a class="button button-secondary button-small" href="">↻ Actualiser</a>
+    </div>
+    {% if audio_assets %}
+    <div class="audio-library-table-wrap">
+      <table class="audio-library-table">
+        <thead><tr><th>Audio et aperçu</th><th>Durée</th><th>Source</th><th>Ajouté le</th><th>Actions</th></tr></thead>
+        <tbody>
+          {% for asset in audio_assets %}
+          <tr>
+            <td><div class="audio-name"><strong>{{ asset.name }}</strong></div></td>
+            <td>{{ asset.duration_mmss }}</td>
+            <td><span class="audio-source-badge">{% if asset.source == 'upload' %}Uploadé{% else %}XTTS{% endif %}</span></td>
+            <td>{{ asset.created_at|date:"d/m/Y H:i" }}</td>
+            <td>
+              <div class="audio-row-actions"><button class="button button-secondary button-small" type="button" data-list-accordion-trigger aria-expanded="false" aria-controls="audio-details-{{ asset.id }}">Aperçu et actions</button></div>
+            </td>
+          </tr>
+          <tr>
+            <td colspan="5"><div class="audio-accordion-panel" id="audio-details-{{ asset.id }}" role="region" aria-label="Aperçu et actions pour {{ asset.name }}" hidden>
+              <audio controls preload="none" src="{{ asset.audio_file.url }}" aria-label="Aperçu de {{ asset.name }}"></audio>
+              <div class="audio-row-actions">
+                <details class="audio-rename-details">
+                  <summary class="button button-secondary button-small">Renommer</summary>
+                  <form method="post" action="{% url 'rename_audio_asset' asset.id %}" class="audio-rename-form">
+                    {% csrf_token %}
+                    <label class="sr-only" for="audioName{{ asset.id }}">Nouveau nom pour {{ asset.name }}</label>
+                    <input id="audioName{{ asset.id }}" type="text" name="name" value="{{ asset.name }}" maxlength="100" required>
+                    <button class="button button-primary button-small" type="submit">Enregistrer</button>
+                  </form>
+                </details>
+                <form method="post" action="{% url 'delete_audio_asset' asset.id %}" onsubmit="return confirm('Supprimer cet audio ? Cette action est définitive.');">
+                  {% csrf_token %}<input type="hidden" name="confirm" value="1">
+                  <button class="button button-secondary button-small danger" type="submit">Supprimer</button>
+                </form>
+              </div>
+            </div></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="audio-empty">Aucun audio pour l'instant. Uploade ton premier fichier.</p>
+    {% endif %}
+    {% if audio_page.has_other_pages %}
+    <nav class="pagination-controls" aria-label="Pagination de la bibliothèque audio">
+      {% if audio_page.has_previous %}<a href="?{{ pagination_params }}&amp;page={{ audio_page.previous_page_number }}" rel="prev">← Précédent</a>{% endif %}
+      <span>Page {{ audio_page.number }} / {{ audio_page.paginator.num_pages }}</span>
+      {% if audio_page.has_next %}<a href="?{{ pagination_params }}&amp;page={{ audio_page.next_page_number }}" rel="next">Suivant →</a>{% endif %}
+    </nav>
+    {% endif %}
+  </section>
+  <div><a class="text-link" href="{% url 'home' %}">← Retour à l’accueil</a></div>
+</div>
+{% endblock %}

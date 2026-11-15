@@ -50,4 +50,11 @@
     {% endfor %}
   </div>
   {% if project_page.has_other_pages %}
-  <n
+  <nav class="pagination-controls" aria-label="Pagination des projets">
+    {% if project_page.has_previous %}<a href="?{{ pagination_params }}&amp;page={{ project_page.previous_page_number }}" rel="prev">← Précédent</a>{% endif %}
+    <span>Page {{ project_page.number }} / {{ project_page.paginator.num_pages }}</span>
+    {% if project_page.has_next %}<a href="?{{ pagination_params }}&amp;page={{ project_page.next_page_number }}" rel="next">Suivant →</a>{% endif %}
+  </nav>
+  {% endif %}
+</section>
+{% endblock %}
