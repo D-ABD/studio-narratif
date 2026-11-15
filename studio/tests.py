@@ -613,6 +613,13 @@ class ListPaginationAndBatchDismissTests(MediaTestCase):
         self.assertEqual(len(response.context["sidebar_projects"]), 15)
         self.assertEqual(response.context["sidebar_project_count"], 17)
 
+    def test_sidebar_project_link_is_named_mes_projets(self):
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Mes projets")
+        self.assertNotContains(response, "Mes narrations")
+
     def test_all_projects_page_is_scoped_to_the_logged_in_user(self):
         own_project = NarrationProject.objects.create(user=self.user, title="Projet à moi")
         other_user = get_user_model().objects.create_user(username="projects-private", password="SafePass123!x")
