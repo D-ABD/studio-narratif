@@ -2154,10 +2154,12 @@ class ProjectDuplicationTests(MediaTestCase):
     def test_assembly_duplicate_copies_settings_and_media_references_but_resets_runtime_state(self):
         source, source_segment, image_name = self.make_source_project()
 
-        response = self.client.post(f"/projects/{source.pk}/duplicate/")
+        response = self.client.post(f"/projects/{source.pk}/duplicate/", follow=True)
 
-        duplicate = NarrationProject.objects.exclude(pk=source.pk).get()
-        self.assertRedirects(response, f"/projects/{duplicate.pk}/")
+        duplicate = response.context["project"]
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.redirect_chain, [(f"/projects/{duplicate.pk}/", 302)])
+        self.assertContains(response, "Projet dupliqué. Tu peux maintenant modifier les visuels.")
         self.assertEqual(duplicate.title, "Projet test (copie)")
         self.assertEqual(duplicate.mode, source.mode)
         self.assertEqual(duplicate.voice_id, source.voice_id)
@@ -2199,7 +2201,6 @@ class ProjectDuplicationTests(MediaTestCase):
 
         detail = self.client.get(f"/projects/{duplicate.pk}/")
         self.assertEqual(detail.context["projects"][0].pk, duplicate.pk)
-        self.assertContains(detail, "Projet dupliqué. Tu peux maintenant modifier les visuels.")
 
     def test_scene_duplicate_reuses_the_persistent_xtts_cache(self):
         source, source_segment, _image_name = self.make_source_project(mode=NarrationProject.Mode.SCENES)
