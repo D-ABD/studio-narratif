@@ -43,7 +43,9 @@ MAX_VIDEO_CLIP_BYTES = 200 * 1024 * 1024
 MAX_IMPORT_BYTES = 500 * 1024 * 1024
 MAX_IMPORT_PIXELS = 100_000_000
 MAX_MUSIC_BYTES = 50 * 1024 * 1024
+MAX_AUDIO_ASSET_BYTES = 100 * 1024 * 1024
 ALLOWED_MUSIC_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg"}
+ALLOWED_AUDIO_ASSET_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg"}
 ALLOWED_SAMPLE_EXTENSIONS = {".wav", ".mp3", ".webm", ".m4a", ".ogg"}
 ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm"}
 ANIMATION_EFFECT_DEFINITIONS = (
@@ -360,10 +362,120 @@ def musics(request):
 
 @login_required
 def audios(request):
+    return _audio_library_response(request)
+
+
+def _audio_library_response(request, *, status=200):
+    audio_assets = list(
+        AudioAsset.objects.filter(user=request.user).order_by("-created_at", "-id")
+    )
+    for asset in audio_assets:
+        minutes, seconds = divmod(max(0, round(asset.duration)), 60)
+        asset.duration_mmss = f"{minutes:02d}:{seconds:02d}"
     return render(request, "studio/audios.html", {
-        "audio_assets": AudioAsset.objects.filter(user=request.user),
+        "audio_assets": audio_assets,
         "projects": NarrationProject.objects.filter(user=request.user)[:30],
-    })
+    }, status=status)
+
+
+def _unlink_audio_asset_file(path):
+    try:
+        Path(path).unlink()
+    except FileNotFoundError:
+        logger.warning("Le fichier audio %s était déjà absent lors de sa suppression.", path)
+    except OSError:
+        logger.warning("Impossible de supprimer le fichier audio %s après suppression en base.", path, exc_info=True)
+
+
+@login_required
+@require_POST
+def upload_audio_asset(request):
+    upload = request.FILES.get("audio_file")
+    if not upload or upload.size <= 0:
+        messages.error(request, "Sélectionne un fichier audio.")
+        return _audio_library_response(request, status=400)
+    if upload.size > MAX_AUDIO_ASSET_BYTES:
+        messages.error(request, "Le fichier audio dépasse la limite de 100 Mo.")
+        return _audio_library_response(request, status=400)
+    extension = Path(upload.name).suffix.lower()
+    if extension not in ALLOWED_AUDIO_ASSET_EXTENSIONS:
+        messages.error(request, "Formats acceptés : MP3, WAV, M4A et OGG.")
+        return _audio_library_response(request, status=400)
+
+    asset = None
+    created_file = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="petit-studio-audio-asset-") as folder:
+            staged_path = Path(folder) / f"upload{extension}"
+            _stream_upload_to_path(upload, staged_path)
+            duration = _probe_music_duration(staged_path)
+            name = Path(upload.name).stem.strip()[:100] or "Audio importé"
+            asset = AudioAsset(
+                user=request.user,
+                name=name,
+                duration=duration,
+                source=AudioAsset.Source.UPLOAD,
+            )
+            with staged_path.open("rb") as stream:
+                asset.audio_file.save(Path(upload.name).name, File(stream), save=False)
+            if asset.audio_file.name:
+                created_file = (asset.audio_file.storage, asset.audio_file.name)
+            asset.save()
+        messages.success(request, f"L’audio « {asset.name} » a été ajouté à ta bibliothèque.")
+        return redirect("audios")
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        if created_file:
+            _delete_storage_files([created_file])
+        logger.info("Import audio refusé pour l’utilisateur %s : %s", request.user.pk, exc)
+        messages.error(request, str(exc) or "Impossible de lire ce fichier audio.")
+        return _audio_library_response(request, status=400)
+    except Exception:
+        if created_file:
+            _delete_storage_files([created_file])
+        logger.exception("Échec de l’enregistrement d’un audio pour l’utilisateur %s.", request.user.pk)
+        messages.error(request, "Impossible d’enregistrer cet audio.")
+        return _audio_library_response(request, status=500)
+
+
+@login_required
+@require_POST
+def rename_audio_asset(request, asset_id):
+    asset = get_object_or_404(AudioAsset, pk=asset_id, user=request.user)
+    name = (request.POST.get("name") or "").strip()
+    if not name:
+        messages.error(request, "Le nom de l’audio ne peut pas être vide.")
+        return _audio_library_response(request, status=400)
+    if len(name) > 100:
+        messages.error(request, "Le nom de l’audio ne peut pas dépasser 100 caractères.")
+        return _audio_library_response(request, status=400)
+
+    asset.name = name
+    asset.save(update_fields=["name", "updated_at"])
+    messages.success(request, f"L’audio a été renommé « {asset.name} ».")
+    return redirect("audios")
+
+
+@login_required
+@require_POST
+def delete_audio_asset(request, asset_id):
+    if request.POST.get("confirm") != "1":
+        messages.error(request, "Confirmation manquante")
+        return _audio_library_response(request, status=400)
+
+    with transaction.atomic():
+        asset = get_object_or_404(
+            AudioAsset.objects.select_for_update(), pk=asset_id, user=request.user,
+        )
+        if asset.project_id is not None:
+            messages.error(request, "Impossible de supprimer cet audio : il est référencé par un projet.")
+            return _audio_library_response(request, status=400)
+        audio_path = asset.audio_file.path if asset.audio_file else None
+        asset.delete()
+        if audio_path:
+            transaction.on_commit(lambda path=audio_path: _unlink_audio_asset_file(path))
+
+    messages.success(request, f"L’audio « {asset.name} » a été supprimé.")
+    return redirect("audios")
 
 
 @login_required

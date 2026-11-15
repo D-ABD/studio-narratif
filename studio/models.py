@@ -114,6 +114,13 @@ class AudioAsset(models.Model):
     name = models.CharField("nom", max_length=160)
     audio_file = models.FileField("fichier audio", upload_to=audio_asset_upload_to)
     duration = models.FloatField("durée en secondes", validators=[MinValueValidator(0)])
+    # NULL in this CRUD lot; filled by the standalone studio in phase 3.7.
+    # Shape: {"version": 1, "words": [{"word": str, "start": float, "end": float}],
+    # "segments": [{"text": str, "start": float, "end": float}],
+    # "scene_boundaries": [{"scene_index": int, "start": float, "end": float}]}.
+    # Mono-scene uses [{"scene_index": 0, "start": 0.0, "end": duration}];
+    # multi-scene stores N boundaries so phase 3.8 can use the same assembly path.
+    timings = models.JSONField("timings", null=True, blank=True)
     source = models.CharField(max_length=8, choices=Source.choices, default=Source.UPLOAD)
     text = models.TextField(null=True, blank=True)
     voice = models.ForeignKey(

@@ -138,14 +138,16 @@ class BackgroundMusicLibraryTests(MediaTestCase):
         probe.assert_not_called()
 
 
-class AudioAssetLibraryPlaceholderTests(MediaTestCase):
+class AudioAssetLibraryTests(MediaTestCase):
     def make_asset(self, user, name):
         asset = AudioAsset(user=user, name=name, duration=12.5, source=AudioAsset.Source.UPLOAD)
         asset.audio_file.save("future-library.mp3", ContentFile(b"audio bytes"), save=True)
         return asset
 
-    def test_audio_asset_and_placeholder_page_remain_available_and_isolated(self):
+    def test_audio_library_lists_only_owner_assets_with_duration_and_preview(self):
         own_asset = self.make_asset(self.user, "Mon audio")
+        newer_asset = self.make_asset(self.user, "Audio récent")
+        AudioAsset.objects.filter(pk=own_asset.pk).update(created_at=timezone.now() - timedelta(days=1))
         other_user = get_user_model().objects.create_user(username="audio-owner", password="SafePass123!x")
         self.make_asset(other_user, "Audio privé")
 
@@ -153,8 +155,71 @@ class AudioAssetLibraryPlaceholderTests(MediaTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Mon audio")
+        self.assertContains(response, "Audio récent")
         self.assertNotContains(response, "Audio privé")
-        self.assertEqual(list(response.context["audio_assets"]), [own_asset])
+        self.assertEqual(list(response.context["audio_assets"]), [newer_asset, own_asset])
+        self.assertEqual(response.context["audio_assets"][1].duration_mmss, "00:12")
+        self.assertContains(response, "Uploadé")
+        self.assertContains(response, "<audio", html=False)
+
+    @patch("studio.views._probe_music_duration", return_value=71.25)
+    def test_upload_creates_owned_audio_asset_and_stores_file(self, probe):
+        upload = SimpleUploadedFile("Narration.m4a", b"valid audio bytes", content_type="audio/mp4")
+
+        response = self.client.post("/audios/upload/", {"audio_file": upload})
+
+        self.assertRedirects(response, "/audios/")
+        asset = AudioAsset.objects.get(user=self.user)
+        self.assertEqual(asset.name, "Narration")
+        self.assertEqual(asset.duration, 71.25)
+        self.assertEqual(asset.source, AudioAsset.Source.UPLOAD)
+        self.assertTrue(asset.audio_file.name.startswith(f"audios/user_{self.user.pk}/"))
+        self.assertTrue(Path(asset.audio_file.path).is_file())
+        probe.assert_called_once()
+
+    @patch("studio.views._probe_music_duration")
+    def test_upload_rejects_invalid_format_without_creating_asset_or_file(self, probe):
+        upload = SimpleUploadedFile("narration.flac", b"audio bytes", content_type="audio/flac")
+
+        response = self.client.post("/audios/upload/", {"audio_file": upload})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(AudioAsset.objects.exists())
+        self.assertEqual(list(Path(self.media_dir.name).rglob("*")), [])
+        probe.assert_not_called()
+
+    @patch("studio.views._probe_music_duration")
+    def test_oversize_upload_is_rejected_before_disk_write_and_upload_temp_is_cleaned(self, probe):
+        upload_tmp_dir = Path(self.media_dir.name).parent / f"{Path(self.media_dir.name).name}-uploads"
+        upload_tmp_dir.mkdir()
+        self.addCleanup(lambda: __import__("shutil").rmtree(upload_tmp_dir, ignore_errors=True))
+        upload = SimpleUploadedFile("large.mp3", b"x" * 1025, content_type="audio/mpeg")
+
+        with patch("studio.views.MAX_AUDIO_ASSET_BYTES", 1024), override_settings(
+            FILE_UPLOAD_MAX_MEMORY_SIZE=1,
+            FILE_UPLOAD_TEMP_DIR=str(upload_tmp_dir),
+        ):
+            response = self.client.post("/audios/upload/", {"audio_file": upload})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(AudioAsset.objects.exists())
+        self.assertEqual(list(Path(self.media_dir.name).rglob("*")), [])
+        self.assertEqual(list(upload_tmp_dir.iterdir()), [])
+        probe.assert_not_called()
+
+    @patch("studio.views._probe_music_duration")
+    def test_audio_upload_rejects_empty_file_and_unusable_audio(self, probe):
+        empty = SimpleUploadedFile("empty.wav", b"", content_type="audio/wav")
+        response = self.client.post("/audios/upload/", {"audio_file": empty})
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(AudioAsset.objects.exists())
+
+        probe.side_effect = ValueError("Impossible de détecter la durée de cette musique.")
+        invalid_audio = SimpleUploadedFile("broken.wav", b"not really audio", content_type="audio/wav")
+        response = self.client.post("/audios/upload/", {"audio_file": invalid_audio})
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(AudioAsset.objects.exists())
+        self.assertEqual(list(Path(self.media_dir.name).rglob("*")), [])
 
     def test_project_audio_upload_endpoint_is_removed(self):
         project = NarrationProject.objects.create(user=self.user, title="XTTS uniquement")
@@ -162,6 +227,82 @@ class AudioAssetLibraryPlaceholderTests(MediaTestCase):
         response = self.client.post(f"/projects/{project.pk}/audio/", {})
 
         self.assertEqual(response.status_code, 404)
+
+    def test_rename_validates_name_and_is_owner_scoped(self):
+        asset = self.make_asset(self.user, "Avant")
+
+        response = self.client.post(f"/audios/{asset.pk}/rename/", {"name": "  Après  "})
+        self.assertRedirects(response, "/audios/")
+        asset.refresh_from_db()
+        self.assertEqual(asset.name, "Après")
+
+        for invalid_name in ("   ", "x" * 101):
+            response = self.client.post(f"/audios/{asset.pk}/rename/", {"name": invalid_name})
+            self.assertEqual(response.status_code, 400)
+            asset.refresh_from_db()
+            self.assertEqual(asset.name, "Après")
+
+        other_user = get_user_model().objects.create_user(username="rename-owner", password="SafePass123!x")
+        other_asset = self.make_asset(other_user, "Privé")
+        response = self.client.post(f"/audios/{other_asset.pk}/rename/", {"name": "Intrusion"})
+        self.assertEqual(response.status_code, 404)
+        other_asset.refresh_from_db()
+        self.assertEqual(other_asset.name, "Privé")
+
+    def test_delete_requires_confirmation_and_refuses_project_references(self):
+        asset = self.make_asset(self.user, "Protégé")
+        path = Path(asset.audio_file.path)
+
+        response = self.client.post(f"/audios/{asset.pk}/delete/", {})
+        self.assertEqual(response.status_code, 400)
+        self.assertContains(response, "Confirmation manquante", status_code=400)
+        self.assertTrue(AudioAsset.objects.filter(pk=asset.pk).exists())
+        self.assertTrue(path.exists())
+
+        project = NarrationProject.objects.create(user=self.user, title="Utilise cet audio")
+        asset.project = project
+        asset.save(update_fields=["project", "updated_at"])
+        response = self.client.post(f"/audios/{asset.pk}/delete/", {"confirm": "1"})
+        self.assertEqual(response.status_code, 400)
+        self.assertContains(response, "référencé par un projet", status_code=400)
+        self.assertTrue(AudioAsset.objects.filter(pk=asset.pk).exists())
+        self.assertTrue(path.exists())
+
+    def test_delete_removes_database_row_then_file_after_commit(self):
+        asset = self.make_asset(self.user, "À supprimer")
+        path = Path(asset.audio_file.path)
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(f"/audios/{asset.pk}/delete/", {"confirm": "1"})
+
+        self.assertRedirects(response, "/audios/")
+        self.assertFalse(AudioAsset.objects.filter(pk=asset.pk).exists())
+        self.assertFalse(path.exists())
+
+    def test_delete_missing_file_logs_warning_but_succeeds(self):
+        asset = self.make_asset(self.user, "Fichier absent")
+        Path(asset.audio_file.path).unlink()
+
+        with self.assertLogs("studio.views", level="WARNING") as logs:
+            with self.captureOnCommitCallbacks(execute=True):
+                response = self.client.post(f"/audios/{asset.pk}/delete/", {"confirm": "1"})
+
+        self.assertRedirects(response, "/audios/")
+        self.assertFalse(AudioAsset.objects.filter(pk=asset.pk).exists())
+        self.assertIn("déjà absent", " ".join(logs.output))
+
+    def test_delete_is_owner_scoped_and_login_is_required(self):
+        other_user = get_user_model().objects.create_user(username="delete-owner", password="SafePass123!x")
+        other_asset = self.make_asset(other_user, "Privé")
+        response = self.client.post(f"/audios/{other_asset.pk}/delete/", {"confirm": "1"})
+        self.assertEqual(response.status_code, 404)
+        self.assertTrue(AudioAsset.objects.filter(pk=other_asset.pk).exists())
+
+        self.client.logout()
+        for url in ("/audios/", "/audios/upload/", f"/audios/{other_asset.pk}/rename/", f"/audios/{other_asset.pk}/delete/"):
+            response = self.client.post(url, {"confirm": "1"}) if url != "/audios/" else self.client.get(url)
+            self.assertEqual(response.status_code, 302)
+            self.assertIn("/login/", response.url)
 
 
 class RemoveImportedAudioMigrationTests(TestCase):

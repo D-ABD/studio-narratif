@@ -2,22 +2,78 @@
 {% block title %}Audios · Petit Studio{% endblock %}
 {% block heading %}Bibliothèque audio{% endblock %}
 {% block content %}
-<section class="card">
-  <div class="section-title"><div><span class="step-number">♫</span><h2>Mes fichiers audio</h2></div></div>
-  <p class="muted">La gestion complète de la bibliothèque audio arrivera dans un prochain lot. Les fichiers associés à tes projets restent disponibles ici.</p>
-  <div class="music-library-list">
-    {% for asset in audio_assets %}
-    <article class="music-library-item">
-      <div>
-        <strong>{{ asset.name }}</strong>
-        <span class="muted small">{{ asset.duration|floatformat:1 }} s · {{ asset.get_source_display }}</span>
-      </div>
-      <audio controls preload="none" src="{{ asset.audio_file.url }}"></audio>
-      <span class="muted small">{% if asset.project %}{{ asset.project.title }}{% else %}Fichier audio{% endif %}</span>
-    </article>
-    {% empty %}
-    <p class="muted">Aucun fichier audio importé pour le moment. Associe un audio à un projet depuis son éditeur.</p>
-    {% endfor %}
-  </div>
-</section>
+<style>
+  .audio-library-page { display:grid; gap:16px; max-width:1180px; margin:0 auto; }
+  .audio-upload-form { display:grid; gap:9px; max-width:640px; }
+  .audio-upload-form label { color:#A8B1BF; font-size:10px; font-weight:650; }
+  .audio-upload-form .text-input { width:100%; min-height:39px; padding:9px 11px; border:1px solid #2B3442; border-radius:10px; color:#E7EAF0; background:#10141C; }
+  .audio-library-table-wrap { overflow-x:auto; }
+  .audio-library-table { width:100%; border-collapse:collapse; min-width:760px; }
+  .audio-library-table th { padding:9px 10px; border-bottom:1px solid #293241; color:#818C9D; font-size:9px; font-weight:750; letter-spacing:1px; text-align:left; text-transform:uppercase; }
+  .audio-library-table td { padding:12px 10px; border-bottom:1px solid #222B38; color:#BBC4D1; font-size:11px; vertical-align:middle; }
+  .audio-library-table tr:last-child td { border-bottom:0; }
+  .audio-name { display:grid; gap:7px; min-width:220px; }
+  .audio-name strong { max-width:300px; overflow:hidden; color:#E3E7ED; font-size:12px; text-overflow:ellipsis; white-space:nowrap; }
+  .audio-name audio { width:min(100%,300px); height:34px; }
+  .audio-source-badge { display:inline-block; padding:3px 8px; border:1px solid #41414A; border-radius:99px; color:#C9D0DA; background:#191E27; font-size:9px; font-weight:700; }
+  .audio-row-actions { display:flex; flex-wrap:wrap; align-items:flex-start; gap:7px; min-width:180px; }
+  .audio-rename-details { position:relative; }
+  .audio-rename-form { display:flex; align-items:center; gap:6px; margin-top:8px; }
+  .audio-rename-form input { width:180px; min-height:34px; padding:6px 8px; border:1px solid #303A49; border-radius:8px; color:#E7EAF0; background:#10141C; }
+  .audio-empty { padding:18px 12px; border:1px dashed #344050; border-radius:11px; color:#929BAA; background:#11161F; font-size:12px; }
+  @media(max-width:620px) { .audio-upload-form { max-width:none; } }
+</style>
+<div class="audio-library-page">
+  <section class="card">
+    <div class="section-title"><div><span class="step-number">♫</span><h2>Ajouter un audio</h2></div></div>
+    <form method="post" action="{% url 'upload_audio_asset' %}" enctype="multipart/form-data" class="audio-upload-form">
+      {% csrf_token %}
+      <label for="audioFile">Fichier audio · MP3, WAV, M4A ou OGG · 100 Mo maximum</label>
+      <input class="text-input" id="audioFile" type="file" name="audio_file" accept="audio/mpeg,audio/wav,audio/mp4,audio/ogg,.mp3,.wav,.m4a,.ogg" required>
+      <p class="muted small">Le nom sera repris du fichier. Tu pourras le modifier dans la liste.</p>
+      <button class="button button-primary" type="submit">Ajouter à ma bibliothèque</button>
+    </form>
+  </section>
+
+  <section class="card">
+    <div class="section-title"><div><span class="step-number">♫</span><h2>Mes audios</h2></div><span class="muted small">{{ audio_assets|length }} fichier{{ audio_assets|length|pluralize:"s" }}</span></div>
+    {% if audio_assets %}
+    <div class="audio-library-table-wrap">
+      <table class="audio-library-table">
+        <thead><tr><th>Audio et aperçu</th><th>Durée</th><th>Source</th><th>Ajouté le</th><th>Actions</th></tr></thead>
+        <tbody>
+          {% for asset in audio_assets %}
+          <tr>
+            <td><div class="audio-name"><strong>{{ asset.name }}</strong><audio controls preload="none" src="{{ asset.audio_file.url }}" aria-label="Aperçu de {{ asset.name }}"></audio></div></td>
+            <td>{{ asset.duration_mmss }}</td>
+            <td><span class="audio-source-badge">{% if asset.source == 'upload' %}Uploadé{% else %}XTTS{% endif %}</span></td>
+            <td>{{ asset.created_at|date:"d/m/Y H:i" }}</td>
+            <td>
+              <div class="audio-row-actions">
+                <details class="audio-rename-details">
+                  <summary class="button button-secondary button-small">Renommer</summary>
+                  <form method="post" action="{% url 'rename_audio_asset' asset.id %}" class="audio-rename-form">
+                    {% csrf_token %}
+                    <label class="sr-only" for="audioName{{ asset.id }}">Nouveau nom pour {{ asset.name }}</label>
+                    <input id="audioName{{ asset.id }}" type="text" name="name" value="{{ asset.name }}" maxlength="100" required>
+                    <button class="button button-primary button-small" type="submit">Enregistrer</button>
+                  </form>
+                </details>
+                <form method="post" action="{% url 'delete_audio_asset' asset.id %}" onsubmit="return confirm('Supprimer cet audio ? Cette action est définitive.');">
+                  {% csrf_token %}<input type="hidden" name="confirm" value="1">
+                  <button class="button button-secondary button-small danger" type="submit">Supprimer</button>
+                </form>
+              </div>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <p class="audio-empty">Aucun audio pour l'instant. Uploade ton premier fichier.</p>
+    {% endif %}
+  </section>
+  <div><a class="text-link" href="{% url 'home' %}">← Retour à l’accueil</a></div>
+</div>
 {% endblock %}
