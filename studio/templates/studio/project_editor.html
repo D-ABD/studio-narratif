@@ -193,16 +193,19 @@
             <select class="editor-select" id="projectAudioAsset" name="audio_asset_id" required>
               <option value="">Choisir un audio…</option>
               {% for asset in assembly_audio_assets %}
-              <option value="{{ asset.id }}" {% if project.audio_asset_id == asset.id %}selected{% endif %}>{{ asset.name }} · {{ asset.duration|floatformat:0 }} s · {{ asset.get_source_display }}</option>
+              <option value="{{ asset.id }}" data-audio-url="{{ asset.preview_url }}" {% if project.audio_asset_id == asset.id %}selected{% endif %}>{{ asset.name }} · {{ asset.duration|floatformat:0 }} s · {{ asset.get_source_display }}</option>
               {% endfor %}
             </select>
+            <audio id="assemblyAudioPreview" controls preload="none" aria-label="Aperçu de la narration sélectionnée" hidden style="width:100%"></audio>
+            <p id="assemblyAudioPreviewMessage" class="editor-muted" role="status" aria-live="polite">Sélectionne un audio</p>
             <button class="editor-button" type="submit">Enregistrer l’audio</button>
           </form>
           {% else %}
           <p class="editor-alert">Génère une narration dans le Studio d’abord.</p>
           <a class="text-link" href="{% url 'studio_home' %}">Ouvrir le Studio →</a>
           {% endif %}
-          {% if project.audio_asset %}<p class="editor-muted">Audio sélectionné : {{ project.audio_asset.name }} · {{ project.audio_asset.duration|floatformat:0 }} s</p>{% endif %}
+          {% if assembly_audio_unavailable %}<p class="editor-muted" role="status">L’audio associé au projet n’a pas de timings exploitables ou n’est plus disponible. Resélectionne-en un.</p>
+          {% elif project.audio_asset_id %}<p class="editor-muted">Audio sélectionné : {{ project.audio_asset.name }} · {{ project.audio_asset.duration|floatformat:0 }} s</p>{% endif %}
         </div>
       </section>
 

@@ -539,6 +539,7 @@ class ProjectViewTests(MediaTestCase):
         hash_sample.assert_called_once_with(voice.sample.path)
         self.assertContains(response, 'id="prepareForm"')
         self.assertNotContains(response, 'id="assemblyRenderForm"')
+        self.assertNotContains(response, 'id="assemblyAudioPreview"')
 
     def test_changing_project_voice_is_persisted_and_invalidates_complete_exports(self):
         project = NarrationProject.objects.create(user=self.user, title="Voix différente")
@@ -699,6 +700,65 @@ class ProjectViewTests(MediaTestCase):
         self.assertNotContains(response, "Visuel de la boundary 1")
         self.assertContains(response, "Narration visible")
         self.assertNotContains(response, "Scène conservée hors rendu")
+
+    def test_assembly_audio_preview_is_present_for_the_selected_asset(self):
+        asset = AudioAsset.objects.create(
+            user=self.user, name="Narration écoutable", duration=4.0, source=AudioAsset.Source.XTTS,
+            timings={"version": 1, "words": [{"word": "bonjour", "start": 0.0, "end": 1.0}]},
+        )
+        asset.audio_file.save("preview.wav", ContentFile(b"audio bytes"), save=True)
+        project = NarrationProject.objects.create(
+            user=self.user, title="Aperçu", mode=NarrationProject.Mode.ASSEMBLY, audio_asset=asset,
+        )
+
+        response = self.client.get(f"/projects/{project.pk}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'id="assemblyAudioPreview"')
+        self.assertContains(response, 'id="assemblyAudioPreviewMessage"')
+        self.assertContains(response, 'data-audio-url="%s"' % asset.audio_file.url)
+        self.assertContains(response, "Sélectionne un audio")
+
+    def test_assembly_audio_preview_does_not_expose_another_users_audio_url(self):
+        own_asset = AudioAsset.objects.create(
+            user=self.user, name="Ma narration", duration=4.0, source=AudioAsset.Source.XTTS,
+            timings={"version": 1, "words": [{"word": "bonjour", "start": 0.0, "end": 1.0}]},
+        )
+        own_asset.audio_file.save("own.wav", ContentFile(b"own audio"), save=True)
+        other_user = get_user_model().objects.create_user(username="preview-private-owner", password="SafePass123!x")
+        private_asset = AudioAsset.objects.create(
+            user=other_user, name="Narration privée", duration=4.0, source=AudioAsset.Source.XTTS,
+            timings={"version": 1, "words": [{"word": "secret", "start": 0.0, "end": 1.0}]},
+        )
+        private_asset.audio_file.save("private.wav", ContentFile(b"private audio"), save=True)
+        project = NarrationProject.objects.create(
+            user=self.user, title="Aperçu isolé", mode=NarrationProject.Mode.ASSEMBLY, audio_asset=own_asset,
+        )
+
+        response = self.client.get(f"/projects/{project.pk}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, own_asset.audio_file.url)
+        self.assertNotContains(response, private_asset.audio_file.url)
+        self.assertNotContains(response, "Narration privée")
+
+    def test_assembly_audio_without_timings_is_not_offered_and_is_not_cleared(self):
+        asset = AudioAsset.objects.create(
+            user=self.user, name="Audio sans timings", duration=4.0, source=AudioAsset.Source.XTTS,
+        )
+        asset.audio_file.save("without-timings.wav", ContentFile(b"audio bytes"), save=True)
+        project = NarrationProject.objects.create(
+            user=self.user, title="Audio ancien", mode=NarrationProject.Mode.ASSEMBLY, audio_asset=asset,
+        )
+
+        response = self.client.get(f"/projects/{project.pk}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, "Audio sans timings")
+        self.assertContains(response, "n’a pas de timings exploitables")
+        self.assertNotContains(response, 'data-audio-url="%s"' % asset.audio_file.url)
+        project.refresh_from_db()
+        self.assertEqual(project.audio_asset_id, asset.pk)
 
     def test_assembly_render_route_hides_cross_user_audio_and_validates_inputs_before_queueing(self):
         project = NarrationProject.objects.create(user=self.user, title="Assemblage", mode=NarrationProject.Mode.ASSEMBLY)

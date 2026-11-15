@@ -24,6 +24,45 @@
   const csrfToken = () => document.querySelector('[name=csrfmiddlewaretoken]')?.value || '';
   const wordCount = value => (value.trim() ? value.trim().split(/\s+/).length : 0);
 
+  const assemblyAudioSelect = document.querySelector('#projectAudioAsset');
+  const assemblyAudioPreview = document.querySelector('#assemblyAudioPreview');
+  const assemblyAudioPreviewMessage = document.querySelector('#assemblyAudioPreviewMessage');
+  if (assemblyAudioSelect && assemblyAudioPreview && assemblyAudioPreviewMessage) {
+    const clearAssemblyAudioPreview = () => {
+      assemblyAudioPreview.pause();
+      assemblyAudioPreview.removeAttribute('src');
+      assemblyAudioPreview.load();
+      assemblyAudioPreview.hidden = true;
+    };
+    const setAssemblyAudioMessage = message => {
+      assemblyAudioPreviewMessage.textContent = message;
+      assemblyAudioPreviewMessage.hidden = false;
+    };
+    const updateAssemblyAudioPreview = () => {
+      clearAssemblyAudioPreview();
+      const selectedOption = assemblyAudioSelect.selectedOptions[0];
+      const audioUrl = selectedOption?.dataset.audioUrl?.trim();
+      if (!selectedOption?.value) {
+        setAssemblyAudioMessage('Sélectionne un audio');
+        return;
+      }
+      if (!audioUrl) {
+        setAssemblyAudioMessage('Fichier audio introuvable');
+        return;
+      }
+      assemblyAudioPreview.src = audioUrl;
+      assemblyAudioPreview.hidden = false;
+      assemblyAudioPreviewMessage.hidden = true;
+    };
+    assemblyAudioSelect.addEventListener('change', updateAssemblyAudioPreview);
+    assemblyAudioPreview.addEventListener('error', () => {
+      if (!assemblyAudioPreview.getAttribute('src')) return;
+      clearAssemblyAudioPreview();
+      setAssemblyAudioMessage('Fichier audio introuvable');
+    });
+    updateAssemblyAudioPreview();
+  }
+
   const sceneFiles = document.querySelector('#sceneFiles');
   const importPreview = document.querySelector('#importPreview');
   const importPreviewHeading = document.querySelector('#importPreviewHeading');

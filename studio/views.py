@@ -856,6 +856,19 @@ def project_detail(request, project_id):
                 "level": config["level"],
                 "direction": config.get("direction", ""),
             })
+    assembly_audio_assets = list(
+        AudioAsset.objects.filter(
+            user=request.user,
+            source=AudioAsset.Source.XTTS,
+            timings__isnull=False,
+        ).order_by("-created_at", "-id")
+    )
+    for asset in assembly_audio_assets:
+        try:
+            asset.preview_url = asset.audio_file.url if asset.audio_file else ""
+        except (OSError, ValueError):
+            asset.preview_url = ""
+    assembly_audio_asset_ids = {asset.pk for asset in assembly_audio_assets}
     return render(request, "studio/project_editor.html", {
         "project": project,
         "projects": NarrationProject.objects.filter(user=request.user)[:30],
@@ -863,9 +876,10 @@ def project_detail(request, project_id):
         "audio_ready": bool(segments and all(segment.ready_for_voice for segment in segments)),
         "voices": Voice.objects.filter(user=request.user),
         "background_tracks": BackgroundTrack.objects.filter(user=request.user),
-        "assembly_audio_assets": AudioAsset.objects.filter(
-            user=request.user, source=AudioAsset.Source.XTTS,
-        ).order_by("-created_at", "-id"),
+        "assembly_audio_assets": assembly_audio_assets,
+        "assembly_audio_unavailable": bool(
+            project.audio_asset_id and project.audio_asset_id not in assembly_audio_asset_ids
+        ),
         "assembly_slot_count": assembly_slot_count,
         "assembly_slots": [
             {"position": position, "segment": segments_by_position.get(position)}
