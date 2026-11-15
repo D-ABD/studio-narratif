@@ -227,13 +227,19 @@ class FFmpegFilterDetectionTests(TestCase):
         self.assertEqual(available, set())
 
     def test_timeout_marks_filter_unavailable_and_logs_warning(self):
-        with patch(
-            "studio.audio_services.subprocess.run",
-            side_effect=subprocess.TimeoutExpired("ffmpeg", 2),
-        ), self.assertLogs("studio.audio_services", level="WARNING") as logs:
+        def probe_filter(command, **_kwargs):
+            if command[-1] == "filter=acompressor":
+                raise subprocess.TimeoutExpired("ffmpeg", 5)
+            return Mock(returncode=0, stdout=b"Filter available", stderr=b"")
+
+        with patch("studio.audio_services.subprocess.run", side_effect=probe_filter) as run, \
+                self.assertLogs("studio.audio_services", level="WARNING") as logs:
             available = audio_services.get_available_effects("ffmpeg-test-timeout")
-        self.assertEqual(available, set())
+        self.assertNotIn("acompressor", available)
+        self.assertIn("aecho", available)
         self.assertTrue(any("Timeout détection filtre" in line for line in logs.output))
+        compressor_call = next(call for call in run.call_args_list if call.args[0][-1] == "filter=acompressor")
+        self.assertEqual(compressor_call.kwargs["timeout"], 5)
 
     def test_missing_ffmpeg_returns_empty_set_and_logs_error(self):
         with patch(
