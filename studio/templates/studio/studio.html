@@ -1,0 +1,132 @@
+{% extends "studio/base.html" %}
+{% block title %}Studio de narration · Petit Studio{% endblock %}
+{% block heading %}Studio de narration{% endblock %}
+{% block content %}
+<style>
+  .studio-page { display:grid; gap:16px; max-width:1180px; margin:0 auto; }
+  .studio-intro { max-width:760px; color:#A8B1BF; font-size:12px; }
+  .studio-form { display:grid; gap:15px; }
+  .studio-form label { display:grid; gap:6px; color:#A8B1BF; font-size:10px; font-weight:650; }
+  .studio-form input,.studio-form select,.studio-form textarea { width:100%; border:1px solid #2B3442; border-radius:10px; color:#E7EAF0; background:#10141C; }
+  .studio-form input,.studio-form select { min-height:39px; padding:9px 11px; }
+  .studio-form textarea { min-height:105px; resize:vertical; padding:11px; line-height:1.6; }
+  .studio-form input:focus,.studio-form select:focus,.studio-form textarea:focus { outline:none; border-color:#A96B12; box-shadow:0 0 0 3px #F59E0B18; }
+  .studio-top-fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:13px; }
+  .studio-text-list { display:grid; gap:10px; }
+  .studio-text-row { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:10px; align-items:end; padding:12px; border:1px solid #293241; border-radius:12px; background:#11161F; }
+  .studio-text-row label { min-width:0; }
+  .studio-form-actions { display:flex; align-items:center; flex-wrap:wrap; gap:9px; }
+  .studio-batch-list { display:grid; gap:9px; }
+  .studio-batch-card { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:10px; align-items:center; padding:12px; border:1px solid #293241; border-radius:11px; background:#11161F; }
+  .studio-batch-card strong { color:#E3E7ED; font-size:12px; }
+  .studio-batch-card p { margin:4px 0 0; color:#8E99A9; font-size:10px; }
+  .studio-status { padding:4px 8px; border:1px solid #5A4016; border-radius:99px; color:#FFC65D; background:#241D12; font-size:9px; font-weight:700; white-space:nowrap; }
+  .studio-empty { padding:18px 12px; border:1px dashed #344050; border-radius:11px; color:#929BAA; background:#11161F; font-size:12px; }
+  @media(max-width:680px) { .studio-top-fields { grid-template-columns:1fr; } .studio-text-row { grid-template-columns:1fr; } .studio-text-row > button { justify-self:start; } }
+</style>
+<div class="studio-page">
+  <section class="card">
+    <div class="section-title"><div><span class="step-number">♫</span><h2>Préparer un lot de narrations</h2></div></div>
+    <p class="studio-intro">Saisis jusqu’à {{ max_batch_items }} textes. Chaque narration sera générée séparément avec XTTS, alignée par WhisperX, puis ajoutée à ta bibliothèque audio.</p>
+    {% if not voices %}
+      <p class="studio-empty">Ajoute d’abord une voix avec son autorisation confirmée.</p>
+      <a class="button button-primary" href="{% url 'home' %}#voices">Ajouter une voix</a>
+    {% else %}
+    <form method="post" action="{% url 'create_studio_batch' %}" class="studio-form" id="studioBatchForm" data-max-items="{{ max_batch_items }}" data-max-chars="{{ max_text_chars }}">
+      {% csrf_token %}
+      <div class="studio-top-fields">
+        <label for="studioVoice">Voix XTTS
+          <select id="studioVoice" name="voice_id" required>
+            <option value="">Choisir une voix…</option>
+            {% for voice in voices %}<option value="{{ voice.id }}" {% if selected_voice_id == voice.id|stringformat:'s' %}selected{% endif %}>{{ voice.name }} · {{ voice.get_category_display }}</option>{% endfor %}
+          </select>
+        </label>
+        <label for="studioNamePrefix">Nom de base facultatif
+          <input id="studioNamePrefix" name="name_prefix" type="text" maxlength="100" value="{{ name_prefix }}" placeholder="Ex. Conseils du matin">
+        </label>
+      </div>
+      <div class="studio-text-list" id="studioTextList">
+        {% for text in texts %}
+        <div class="studio-text-row" data-studio-text-row>
+          <label for="studioText{{ forloop.counter }}">Narration {{ forloop.counter }}
+            <textarea id="studioText{{ forloop.counter }}" name="texts" maxlength="{{ max_text_chars }}" required placeholder="Saisis le texte à raconter…">{{ text }}</textarea>
+          </label>
+          {% if not forloop.first %}<button class="button button-secondary button-small" type="button" data-remove-studio-text>Retirer</button>{% endif %}
+        </div>
+        {% endfor %}
+      </div>
+      <div class="studio-form-actions">
+        <button class="button button-secondary" type="button" id="addStudioText">＋ Ajouter une narration</button>
+        <button class="button button-primary" type="submit">Générer le lot</button>
+        <span class="muted small">Limite : {{ max_batch_items }} narrations, {{ max_text_chars }} caractères par texte.</span>
+      </div>
+    </form>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <div class="section-title"><div><span class="step-number">▤</span><h2>Mes lots</h2></div></div>
+    <div class="studio-batch-list">
+      {% for batch in studio_batches %}
+      <article class="studio-batch-card">
+        <div><strong>{% if batch.name_prefix %}{{ batch.name_prefix }}{% else %}Lot #{{ batch.id }}{% endif %}</strong><p>{{ batch.total_items }} narration{{ batch.total_items|pluralize:"s" }} · {{ batch.created_at|date:"d/m/Y H:i" }} · {{ batch.voice.name|default:"Voix supprimée" }}</p></div>
+        <span class="studio-status">{{ batch.get_status_display }}</span>
+      </article>
+      {% empty %}<p class="studio-empty">Aucun lot pour le moment.</p>{% endfor %}
+    </div>
+  </section>
+</div>
+<script>
+(() => {
+  const form = document.getElementById('studioBatchForm');
+  const list = document.getElementById('studioTextList');
+  const add = document.getElementById('addStudioText');
+  if (!form || !list || !add) return;
+  const maxItems = Number(form.dataset.maxItems) || 20;
+  const maxChars = Number(form.dataset.maxChars) || 12000;
+  const renumber = () => {
+    [...list.querySelectorAll('[data-studio-text-row]')].forEach((row, index) => {
+      const label = row.querySelector('label');
+      const textarea = row.querySelector('textarea');
+      const number = index + 1;
+      textarea.id = `studioText${number}`;
+      label.htmlFor = textarea.id;
+      label.firstChild.textContent = `Narration ${number}`;
+      const remove = row.querySelector('[data-remove-studio-text]');
+      if (number === 1 && remove) remove.remove();
+      if (number > 1 && !remove) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'button button-secondary button-small';
+        button.dataset.removeStudioText = '';
+        button.textContent = 'Retirer';
+        row.append(button);
+      }
+    });
+    add.disabled = list.querySelectorAll('[data-studio-text-row]').length >= maxItems;
+  };
+  add.addEventListener('click', () => {
+    if (list.querySelectorAll('[data-studio-text-row]').length >= maxItems) return;
+    const row = document.createElement('div');
+    row.className = 'studio-text-row';
+    row.dataset.studioTextRow = '';
+    row.innerHTML = '<label></label><button class="button button-secondary button-small" type="button" data-remove-studio-text>Retirer</button>';
+    const label = row.querySelector('label');
+    const textarea = document.createElement('textarea');
+    textarea.name = 'texts';
+    textarea.maxLength = maxChars;
+    textarea.required = true;
+    textarea.placeholder = 'Saisis le texte à raconter…';
+    label.append(textarea);
+    list.append(row);
+    renumber();
+    textarea.focus();
+  });
+  list.addEventListener('click', event => {
+    const remove = event.target.closest('[data-remove-studio-text]');
+    if (remove) { remove.closest('[data-studio-text-row]').remove(); renumber(); }
+  });
+  renumber();
+})();
+</script>
+{% endblock %}

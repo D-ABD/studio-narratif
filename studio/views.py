@@ -22,7 +22,7 @@ from PIL import Image, UnidentifiedImageError
 
 from .models import (
     ANIMATION_EFFECTS, ANIMATION_LEVEL_CHOICES, AudioAsset, BackgroundTrack, NarrationProject,
-    NarrationSegment, Voice,
+    NarrationSegment, StudioBatch, StudioBatchItem, Voice,
     default_animation_settings, legacy_animation_settings,
 )
 from .services import _voice_sample_digest, cache_key_for, hash_file, normalize_voice_sample, srt_text
@@ -44,6 +44,8 @@ MAX_IMPORT_BYTES = 500 * 1024 * 1024
 MAX_IMPORT_PIXELS = 100_000_000
 MAX_MUSIC_BYTES = 50 * 1024 * 1024
 MAX_AUDIO_ASSET_BYTES = 100 * 1024 * 1024
+MAX_STUDIO_BATCH_ITEMS = 20
+MAX_STUDIO_TEXT_CHARS = 12000
 ALLOWED_MUSIC_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg"}
 ALLOWED_AUDIO_ASSET_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg"}
 ALLOWED_SAMPLE_EXTENSIONS = {".wav", ".mp3", ".webm", ".m4a", ".ogg"}
@@ -358,6 +360,83 @@ def musics(request):
         "background_tracks": BackgroundTrack.objects.filter(user=request.user),
         "projects": NarrationProject.objects.filter(user=request.user)[:30],
     })
+
+
+def _studio_page_context(request, *, texts=None, selected_voice_id="", name_prefix=""):
+    return {
+        "voices": Voice.objects.filter(user=request.user, consent_confirmed=True),
+        "studio_batches": StudioBatch.objects.filter(user=request.user).prefetch_related("items")[:10],
+        "projects": NarrationProject.objects.filter(user=request.user)[:30],
+        "texts": texts or [""],
+        "selected_voice_id": str(selected_voice_id),
+        "name_prefix": name_prefix,
+        "max_batch_items": MAX_STUDIO_BATCH_ITEMS,
+        "max_text_chars": MAX_STUDIO_TEXT_CHARS,
+    }
+
+
+@login_required
+def studio_home(request):
+    return render(request, "studio/studio.html", _studio_page_context(request))
+
+
+@login_required
+@require_POST
+def create_studio_batch(request):
+    raw_texts = request.POST.getlist("texts")
+    texts = [text.strip() for text in raw_texts]
+    voice_id = request.POST.get("voice_id", "")
+    name_prefix = (request.POST.get("name_prefix") or "").strip()
+    error = None
+
+    if not texts:
+        error = "Ajoute au moins une narration."
+    elif len(texts) > MAX_STUDIO_BATCH_ITEMS:
+        error = f"Un lot peut contenir au maximum {MAX_STUDIO_BATCH_ITEMS} narrations."
+    elif any(not text for text in texts):
+        error = "Chaque narration doit contenir du texte."
+    elif any(len(text) > MAX_STUDIO_TEXT_CHARS for text in texts):
+        error = f"Chaque texte doit faire au maximum {MAX_STUDIO_TEXT_CHARS} caractères."
+    elif len(name_prefix) > 100:
+        error = "Le nom de base ne peut pas dépasser 100 caractères."
+
+    try:
+        voice_id = int(voice_id)
+    except (TypeError, ValueError):
+        voice_id = None
+    voice = Voice.objects.filter(
+        pk=voice_id, user=request.user, consent_confirmed=True,
+    ).first() if voice_id else None
+    if error is None and voice is None:
+        error = "Choisis une voix de ta bibliothèque."
+
+    if error:
+        messages.error(request, error)
+        return render(request, "studio/studio.html", _studio_page_context(
+            request, texts=raw_texts or [""], selected_voice_id=request.POST.get("voice_id", ""),
+            name_prefix=name_prefix,
+        ), status=400)
+
+    with transaction.atomic():
+        batch = StudioBatch.objects.create(
+            user=request.user,
+            voice=voice,
+            name_prefix=name_prefix,
+            status=StudioBatch.Status.DRAFT,
+            total_items=len(texts),
+            status_message="Lot validé · génération disponible après branchement du worker.",
+        )
+        StudioBatchItem.objects.bulk_create([
+            StudioBatchItem(
+                batch=batch,
+                position=index,
+                text=text,
+                asset_name=f"{name_prefix} {index + 1:02d}".strip() if name_prefix else f"Narration {index + 1:02d}",
+            )
+            for index, text in enumerate(texts)
+        ])
+    messages.success(request, "Le lot est validé et enregistré en brouillon. La génération sera activée au branchement du worker.")
+    return redirect("studio_home")
 
 
 @login_required

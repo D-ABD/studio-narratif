@@ -139,6 +139,67 @@ class AudioAsset(models.Model):
         return self.name
 
 
+class StudioBatch(models.Model):
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Brouillon"
+        PENDING = "pending", "En attente"
+        PROCESSING = "processing", "En cours"
+        COMPLETED = "completed", "Terminé"
+        PARTIAL = "partial", "Terminé avec erreurs"
+        FAILED = "failed", "Échec"
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="studio_batches")
+    voice = models.ForeignKey(Voice, null=True, blank=True, on_delete=models.SET_NULL, related_name="studio_batches")
+    name_prefix = models.CharField(max_length=100, blank=True)
+    status = models.CharField(max_length=12, choices=Status.choices, default=Status.DRAFT, db_index=True)
+    total_items = models.PositiveSmallIntegerField(default=0)
+    completed_items = models.PositiveSmallIntegerField(default=0)
+    current_item = models.PositiveSmallIntegerField(default=0)
+    progress_percent = models.PositiveSmallIntegerField(default=0)
+    status_message = models.CharField(max_length=240, blank=True)
+    error_message = models.TextField(blank=True)
+    queued_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+
+    def __str__(self):
+        return f"Lot de narration #{self.pk} · {self.user}"
+
+
+class StudioBatchItem(models.Model):
+    class Status(models.TextChoices):
+        PENDING = "pending", "En attente"
+        PROCESSING = "processing", "En cours"
+        COMPLETED = "completed", "Terminé"
+        FAILED = "failed", "Échec"
+
+    batch = models.ForeignKey(StudioBatch, on_delete=models.CASCADE, related_name="items")
+    position = models.PositiveSmallIntegerField()
+    text = models.TextField()
+    asset_name = models.CharField(max_length=160)
+    status = models.CharField(max_length=12, choices=Status.choices, default=Status.PENDING, db_index=True)
+    audio_asset = models.ForeignKey(
+        AudioAsset, null=True, blank=True, on_delete=models.SET_NULL, related_name="studio_batch_items",
+    )
+    error_message = models.TextField(blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["position", "id"]
+        constraints = [
+            models.UniqueConstraint(fields=["batch", "position"], name="studio_batch_item_position_unique"),
+        ]
+
+    def __str__(self):
+        return f"{self.batch} · narration {self.position + 1}"
+
+
 class NarrationProject(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="narration_projects")
     class Status(models.TextChoices):
