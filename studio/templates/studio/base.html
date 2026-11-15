@@ -387,6 +387,7 @@
       <a class="premium-nav-link{% if request.resolver_match.url_name == 'home' %} active{% endif %}" href="{% url 'home' %}#voices"><span class="premium-icon" aria-hidden="true">♫</span><span class="premium-link-label">Bibliothèque de voix</span></a>
       <a class="premium-nav-link{% if request.resolver_match.url_name == 'musics' %} active{% endif %}" href="{% url 'musics' %}"><span class="premium-icon" aria-hidden="true">♪</span><span class="premium-link-label">Bibliothèque musicale</span></a>
       <a class="premium-nav-link{% if request.resolver_match.url_name == 'audios' %} active{% endif %}" href="{% url 'audios' %}"><span class="premium-icon" aria-hidden="true">◖</span><span class="premium-link-label">Audios</span></a>
+      <a class="premium-nav-link{% if request.resolver_match.url_name == 'studio_home' %} active{% endif %}" href="{% url 'studio_home' %}"><span class="premium-icon" aria-hidden="true">♫</span><span class="premium-link-label">Studio</span></a>
       <a class="premium-nav-link" href="{% url 'home' %}#projects"><span class="premium-icon" aria-hidden="true">▤</span><span class="premium-link-label">Mes narrations</span></a>
       <a class="premium-nav-link{% if request.resolver_match.url_name == 'queue_view' %} active{% endif %}" href="{% url 'queue_view' %}">
         <span class="premium-icon" aria-hidden="true">☷</span><span class="premium-link-label">File d'attente</span>

@@ -715,6 +715,12 @@ def edit_voice(request, voice_id):
 @require_POST
 def delete_voice(request, voice_id):
     voice = get_object_or_404(Voice, pk=voice_id, user=request.user)
+    if StudioBatch.objects.filter(
+        voice=voice,
+        status__in=[StudioBatch.Status.PENDING, StudioBatch.Status.PROCESSING],
+    ).exists():
+        messages.error(request, "Cette voix est utilisée par un lot Studio en attente ou en cours de traitement.")
+        return redirect("home")
     if voice.projects.filter(status__in=[NarrationProject.Status.QUEUED, NarrationProject.Status.PROCESSING]).exists():
         messages.error(request, "Cette voix est utilisée par un traitement en attente ou en cours.")
         return redirect("home")

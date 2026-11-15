@@ -16,7 +16,9 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 from PIL import Image
 
-from .models import AudioAsset, BackgroundTrack, NarrationProject, NarrationSegment, Voice
+from .models import (
+    AudioAsset, BackgroundTrack, NarrationProject, NarrationSegment, StudioBatch, StudioBatchItem, Voice,
+)
 from .services import (
     _assemble_wav, _get_speaker_conditioning, _group_words, _prepare_segment, align_audio,
     cache_key_for, srt_text, wav_duration,
@@ -303,6 +305,199 @@ class AudioAssetLibraryTests(MediaTestCase):
             response = self.client.post(url, {"confirm": "1"}) if url != "/audios/" else self.client.get(url)
             self.assertEqual(response.status_code, 302)
             self.assertIn("/login/", response.url)
+
+
+class StudioBatchGenerationTests(MediaTestCase):
+    def make_batch(self, texts, *, voice=None, name_prefix="Lot test", status=StudioBatch.Status.PROCESSING):
+        voice = voice or self.make_voice()
+        batch = StudioBatch.objects.create(
+            user=self.user,
+            voice=voice,
+            name_prefix=name_prefix,
+            status=status,
+            total_items=len(texts),
+            queued_at=timezone.now() if status == StudioBatch.Status.PENDING else None,
+        )
+        StudioBatchItem.objects.bulk_create([
+            StudioBatchItem(
+                batch=batch,
+                position=index,
+                text=text,
+                asset_name=f"{name_prefix} {index + 1:02d}",
+            )
+            for index, text in enumerate(texts)
+        ])
+        return batch
+
+    @staticmethod
+    def write_test_wav(text, voice, destination):
+        with wave.open(str(destination), "wb") as output:
+            output.setnchannels(1)
+            output.setsampwidth(2)
+            output.setframerate(24000)
+            output.writeframes(b"\0\0" * 24000)
+
+    @staticmethod
+    def aligned_captions(audio_path, text):
+        first_word = text.split()[0]
+        return [{
+            "start": 0.05,
+            "end": 0.5,
+            "text": first_word,
+            "words": [{"word": first_word, "start": 0.05, "end": 0.5}],
+        }]
+
+    def test_one_text_creates_xtts_asset_with_timings_without_transcription_model(self):
+        voice = self.make_voice()
+        batch = self.make_batch(["Bonjour le monde."], voice=voice, name_prefix="Test")
+        fake_torch = types.ModuleType("torch")
+        fake_torch.cuda = types.SimpleNamespace(is_available=lambda: False)
+        fake_whisperx = types.ModuleType("whisperx")
+        fake_whisperx.load_audio = Mock(return_value=[0.0] * 16000)
+        fake_whisperx.load_align_model = Mock(return_value=(object(), object()))
+        fake_whisperx.align = Mock(return_value={
+            "word_segments": [{"word": "Bonjour", "start": 0.05, "end": 0.5}],
+        })
+        fake_whisperx.load_model = Mock(side_effect=AssertionError("La transcription ne doit pas être chargée."))
+
+        with (
+            patch.object(services, "_ALIGNMENT_MODEL", None),
+            patch.object(services, "_ALIGNMENT_METADATA", None),
+            patch.object(services, "_ALIGNMENT_DEVICE", None),
+            patch.object(services, "_ALIGNMENT_BACKEND", None),
+            patch.dict(sys.modules, {"torch": fake_torch, "whisperx": fake_whisperx}),
+            patch("studio.services._synthesize_segment", side_effect=self.write_test_wav) as synthesize,
+        ):
+            services.generate_studio_batch(batch.pk)
+
+        asset = AudioAsset.objects.get()
+        self.assertEqual(asset.source, AudioAsset.Source.XTTS)
+        self.assertEqual(asset.text, "Bonjour le monde.")
+        self.assertEqual(asset.voice, voice)
+        self.assertEqual(asset.duration, 1.0)
+        self.assertEqual(asset.timings["version"], 1)
+        self.assertEqual(asset.timings["words"], [{"word": "Bonjour", "start": 0.05, "end": 0.5}])
+        self.assertEqual(asset.timings["segments"], [{"text": "Bonjour", "start": 0.05, "end": 0.5}])
+        self.assertEqual(asset.timings["scene_boundaries"], [{"scene_index": 0, "start": 0.0, "end": 1.0}])
+        self.assertTrue(Path(asset.audio_file.path).is_file())
+        self.assertEqual(batch.items.get().status, StudioBatchItem.Status.COMPLETED)
+        batch.refresh_from_db()
+        self.assertEqual(batch.status, StudioBatch.Status.COMPLETED)
+        synthesize.assert_called_once()
+        fake_whisperx.load_align_model.assert_called_once()
+        fake_whisperx.load_model.assert_not_called()
+
+    def test_three_texts_create_three_assets_serially(self):
+        batch = self.make_batch(["Un texte.", "Deuxième texte.", "Troisième texte."], name_prefix="Série")
+
+        with patch("studio.services._synthesize_segment", side_effect=self.write_test_wav) as synthesize:
+            with patch("studio.services.align_audio", side_effect=self.aligned_captions) as align:
+                services.generate_studio_batch(batch.pk)
+
+        assets = list(AudioAsset.objects.order_by("id"))
+        self.assertEqual(len(assets), 3)
+        self.assertEqual([asset.name for asset in assets], ["Série 01", "Série 02", "Série 03"])
+        self.assertTrue(all(asset.source == AudioAsset.Source.XTTS and asset.timings for asset in assets))
+        self.assertEqual(synthesize.call_count, 3)
+        self.assertEqual(align.call_count, 3)
+        batch.refresh_from_db()
+        self.assertEqual(batch.completed_items, 3)
+        self.assertEqual(batch.progress_percent, 100)
+        self.assertEqual(batch.status, StudioBatch.Status.COMPLETED)
+
+    def test_identical_project_text_cache_is_reused_without_xtts_or_whisperx(self):
+        voice = self.make_voice()
+        text = "Phrase déjà générée."
+        project = NarrationProject.objects.create(user=self.user, title="Projet cache", voice=voice)
+        segment = NarrationSegment.objects.create(project=project, position=0, text=text)
+        cache_key = services.cache_key_for(text, voice, sample_digest=services._voice_sample_digest(voice))
+        with patch("studio.services._synthesize_segment", side_effect=self.write_test_wav) as synthesize:
+            with patch("studio.services.align_audio", side_effect=self.aligned_captions) as align:
+                services._prepare_segment(segment, voice, cache_key)
+        synthesize.assert_called_once()
+        align.assert_called_once()
+
+        standalone_batch = self.make_batch([text], voice=voice, name_prefix="Studio")
+        with patch("studio.services._synthesize_segment") as synthesize_again:
+            with patch("studio.services.align_audio") as align_again:
+                services.generate_studio_batch(standalone_batch.pk)
+
+        synthesize_again.assert_not_called()
+        align_again.assert_not_called()
+        studio_asset = AudioAsset.objects.get(name="Studio 01")
+        self.assertEqual(studio_asset.text, text)
+        self.assertEqual(studio_asset.timings["scene_boundaries"][0]["scene_index"], 0)
+
+        other_project = NarrationProject.objects.create(user=self.user, title="Studio vers projet", voice=voice)
+        other_segment = NarrationSegment.objects.create(project=other_project, position=0, text=text)
+        with patch("studio.services._synthesize_segment") as project_synthesize:
+            with patch("studio.services.align_audio") as project_align:
+                services._prepare_segment(other_segment, voice, cache_key)
+        project_synthesize.assert_not_called()
+        project_align.assert_not_called()
+
+    def test_form_and_batch_status_are_isolated_and_validate_user_owned_voice(self):
+        own_batch = self.make_batch(["Texte privé."], status=StudioBatch.Status.DRAFT)
+        other_user = get_user_model().objects.create_user(username="studio-owner", password="SafePass123!x")
+        other_voice = Voice(user=other_user, name="Autre voix", consent_confirmed=True)
+        other_voice.sample.save("other.wav", ContentFile(b"other sample"), save=True)
+        other_batch = StudioBatch.objects.create(
+            user=other_user, voice=other_voice, total_items=0, status=StudioBatch.Status.PENDING,
+        )
+
+        page = self.client.get("/studio/")
+        self.assertEqual(page.status_code, 200)
+        self.assertContains(page, "Lot test")
+        self.assertNotContains(page, "Autre voix")
+        self.assertContains(page, 'href="/studio/"')
+        self.assertEqual(list(page.context["studio_batches"]), [own_batch])
+        self.assertEqual(self.client.get(f"/studio/batches/{own_batch.pk}/status/").json()["id"], own_batch.pk)
+        self.assertEqual(self.client.get(f"/studio/batches/{other_batch.pk}/status/").status_code, 404)
+
+        foreign_voice_post = self.client.post("/studio/batches/create/", {
+            "voice_id": other_voice.pk, "texts": ["Ne doit pas être enregistré."],
+        })
+        self.assertEqual(foreign_voice_post.status_code, 400)
+        self.assertFalse(StudioBatch.objects.filter(user=self.user, status=StudioBatch.Status.PENDING).exists())
+
+        response = self.client.post("/studio/batches/create/", {
+            "voice_id": own_batch.voice_id, "texts": ["Valide.", "   "],
+        })
+        self.assertEqual(response.status_code, 400)
+        response = self.client.post("/studio/batches/create/", {
+            "voice_id": own_batch.voice_id, "texts": [f"Texte {index}" for index in range(21)],
+        })
+        self.assertEqual(response.status_code, 400)
+
+    def test_voice_cannot_be_deleted_while_its_studio_batch_is_active(self):
+        voice = self.make_voice()
+        self.make_batch(["Encore en attente."], voice=voice, status=StudioBatch.Status.PENDING)
+
+        response = self.client.post(f"/voices/{voice.pk}/delete/", {"confirm": "yes"})
+
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(Voice.objects.filter(pk=voice.pk).exists())
+
+    def test_worker_requeues_processing_items_after_crash_and_claims_the_batch(self):
+        from .management.commands.run_narration_worker import Command
+
+        batch = self.make_batch(["À reprendre."], status=StudioBatch.Status.PROCESSING)
+        item = batch.items.get()
+        item.status = StudioBatchItem.Status.PROCESSING
+        item.save(update_fields=["status", "updated_at"])
+        command = Command()
+        command.stdout = StringIO()
+
+        command._recover_interrupted_studio_batches()
+
+        batch.refresh_from_db()
+        item.refresh_from_db()
+        self.assertEqual(batch.status, StudioBatch.Status.PENDING)
+        self.assertIsNotNone(batch.queued_at)
+        self.assertEqual(item.status, StudioBatchItem.Status.PENDING)
+        self.assertEqual(Command._claim_next_task(), ("studio_batch", batch.pk))
+        batch.refresh_from_db()
+        self.assertEqual(batch.status, StudioBatch.Status.PROCESSING)
 
 
 class RemoveImportedAudioMigrationTests(TestCase):
