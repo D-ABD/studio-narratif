@@ -32,3 +32,4 @@ local_settings.py
 
 # Keep the existing placeholder file unignored
 !media/.gitkeep
+db.sqlite3.backup-*
