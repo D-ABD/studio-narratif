@@ -23,6 +23,7 @@ from PIL import Image
 
 from .models import (
     AudioAsset, BackgroundTrack, NarrationProject, NarrationSegment, StudioBatch, StudioBatchItem, Voice,
+    default_animation_settings,
 )
 from .services import (
     _assemble_wav, _get_speaker_conditioning, _group_words, _prepare_segment, align_audio,
@@ -2138,7 +2139,7 @@ class ProjectDuplicationTests(MediaTestCase):
             motion=NarrationSegment.Motion.PAN_H,
             camera_profile=NarrationSegment.CameraProfile.ORGANIC,
             light_breathing=True,
-            animation_settings={"version": 1, "effects": {"example": True}},
+            animation_settings=default_animation_settings(),
             subtitle_data=[{"text": "ancien"}], duration_seconds=18.5, cache_key="old-cache-key",
         )
         image_name = self.make_visual(segment)
