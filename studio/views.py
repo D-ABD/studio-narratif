@@ -13,7 +13,8 @@ from django.contrib.auth.forms import UserCreationForm
 from django.core.files import File
 from django.core.files.base import ContentFile
 from django.db import transaction
-from django.http import HttpResponse, HttpResponseBadRequest, JsonResponse
+from django.db.models.deletion import ProtectedError
+from django.http import Http404, HttpResponse, HttpResponseBadRequest, JsonResponse
 from django.urls import reverse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
@@ -578,8 +579,15 @@ def delete_audio_asset(request, asset_id):
         if asset.project_id is not None:
             messages.error(request, "Impossible de supprimer cet audio : il est référencé par un projet.")
             return _audio_library_response(request, status=400)
+        if NarrationProject.objects.filter(audio_asset=asset).exists():
+            messages.error(request, "Impossible de supprimer cet audio : il est référencé par un projet.")
+            return _audio_library_response(request, status=400)
         audio_path = asset.audio_file.path if asset.audio_file else None
-        asset.delete()
+        try:
+            asset.delete()
+        except ProtectedError:
+            messages.error(request, "Impossible de supprimer cet audio : il est référencé par un projet.")
+            return _audio_library_response(request, status=400)
         if audio_path:
             transaction.on_commit(lambda path=audio_path: _unlink_audio_asset_file(path))
 
@@ -811,6 +819,16 @@ def create_project(request):
 def project_detail(request, project_id):
     project = get_object_or_404(NarrationProject, pk=project_id, user=request.user)
     segments = list(project.segments.all())
+    assembly_boundaries = []
+    if project.audio_asset and isinstance(project.audio_asset.timings, dict):
+        candidate_boundaries = project.audio_asset.timings.get("scene_boundaries")
+        if isinstance(candidate_boundaries, list):
+            assembly_boundaries = candidate_boundaries
+    assembly_slot_count = max(1, min(len(assembly_boundaries) or 1, 30))
+    segments_by_position = {}
+    for segment in segments:
+        if 0 <= segment.position < assembly_slot_count:
+            segments_by_position.setdefault(segment.position, segment)
     voice = project.voice if project.voice_id else None
     try:
         sample_digest = _voice_sample_digest(voice) if voice else ""
@@ -844,6 +862,15 @@ def project_detail(request, project_id):
         "audio_ready": bool(segments and all(segment.ready_for_voice for segment in segments)),
         "voices": Voice.objects.filter(user=request.user),
         "background_tracks": BackgroundTrack.objects.filter(user=request.user),
+        "assembly_audio_assets": AudioAsset.objects.filter(
+            user=request.user, source=AudioAsset.Source.XTTS,
+        ).order_by("-created_at", "-id"),
+        "assembly_slot_count": assembly_slot_count,
+        "assembly_slots": [
+            {"position": position, "segment": segments_by_position.get(position)}
+            for position in range(assembly_slot_count)
+        ],
+        "project_modes": NarrationProject.Mode.choices,
         "categories": Voice.Category.choices,
         "video_formats": NarrationProject.VideoFormat.choices,
         "motions": NarrationSegment.Motion.choices,
@@ -861,6 +888,114 @@ def project_detail(request, project_id):
             )
         ),
     })
+
+
+@login_required
+@require_POST
+def set_project_mode(request, project_id):
+    project = get_object_or_404(NarrationProject, pk=project_id, user=request.user)
+    if project.status in {NarrationProject.Status.QUEUED, NarrationProject.Status.PROCESSING}:
+        return JsonResponse({"ok": False, "error": "Attends la fin du traitement avant de changer de mode."}, status=409)
+    mode = request.POST.get("mode")
+    if mode not in NarrationProject.Mode.values:
+        return HttpResponseBadRequest("Mode de projet invalide.")
+    if project.mode != mode:
+        project.mode = mode
+        _invalidate_video(project, extra_update_fields=["mode"])
+        messages.success(request, "Le mode du projet a été enregistré. Les caches XTTS sont conservés.")
+    return redirect("project_detail", project_id=project.pk)
+
+
+@login_required
+@require_POST
+def set_project_audio_asset(request, project_id):
+    project = get_object_or_404(NarrationProject, pk=project_id, user=request.user)
+    if project.status in {NarrationProject.Status.QUEUED, NarrationProject.Status.PROCESSING}:
+        return JsonResponse({"ok": False, "error": "Attends la fin du traitement avant de changer l’audio."}, status=409)
+    raw_asset_id = (request.POST.get("audio_asset_id") or "").strip()
+    audio_asset = None
+    if raw_asset_id:
+        try:
+            raw_asset_id = int(raw_asset_id)
+        except (TypeError, ValueError):
+            raise Http404
+        audio_asset = get_object_or_404(
+            AudioAsset, pk=raw_asset_id, user=request.user, source=AudioAsset.Source.XTTS,
+        )
+    if project.audio_asset_id != (audio_asset.pk if audio_asset else None):
+        project.audio_asset = audio_asset
+        _invalidate_video(project, extra_update_fields=["audio_asset"])
+        messages.success(request, "L’audio du projet a été enregistré. La narration XTTS en cache reste intacte.")
+    return redirect("project_detail", project_id=project.pk)
+
+
+@login_required
+@require_POST
+def save_assembly_image(request, project_id):
+    project = get_object_or_404(NarrationProject, pk=project_id, user=request.user)
+    if project.mode != NarrationProject.Mode.ASSEMBLY:
+        return HttpResponseBadRequest("Les images d’assemblage ne sont disponibles que dans ce mode.")
+    if project.status in {NarrationProject.Status.QUEUED, NarrationProject.Status.PROCESSING}:
+        return JsonResponse({"ok": False, "error": "Attends la fin du traitement avant de modifier une image."}, status=409)
+    try:
+        position = int(request.POST.get("position", ""))
+    except (TypeError, ValueError):
+        return HttpResponseBadRequest("Emplacement d’image invalide.")
+    if position < 0 or position >= 30:
+        return HttpResponseBadRequest("Emplacement d’image invalide.")
+    upload = request.FILES.get("image")
+    if not upload:
+        return HttpResponseBadRequest("Sélectionne une image.")
+    if Path(upload.name).suffix.lower() not in {".jpg", ".jpeg", ".png"}:
+        return HttpResponseBadRequest("Formats acceptés : JPG et PNG.")
+
+    created_files = []
+    try:
+        with tempfile.TemporaryDirectory(prefix=f"petit-studio-assembly-image-{project.pk}-") as folder:
+            staged_scenes, _pixels = _scene_images(upload, Path(folder), max_scenes=1)
+            if len(staged_scenes) != 1:
+                raise ValueError("Sélectionne une seule image JPG ou PNG pour cet emplacement.")
+            _kind, filename, staged_path = staged_scenes[0]
+            segment = NarrationSegment.objects.filter(project=project, position=position).order_by("id").first()
+            if segment is None:
+                segment = NarrationSegment(project=project, position=position)
+                is_new = True
+            else:
+                is_new = False
+            old_files = []
+            if segment.image and segment.image.name:
+                old_files.append((segment.image.storage, segment.image.name))
+            if segment.video_clip and segment.video_clip.name:
+                old_files.append((segment.video_clip.storage, segment.video_clip.name))
+            segment.video_clip = ""
+            _save_staged_file(segment.image, filename, staged_path, created_files)
+            with transaction.atomic():
+                if is_new:
+                    segment.save()
+                else:
+                    segment.save(update_fields=["image", "video_clip", "updated_at"])
+                _invalidate_video(project)
+                _schedule_storage_cleanup(old_files)
+        messages.success(request, f"L’image de l’emplacement {position + 1} a été enregistrée.")
+    except ValueError as exc:
+        _delete_storage_files(created_files)
+        messages.error(request, str(exc))
+    except Exception:
+        _delete_storage_files(created_files)
+        logger.exception("Échec de l’enregistrement d’une image d’assemblage pour le projet %s.", project.pk)
+        messages.error(request, "Impossible d’enregistrer cette image.")
+    return redirect("project_detail", project_id=project.pk)
+
+
+@login_required
+@require_POST
+def render_assembly(request, project_id):
+    """Reserved endpoint for the direct FFmpeg render, enabled in phase 3.8 commit 2."""
+    project = get_object_or_404(NarrationProject, pk=project_id, user=request.user)
+    if project.mode != NarrationProject.Mode.ASSEMBLY:
+        return HttpResponseBadRequest("Passe le projet en mode Assemblage avant de lancer le rendu.")
+    messages.info(request, "Le rendu Assemblage sera activé dans la prochaine étape de la phase 3.8.")
+    return redirect("project_detail", project_id=project.pk)
 
 
 @login_required

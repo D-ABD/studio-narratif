@@ -217,10 +217,19 @@ class NarrationProject(models.Model):
         AUDIO = "audio", "Narration audio"
         VIDEO = "video", "Vidéo"
         ASSEMBLY = "assembly", "Assemblage de clips"
+        AUDIO_ASSEMBLY = "audio_assembly", "Assemblage avec audio de la bibliothèque"
         VIDEO_NARRATION = "video_narration", "Narration vidéo"
 
+    class Mode(models.TextChoices):
+        SCENES = "scenes", "Scènes"
+        ASSEMBLY = "assembly", "Assemblage"
+
     title = models.CharField("titre", max_length=120, default="Nouvelle narration")
+    mode = models.CharField(max_length=12, choices=Mode.choices, default=Mode.SCENES, db_index=True)
     voice = models.ForeignKey(Voice, null=True, blank=True, on_delete=models.SET_NULL, related_name="projects")
+    audio_asset = models.ForeignKey(
+        AudioAsset, null=True, blank=True, on_delete=models.PROTECT, related_name="assembly_projects",
+    )
     background_track = models.ForeignKey(
         BackgroundTrack, null=True, blank=True, on_delete=models.SET_NULL, related_name="projects",
     )
