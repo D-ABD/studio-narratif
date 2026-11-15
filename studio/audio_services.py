@@ -1,4 +1,5 @@
 """Safe, synchronous FFmpeg operations for the standalone audio editor."""
+import functools
 import json
 import logging
 import math
@@ -18,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 FFMPEG_TIMEOUT_SECONDS = 60
 FFPROBE_TIMEOUT_SECONDS = 60
-FILTER_PROBE_TIMEOUT_SECONDS = 10
+FILTER_PROBE_TIMEOUT_SECONDS = 2
 MAX_REVERSE_SECONDS = 5 * 60
 MAX_OPERATIONS = 50
 OUTPUT_BITRATE = "192k"
@@ -111,57 +112,58 @@ def _ffprobe_path():
     raise RuntimeError("FFprobe est introuvable. Installe-le puis relance l’application.")
 
 
-def _parse_filter_names(output):
-    names = set()
-    for line in output.splitlines():
-        parts = line.split()
-        if len(parts) >= 2 and len(parts[0]) == 3 and set(parts[0]) <= set("TSC."):
-            names.add(parts[1])
-    return names
+@functools.lru_cache(maxsize=4)
+def get_available_effects(ffmpeg_path):
+    """Return confirmed FFmpeg filters used by the effect and preset catalogs."""
+    candidates = set().union(*EFFECT_FILTERS.values(), *PRESET_FILTERS.values())
+    available = set()
+    for name in sorted(candidates):
+        try:
+            result = subprocess.run(
+                [ffmpeg_path, "-hide_banner", "-h", f"filter={name}"],
+                capture_output=True,
+                timeout=FILTER_PROBE_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning("Timeout détection filtre %s", name)
+            continue
+        except FileNotFoundError as exc:
+            logger.error("FFmpeg est introuvable pendant la détection des filtres : %s", exc)
+            return set()
+
+        output = result.stdout or b""
+        error = result.stderr or b""
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", errors="replace")
+        if isinstance(error, bytes):
+            error = error.decode("utf-8", errors="replace")
+        if result.returncode == 0 and "unknown filter" not in f"{output}\n{error}".lower():
+            available.add(name)
+    return available
 
 
 def _detect_filters():
+    candidates = set().union(*EFFECT_FILTERS.values(), *PRESET_FILTERS.values())
     try:
-        result = subprocess.run(
-            [_ffmpeg_path(), "-hide_banner", "-filters"],
-            capture_output=True, text=True, check=False,
-            timeout=FILTER_PROBE_TIMEOUT_SECONDS,
-        )
-    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
-        logger.warning("Détection des filtres FFmpeg audio impossible : %s", exc)
-        return frozenset()
-    if result.returncode:
-        logger.warning("FFmpeg n’a pas pu lister ses filtres audio : %s", (result.stderr or "").strip())
-        return frozenset()
-    return frozenset(_parse_filter_names((result.stdout or "") + "\n" + (result.stderr or "")))
+        ffmpeg_path = _ffmpeg_path()
+    except (OSError, RuntimeError) as exc:
+        logger.error("FFmpeg est introuvable pendant la détection des filtres : %s", exc)
+        available = set()
+    else:
+        available = get_available_effects(ffmpeg_path)
+    unavailable = sorted(candidates - available)
+    logger.info("Filtres FFmpeg détectés : %s/%s disponibles", len(available), len(candidates))
+    if unavailable:
+        logger.warning("Filtres FFmpeg indisponibles : %s", ", ".join(unavailable))
+    return frozenset(available)
 
 
-# Probe once when this module starts; requests never repeat `ffmpeg -filters`.
+# Probe filters once when this module starts; the cached result backs UI choices.
 AVAILABLE_FILTERS = _detect_filters()
 
 
 def _filters_available(requirements):
     return set(requirements).issubset(AVAILABLE_FILTERS)
-
-
-def _warn_unavailable_catalog_entries():
-    unavailable_effects = [
-        label for key, label in EFFECT_LABELS.items()
-        if not _filters_available(EFFECT_FILTERS[key])
-    ]
-    unavailable_presets = [
-        label for key, label in PRESET_LABELS.items()
-        if not _filters_available(PRESET_FILTERS[key])
-    ]
-    if unavailable_effects or unavailable_presets:
-        logger.warning(
-            "Effets FFmpeg indisponibles, masqués dans l’éditeur · effets=%s · presets=%s",
-            ", ".join(unavailable_effects) or "aucun",
-            ", ".join(unavailable_presets) or "aucun",
-        )
-
-
-_warn_unavailable_catalog_entries()
 
 
 def available_effects():

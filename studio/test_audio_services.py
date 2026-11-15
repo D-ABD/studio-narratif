@@ -1,3 +1,5 @@
+import shutil
+import subprocess
 import tempfile
 from datetime import timedelta
 from pathlib import Path
@@ -26,12 +28,6 @@ class AudioEffectServiceTests(TestCase):
     def test_catalog_contains_twenty_five_effects_and_six_presets(self):
         self.assertEqual(len(audio_services.EFFECT_LABELS), 25)
         self.assertEqual(len(audio_services.PRESET_LABELS), 6)
-
-    def test_ffmpeg_filter_listing_parser_extracts_filter_names(self):
-        parsed = audio_services._parse_filter_names(
-            " ..C aecho A->A Add echoing\n TSC atempo A->A Adjust tempo\n"
-        )
-        self.assertEqual(parsed, {"aecho", "atempo"})
 
     def test_every_static_effect_builds_a_filter_chain(self):
         for name in audio_services.EFFECT_LABELS:
@@ -198,6 +194,75 @@ class AudioEffectServiceTests(TestCase):
             self.assertEqual(result_path, output)
             self.assertEqual(duration, 10.0)
             self.assertEqual(output.read_bytes(), b"original")
+
+
+class FFmpegFilterDetectionTests(TestCase):
+    def setUp(self):
+        audio_services.get_available_effects.cache_clear()
+        self.addCleanup(audio_services.get_available_effects.cache_clear)
+
+    @staticmethod
+    def candidates():
+        return set().union(*audio_services.EFFECT_FILTERS.values(), *audio_services.PRESET_FILTERS.values())
+
+    def test_filter_is_available_when_help_succeeds_without_unknown_filter(self):
+        with patch("studio.audio_services.subprocess.run", return_value=Mock(
+            returncode=0, stdout=b"Filter aecho\n", stderr=b"",
+        )):
+            available = audio_services.get_available_effects("ffmpeg-test-available")
+        self.assertIn("aecho", available)
+
+    def test_unknown_filter_is_unavailable_even_when_ffmpeg_returns_zero(self):
+        with patch("studio.audio_services.subprocess.run", return_value=Mock(
+            returncode=0, stdout=b"", stderr=b"Unknown filter 'aecho'.\n",
+        )):
+            available = audio_services.get_available_effects("ffmpeg-test-unknown-zero")
+        self.assertNotIn("aecho", available)
+
+    def test_filter_is_unavailable_when_help_returns_nonzero(self):
+        with patch("studio.audio_services.subprocess.run", return_value=Mock(
+            returncode=1, stdout=b"", stderr=b"failed",
+        )):
+            available = audio_services.get_available_effects("ffmpeg-test-nonzero")
+        self.assertEqual(available, set())
+
+    def test_timeout_marks_filter_unavailable_and_logs_warning(self):
+        with patch(
+            "studio.audio_services.subprocess.run",
+            side_effect=subprocess.TimeoutExpired("ffmpeg", 2),
+        ), self.assertLogs("studio.audio_services", level="WARNING") as logs:
+            available = audio_services.get_available_effects("ffmpeg-test-timeout")
+        self.assertEqual(available, set())
+        self.assertTrue(any("Timeout détection filtre" in line for line in logs.output))
+
+    def test_missing_ffmpeg_returns_empty_set_and_logs_error(self):
+        with patch(
+            "studio.audio_services.subprocess.run",
+            side_effect=FileNotFoundError("ffmpeg not found"),
+        ), self.assertLogs("studio.audio_services", level="ERROR") as logs:
+            available = audio_services.get_available_effects("ffmpeg-test-missing")
+        self.assertEqual(available, set())
+        self.assertTrue(any("introuvable" in line for line in logs.output))
+
+    def test_detection_results_are_cached_per_ffmpeg_path(self):
+        candidates = self.candidates()
+        with patch("studio.audio_services.subprocess.run", return_value=Mock(
+            returncode=0, stdout=b"filter available", stderr=b"",
+        )) as run:
+            first = audio_services.get_available_effects("ffmpeg-test-cache")
+            second = audio_services.get_available_effects("ffmpeg-test-cache")
+        self.assertEqual(first, second)
+        self.assertEqual(run.call_count, len(candidates))
+
+    def test_real_ffmpeg_exposes_core_filters_when_installed(self):
+        try:
+            ffmpeg_path = audio_services._ffmpeg_path()
+        except (OSError, RuntimeError):
+            self.skipTest("FFmpeg absent")
+        if not shutil.which(ffmpeg_path) and not Path(ffmpeg_path).is_file():
+            self.skipTest("FFmpeg absent")
+        available = audio_services.get_available_effects(ffmpeg_path)
+        self.assertTrue({"aecho", "areverse", "atempo"}.issubset(available))
 
 
 class AudioSessionCleanupTests(TestCase):
