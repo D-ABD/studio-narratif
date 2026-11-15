@@ -1,6 +1,10 @@
 import importlib.util
 from io import BytesIO, StringIO
 import sys
+import math
+import shutil
+import struct
+import subprocess
 import tempfile
 import types
 import wave
@@ -745,6 +749,13 @@ class ProjectViewTests(MediaTestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("Il manque 1 visuel pour les 1 scènes.", response.json()["error"])
 
+        visual = NarrationSegment.objects.create(project=project, position=0)
+        visual.image.save("image.png", ContentFile(ProjectAssemblyRenderTests.png_bytes()), save=True)
+        visual.video_clip.save("clip.mp4", ContentFile(b"embedded video"), save=True)
+        response = self.client.post(f"/projects/{project.pk}/assembly/render/")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("contient une image et une vidéo", response.json()["error"])
+
         other_user = get_user_model().objects.create_user(username="assembly-audio-owner", password="SafePass123!x")
         foreign_asset = AudioAsset.objects.create(
             user=other_user, name="Privé", duration=1.0, source=AudioAsset.Source.XTTS,
@@ -779,6 +790,70 @@ class ProjectViewTests(MediaTestCase):
         self.assertEqual(project.status, NarrationProject.Status.QUEUED)
         self.assertEqual(project.job_type, NarrationProject.JobType.AUDIO_ASSEMBLY)
         self.assertEqual(project.total_segments, 1)
+
+    @patch("studio.views._probe_clip", return_value={"duration": 1.0, "has_audio": True})
+    def test_assembly_visual_upload_replaces_and_cleans_the_opposite_media(self, _probe):
+        project = NarrationProject.objects.create(
+            user=self.user, title="Remplacement visuel", mode=NarrationProject.Mode.ASSEMBLY,
+        )
+
+        first_image = SimpleUploadedFile("first.png", ProjectAssemblyRenderTests.png_bytes(), content_type="image/png")
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(f"/projects/{project.pk}/assembly/visual/", {
+                "position": "0", "visual_type": "image", "visual_file": first_image,
+            })
+        self.assertEqual(response.status_code, 302)
+        segment = project.segments.get(position=0)
+        image_name = segment.image.name
+        self.assertTrue(segment.image)
+        self.assertFalse(segment.video_clip)
+
+        video_upload = SimpleUploadedFile("clip.mp4", b"mock video with embedded audio", content_type="video/mp4")
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(f"/projects/{project.pk}/assembly/visual/", {
+                "position": "0", "visual_type": "video", "visual_file": video_upload,
+            })
+        self.assertEqual(response.status_code, 302)
+        segment.refresh_from_db()
+        video_name = segment.video_clip.name
+        self.assertFalse(segment.image)
+        self.assertTrue(segment.video_clip)
+        self.assertFalse(segment.image.storage.exists(image_name))
+
+        second_video = SimpleUploadedFile("second.mov", b"mock mov with embedded audio", content_type="video/quicktime")
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(f"/projects/{project.pk}/assembly/visual/", {
+                "position": "1", "visual_type": "video", "visual_file": second_video,
+            })
+        self.assertEqual(response.status_code, 302)
+        second = project.segments.get(position=1)
+        second_video_name = second.video_clip.name
+
+        replacement_image = SimpleUploadedFile(
+            "replacement.jpg", ProjectAssemblyRenderTests.png_bytes(), content_type="image/jpeg",
+        )
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(f"/projects/{project.pk}/assembly/visual/", {
+                "position": "1", "visual_type": "image", "visual_file": replacement_image,
+            })
+        self.assertEqual(response.status_code, 302)
+        second.refresh_from_db()
+        self.assertTrue(second.image)
+        self.assertFalse(second.video_clip)
+        self.assertFalse(second.video_clip.storage.exists(second_video_name))
+        self.assertTrue(segment.video_clip.storage.exists(video_name))
+
+    def test_assembly_visual_upload_rejects_submitting_both_files(self):
+        project = NarrationProject.objects.create(
+            user=self.user, title="Upload invalide", mode=NarrationProject.Mode.ASSEMBLY,
+        )
+        response = self.client.post(f"/projects/{project.pk}/assembly/visual/", {
+            "position": "0", "visual_type": "image", "visual_file": SimpleUploadedFile("image.png", b"x"),
+            "image": SimpleUploadedFile("another.png", b"x"),
+            "video": SimpleUploadedFile("clip.mp4", b"x"),
+        })
+        self.assertEqual(response.status_code, 400)
+        self.assertContains(response, "Choisis une image ou une vidéo, pas les deux.", status_code=400)
 
     def test_worker_dispatches_dedicated_assembly_job_without_xtts(self):
         from .management.commands.run_narration_worker import Command
@@ -849,6 +924,109 @@ class ProjectAssemblyRenderTests(MediaTestCase):
             project.music_volume = 25
             project.save(update_fields=["background_track", "music_volume"])
         return project, visual, ignored
+
+    @staticmethod
+    def wav_bytes(duration, frequency=440):
+        sample_rate = 8000
+        frames = b"".join(
+            struct.pack("<h", int(12000 * math.sin(2 * math.pi * frequency * index / sample_rate)))
+            for index in range(round(sample_rate * duration))
+        )
+        buffer = BytesIO()
+        with wave.open(buffer, "wb") as stream:
+            stream.setnchannels(1)
+            stream.setsampwidth(2)
+            stream.setframerate(sample_rate)
+            stream.writeframes(frames)
+        return buffer.getvalue()
+
+    def make_video_assembly_project(self, source_duration, boundary_duration):
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg or not shutil.which("ffprobe"):
+            self.skipTest("ffmpeg et ffprobe sont nécessaires au test d’intégration vidéo.")
+        with tempfile.TemporaryDirectory(prefix="assembly-source-video-") as folder:
+            source = Path(folder) / "source-with-audio.mp4"
+            try:
+                subprocess.run([
+                    ffmpeg, "-y", "-v", "error", "-f", "lavfi", "-i",
+                    f"testsrc2=size=128x128:rate=24:duration={source_duration:.3f}",
+                    "-f", "lavfi", "-i", f"sine=frequency=880:sample_rate=8000:duration={source_duration:.3f}",
+                    "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-ar", "8000", str(source),
+                ], capture_output=True, text=True, check=True, timeout=30)
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                self.skipTest(f"ffmpeg ne peut pas préparer un clip MP4 avec audio : {exc}")
+            source_bytes = source.read_bytes()
+
+        words_end = min(0.4, boundary_duration - 0.05)
+        asset = AudioAsset.objects.create(
+            user=self.user, name="Voix importée du Studio", duration=boundary_duration,
+            source=AudioAsset.Source.XTTS,
+            timings={
+                "version": 1,
+                "words": [{"word": "voix", "start": 0.0, "end": words_end}],
+                "segments": [{"text": "Voix", "start": 0.0, "end": words_end}],
+                "scene_boundaries": [{
+                    "scene_index": 0, "start": 0.0, "end": boundary_duration,
+                }],
+            },
+        )
+        asset.audio_file.save("voice.wav", ContentFile(self.wav_bytes(boundary_duration)), save=True)
+        project = NarrationProject.objects.create(
+            user=self.user, title="Vidéo en assemblage", mode=NarrationProject.Mode.ASSEMBLY,
+            audio_asset=asset, subtitles_enabled=False,
+        )
+        scene = NarrationSegment.objects.create(project=project, position=0)
+        scene.video_clip.save("source.mp4", ContentFile(source_bytes), save=True)
+        return project, asset
+
+    def test_assembly_video_pads_short_clip_trims_long_clip_and_discards_embedded_audio(self):
+        from . import video_services
+
+        real_run_ffmpeg = video_services._run_ffmpeg
+        for source_duration, boundary_duration, expect_padding in (
+            (0.20, 0.50, True),
+            (0.80, 0.50, False),
+        ):
+            with self.subTest(source_duration=source_duration):
+                project, asset = self.make_video_assembly_project(source_duration, boundary_duration)
+                commands = []
+                intermediate_metadata = []
+
+                def run_and_inspect(command, cwd, operation, cancel_check=None):
+                    result = real_run_ffmpeg(command, cwd, operation, cancel_check=cancel_check)
+                    commands.append(list(command))
+                    if operation.startswith("rendu silencieux du visuel"):
+                        intermediate_metadata.append(video_services._probe_clip(command[-1]))
+                    return result
+
+                with patch("studio.video_services._dimensions", return_value=(128, 128)):
+                    with patch("studio.video_services._video_encoder", return_value="libx264"):
+                        with patch("studio.video_services._run_ffmpeg", side_effect=run_and_inspect):
+                            video_services.render_project_assembly(project.pk)
+
+                project.refresh_from_db()
+                self.assertEqual(project.status, NarrationProject.Status.READY, project.error_message)
+                self.assertEqual(len(intermediate_metadata), 1)
+                self.assertFalse(intermediate_metadata[0]["has_audio"])
+                self.assertEqual(len(commands), 3)
+                intermediate = commands[0]
+                self.assertIn("-an", intermediate)
+                self.assertEqual(intermediate[intermediate.index("-map") + 1], "0:v:0")
+                video_filters = intermediate[intermediate.index("-vf") + 1]
+                self.assertIn("scale=128:128:force_original_aspect_ratio=increase", video_filters)
+                self.assertIn("crop=128:128", video_filters)
+                self.assertIn("fps=24,setsar=1", video_filters)
+                self.assertEqual("tpad=stop_mode=clone" in video_filters, expect_padding)
+                self.assertEqual(intermediate[intermediate.index("-t") + 1], "0.500")
+
+                final_command = commands[2]
+                self.assertIn(asset.audio_file.path, final_command)
+                self.assertEqual(final_command[final_command.index("-map") + 1], "0:v:0")
+                self.assertEqual(final_command[final_command.index("-map") + 3], "1:a:0")
+                final_metadata = video_services._probe_clip(project.video_file.path)
+                self.assertTrue(final_metadata["has_audio"])
+                self.assertAlmostEqual(final_metadata["duration"], boundary_duration, delta=0.12)
 
     @patch("studio.video_services._ffmpeg_path", return_value="ffmpeg")
     @patch("studio.video_services._video_encoder", return_value="libx264")
