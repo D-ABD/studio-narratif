@@ -691,8 +691,8 @@ class ProjectViewTests(MediaTestCase):
         response = self.client.get(f"/projects/{project.pk}/")
 
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Image de la boundary 0")
-        self.assertNotContains(response, "Image de la boundary 1")
+        self.assertContains(response, "Visuel de la boundary 0")
+        self.assertNotContains(response, "Visuel de la boundary 1")
         self.assertContains(response, "Narration visible")
         self.assertNotContains(response, "Scène conservée hors rendu")
 
@@ -743,7 +743,7 @@ class ProjectViewTests(MediaTestCase):
         asset.save(update_fields=["timings"])
         response = self.client.post(f"/projects/{project.pk}/assembly/render/")
         self.assertEqual(response.status_code, 400)
-        self.assertIn("Il manque 1 image(s) pour les 1 scènes.", response.json()["error"])
+        self.assertIn("Il manque 1 visuel pour les 1 scènes.", response.json()["error"])
 
         other_user = get_user_model().objects.create_user(username="assembly-audio-owner", password="SafePass123!x")
         foreign_asset = AudioAsset.objects.create(
@@ -863,7 +863,7 @@ class ProjectAssemblyRenderTests(MediaTestCase):
         def create_output(command, cwd, *_args, **_kwargs):
             commands.append(list(command))
             subtitle_file = Path(cwd) / "assembly.ass"
-            if subtitle_file.exists():
+            if subtitle_file.exists() and "subtitles=filename=assembly.ass" in " ".join(command):
                 subtitle_texts.append(subtitle_file.read_text(encoding="utf-8"))
             Path(command[-1]).write_bytes(b"v" * 2048)
 
@@ -874,14 +874,14 @@ class ProjectAssemblyRenderTests(MediaTestCase):
         self.assertEqual(project.status, NarrationProject.Status.READY)
         self.assertAlmostEqual(project.duration_seconds, 1.0)
         self.assertTrue(project.video_file)
-        self.assertEqual(len(commands), 1)
+        self.assertEqual(len(commands), 3)
         self.assertIn(visual.image.path, commands[0])
         self.assertNotIn(ignored.image.path, commands[0])
-        graph = commands[0][commands[0].index("-filter_complex") + 1]
-        self.assertIn("concat=n=1:v=1:a=0", graph)
-        self.assertIn("subtitles=filename=assembly.ass", graph)
-        self.assertIn(project.audio_asset.audio_file.path, commands[0])
-        self.assertEqual(commands[0][commands[0].index("-c:v") + 1], "libx264")
+        self.assertIn("-an", commands[0])
+        self.assertEqual(commands[1][commands[1].index("-c") + 1], "copy")
+        self.assertIn(project.audio_asset.audio_file.path, commands[2])
+        self.assertEqual(commands[2][commands[2].index("-c:v") + 1], "libx264")
+        self.assertIn("subtitles=filename=assembly.ass", commands[2][commands[2].index("-vf") + 1])
         self.assertEqual(len(subtitle_texts), 1)
         self.assertIn("bonjour", subtitle_texts[0])
         self.assertIn("studio", subtitle_texts[0])
@@ -904,10 +904,11 @@ class ProjectAssemblyRenderTests(MediaTestCase):
 
         project.refresh_from_db()
         self.assertEqual(project.status, NarrationProject.Status.READY)
-        self.assertEqual(run_ffmpeg.call_count, 2)
+        self.assertEqual(run_ffmpeg.call_count, 4)
         first_command = run_ffmpeg.call_args_list[0].args[0]
-        music_command = run_ffmpeg.call_args_list[1].args[0]
+        music_command = run_ffmpeg.call_args_list[3].args[0]
         self.assertNotIn("-stream_loop", first_command)
+        self.assertIn("-an", first_command)
         self.assertEqual(music_command[music_command.index("-c:v") + 1], "copy")
         self.assertEqual(music_command[music_command.index("-c:a") + 1], "aac")
 
@@ -925,7 +926,7 @@ class ProjectAssemblyRenderTests(MediaTestCase):
         run_ffmpeg.assert_not_called()
         project.refresh_from_db()
         self.assertEqual(project.status, NarrationProject.Status.ERROR)
-        self.assertIn("Il manque 1 image(s) pour les 1 scènes.", project.error_message)
+        self.assertIn("Il manque 1 visuel pour les 1 scènes.", project.error_message)
 
 
 class BackgroundMusicMixTests(MediaTestCase):

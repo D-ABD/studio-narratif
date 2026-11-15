@@ -367,6 +367,7 @@ def _run_ffmpeg_once(command, cwd, operation, cancel_check=None):
 def _run_ffmpeg(command, cwd, operation, cancel_check=None):
     try:
         _run_ffmpeg_once(command, cwd, operation, cancel_check=cancel_check)
+        return False
     except _FFmpegCommandError as exc:
         fallback = _software_fallback_command(command)
         if fallback is None:
@@ -378,6 +379,7 @@ def _run_ffmpeg(command, cwd, operation, cancel_check=None):
         )
         _remove_partial_output(command, cwd)
         _run_ffmpeg_once(fallback, cwd, operation, cancel_check=cancel_check)
+        return True
 
 
 ASS_PLAY_RES_X = 1080
@@ -619,16 +621,47 @@ def validate_assembly_project(project):
     segments_by_position = {}
     for segment in project.segments.filter(position__gte=0, position__lt=len(normalized_boundaries)).order_by("position", "id"):
         segments_by_position.setdefault(segment.position, segment)
-    missing_positions = [
-        position for position in range(len(normalized_boundaries))
-        if position not in segments_by_position
-        or not segments_by_position[position].image
-        or not Path(segments_by_position[position].image.path).is_file()
-    ]
+    visuals = []
+    missing_positions = []
+    for position in range(len(normalized_boundaries)):
+        segment = segments_by_position.get(position)
+        if segment is None:
+            missing_positions.append(position)
+            continue
+        has_image = bool(segment.image and segment.image.name)
+        has_video = bool(segment.video_clip and segment.video_clip.name)
+        if has_image and has_video:
+            raise ValueError(
+                f"L’emplacement {position + 1} contient une image et une vidéo. Choisis un seul visuel."
+            )
+        if not has_image and not has_video:
+            missing_positions.append(position)
+            continue
+
+        if has_image:
+            image_path = Path(segment.image.path)
+            if not image_path.is_file():
+                missing_positions.append(position)
+                continue
+            visuals.append({"kind": "image", "path": image_path, "duration": None})
+            continue
+
+        video_path = Path(segment.video_clip.path)
+        if not video_path.is_file():
+            missing_positions.append(position)
+            continue
+        if video_path.suffix.lower() not in {".mp4", ".mov"}:
+            raise ValueError(f"La vidéo de l’emplacement {position + 1} doit être au format MP4 ou MOV.")
+        try:
+            metadata = _probe_clip(video_path)
+        except RuntimeError as exc:
+            raise ValueError(f"La vidéo de l’emplacement {position + 1} est illisible : {exc}") from exc
+        visuals.append({"kind": "video", "path": video_path, "duration": metadata["duration"]})
+
     if missing_positions:
-        raise ValueError(
-            f"Il manque {len(missing_positions)} image(s) pour les {len(normalized_boundaries)} scènes."
-        )
+        count = len(missing_positions)
+        noun = "visuel" if count == 1 else "visuels"
+        raise ValueError(f"Il manque {count} {noun} pour les {len(normalized_boundaries)} scènes. Ajoute une image ou une vidéo.")
 
     if not asset.audio_file or not Path(asset.audio_file.path).is_file():
         raise ValueError("Le fichier audio sélectionné est introuvable dans la bibliothèque.")
@@ -640,7 +673,7 @@ def validate_assembly_project(project):
         "duration": duration,
         "words": words,
         "boundaries": normalized_boundaries,
-        "images": [Path(segments_by_position[index].image.path) for index in range(len(normalized_boundaries))],
+        "visuals": visuals,
     }
 
 
@@ -1018,21 +1051,27 @@ def render_video_assembly(project_id):
 
 
 
-def _video_narration_command(
-    ffmpeg, source, voice_path, output, width, height, video_duration, voice_duration, subtitle_file=None,
-):
-    """Build a clip render command that maps video only from the source and audio only from XTTS."""
+def _normalized_clip_filters(width, height, source_duration, target_duration, subtitle_file=None):
+    """Normalize a visual clip like the existing Scenes renderer and pad shorter sources."""
     filters = [
         f"scale={width}:{height}:force_original_aspect_ratio=increase",
         f"crop={width}:{height}",
         "fps=24",
         "setsar=1",
     ]
-    stop_duration = max(0.0, voice_duration - video_duration)
+    stop_duration = max(0.0, target_duration - source_duration)
     if stop_duration > 0.01:
         filters.append(f"tpad=stop_mode=clone:stop_duration={stop_duration:.3f}")
     if subtitle_file:
         filters.append(_subtitle_filter(subtitle_file))
+    return filters
+
+
+def _video_narration_command(
+    ffmpeg, source, voice_path, output, width, height, video_duration, voice_duration, subtitle_file=None,
+):
+    """Build a clip render command that maps video only from the source and audio only from XTTS."""
+    filters = _normalized_clip_filters(width, height, video_duration, voice_duration, subtitle_file)
     return [
         ffmpeg, "-y", "-v", "error",
         "-i", str(source), "-i", str(voice_path),
@@ -1088,7 +1127,7 @@ def mix_music_with_video(video_path, music_path, volume, duration, output_path, 
 
 
 def render_project_assembly(project_id):
-    """Render a project from library audio, its boundary images, global ASS, and optional music."""
+    """Render silent boundary visuals, concatenate them, then add library audio and global ASS."""
     close_old_connections()
     try:
         project = NarrationProject.objects.select_related("audio_asset", "background_track").get(pk=project_id)
@@ -1100,6 +1139,7 @@ def render_project_assembly(project_id):
         # All validation occurs before creating the FFmpeg command or output files.
         inputs = validate_assembly_project(project)
         boundaries = inputs["boundaries"]
+        visuals = inputs["visuals"]
         width, height = _dimensions(project.video_format)
         ffmpeg = _ffmpeg_path()
         project.status_message = "Préparation de l’assemblage audio…"
@@ -1117,49 +1157,88 @@ def render_project_assembly(project_id):
                     _ass_text_from_words(inputs["words"], width, height), encoding="utf-8",
                 )
 
-            command = [ffmpeg, "-y", "-v", "error"]
-            filter_parts = []
-            video_labels = []
-            for index, (image_path, boundary) in enumerate(zip(inputs["images"], boundaries)):
+            silent_clips = []
+            intermediate_commands = []
+            force_software_encoder = False
+            for index, (visual, boundary) in enumerate(zip(visuals, boundaries), start=1):
+                check_job_cancellation(project_id)
                 clip_duration = boundary["end"] - boundary["start"]
-                command.extend([
-                    "-loop", "1", "-framerate", "24", "-t", f"{clip_duration:.3f}",
-                    "-i", str(image_path),
-                ])
-                filters = (
-                    f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-                    f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,"
-                    f"fps=24,setsar=1,trim=duration={clip_duration:.3f},setpts=PTS-STARTPTS"
+                visual_path = visual["path"]
+                silent_clip = folder / f"visual-{index:04}.mp4"
+                filters = _normalized_clip_filters(
+                    width,
+                    height,
+                    visual["duration"] if visual["kind"] == "video" else clip_duration,
+                    clip_duration,
                 )
-                label = f"visual{index}"
-                filter_parts.append(f"[{index}:v]{filters}[{label}]")
-                video_labels.append(f"[{label}]")
+                command = [ffmpeg, "-y", "-v", "error"]
+                if visual["kind"] == "image":
+                    command.extend([
+                        "-loop", "1", "-framerate", "24", "-t", f"{clip_duration:.3f}",
+                        "-i", str(visual_path),
+                    ])
+                else:
+                    command.extend(["-i", str(visual_path), "-map", "0:v:0"])
+                command.extend([
+                    "-vf", ",".join(filters), "-an", "-t", f"{clip_duration:.3f}", "-r", "24",
+                    *_video_encoder_args(ffmpeg, width, height), "-pix_fmt", "yuv420p", str(silent_clip),
+                ])
+                if force_software_encoder:
+                    command = _software_fallback_command(command) or command
+                project.status_message = f"Préparation du visuel silencieux {index}/{len(visuals)}…"
+                project.current_segment = index
+                project.progress_percent = 5 + round(50 * index / len(visuals))
+                project.save(update_fields=["status_message", "current_segment", "progress_percent", "updated_at"])
+                fallback_used = _run_ffmpeg(
+                    command, folder, f"rendu silencieux du visuel {index}", cancel_check=cancel_check,
+                )
+                if fallback_used and not force_software_encoder:
+                    # Keep every file passed to concat -c copy on the same encoder/profile.
+                    for prior_command in intermediate_commands:
+                        prior_fallback = _software_fallback_command(prior_command)
+                        if prior_fallback:
+                            _remove_partial_output(prior_command, folder)
+                            _run_ffmpeg(
+                                prior_fallback, folder, "réencodage homogène d’un visuel", cancel_check=cancel_check,
+                            )
+                    force_software_encoder = True
+                intermediate_commands.append(command)
+                if not silent_clip.is_file() or silent_clip.stat().st_size < 1000:
+                    raise RuntimeError(f"FFmpeg n’a pas produit le visuel silencieux {index}.")
+                silent_clips.append(silent_clip)
 
-            audio_input_index = len(inputs["images"])
-            command.extend(["-i", str(inputs["audio_path"])])
-            filter_parts.append(
-                "".join(video_labels) + f"concat=n={len(video_labels)}:v=1:a=0[visual]"
+            concat_list = folder / "assembly-visuals.txt"
+            concat_list.write_text("".join(f"file '{clip.name}'\n" for clip in silent_clips), encoding="utf-8")
+            silent_video = folder / "assembly-visuals.mp4"
+            project.status_message = "Concaténation des visuels silencieux…"
+            project.progress_percent = 65
+            project.save(update_fields=["status_message", "progress_percent", "updated_at"])
+            _run_ffmpeg(
+                [ffmpeg, "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(concat_list),
+                 "-c", "copy", "-movflags", "+faststart", str(silent_video)],
+                folder, "concaténation des visuels silencieux", cancel_check=cancel_check,
             )
-            video_filter = "[visual]"
+            if not silent_video.is_file() or silent_video.stat().st_size < 1000:
+                raise RuntimeError("FFmpeg n’a pas produit la vidéo silencieuse concaténée.")
+
+            output = folder / "assembly.mp4"
+            final_command = [
+                ffmpeg, "-y", "-v", "error", "-i", str(silent_video), "-i", str(inputs["audio_path"]),
+                "-map", "0:v:0", "-map", "1:a:0",
+            ]
             if subtitle_file:
-                filter_parts.append(f"[visual]{_subtitle_filter(subtitle_file)}[video_out]")
-                video_filter = "[video_out]"
-            command.extend([
-                "-filter_complex", ";".join(filter_parts),
-                "-map", video_filter,
-                "-map", f"{audio_input_index}:a:0",
+                final_command.extend(["-vf", _subtitle_filter(subtitle_file)])
+            final_command.extend([
                 "-af", "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo",
                 "-t", f"{inputs['duration']:.3f}", "-r", "24",
                 *_video_encoder_args(ffmpeg, width, height),
                 "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
-                "-ar", "48000", "-ac", "2", "-shortest", "-movflags", "+faststart",
+                "-ar", "48000", "-ac", "2", "-shortest", "-movflags", "+faststart", str(output),
             ])
-            output = folder / "assembly.mp4"
-            command.append(str(output))
-            project.status_message = "Encodage de l’assemblage avec sous-titres…"
-            project.progress_percent = 15
+            project.status_message = "Encodage final avec l’audio et les sous-titres…"
+            project.progress_percent = 80
             project.save(update_fields=["status_message", "progress_percent", "updated_at"])
-            _run_ffmpeg(command, folder, "rendu direct de l’assemblage", cancel_check=cancel_check)
+            _run_ffmpeg(final_command, folder, "encodage final de l’assemblage", cancel_check=cancel_check)
             if not output.is_file() or output.stat().st_size < 1000:
                 raise RuntimeError("FFmpeg n’a pas produit de vidéo d’assemblage valide.")
 

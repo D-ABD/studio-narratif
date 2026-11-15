@@ -27,7 +27,7 @@ from .models import (
     default_animation_settings, legacy_animation_settings,
 )
 from .services import _voice_sample_digest, cache_key_for, hash_file, normalize_voice_sample, srt_text
-from .video_services import validate_assembly_project
+from .video_services import _probe_clip, validate_assembly_project
 
 logger = logging.getLogger(__name__)
 
@@ -932,31 +932,59 @@ def set_project_audio_asset(request, project_id):
 
 @login_required
 @require_POST
-def save_assembly_image(request, project_id):
+def save_assembly_visual(request, project_id):
     project = get_object_or_404(NarrationProject, pk=project_id, user=request.user)
     if project.mode != NarrationProject.Mode.ASSEMBLY:
-        return HttpResponseBadRequest("Les images d’assemblage ne sont disponibles que dans ce mode.")
+        return HttpResponseBadRequest("Les visuels d’assemblage ne sont disponibles que dans ce mode.")
     if project.status in {NarrationProject.Status.QUEUED, NarrationProject.Status.PROCESSING}:
-        return JsonResponse({"ok": False, "error": "Attends la fin du traitement avant de modifier une image."}, status=409)
+        return JsonResponse({"ok": False, "error": "Attends la fin du traitement avant de modifier un visuel."}, status=409)
     try:
         position = int(request.POST.get("position", ""))
     except (TypeError, ValueError):
-        return HttpResponseBadRequest("Emplacement d’image invalide.")
+        return HttpResponseBadRequest("Emplacement visuel invalide.")
     if position < 0 or position >= 30:
-        return HttpResponseBadRequest("Emplacement d’image invalide.")
-    upload = request.FILES.get("image")
-    if not upload:
-        return HttpResponseBadRequest("Sélectionne une image.")
-    if Path(upload.name).suffix.lower() not in {".jpg", ".jpeg", ".png"}:
-        return HttpResponseBadRequest("Formats acceptés : JPG et PNG.")
+        return HttpResponseBadRequest("Emplacement visuel invalide.")
+    if request.FILES.get("image") or request.FILES.get("video") or request.FILES.get("video_clip"):
+        if request.FILES.get("image") and (request.FILES.get("video") or request.FILES.get("video_clip")):
+            return HttpResponseBadRequest("Choisis une image ou une vidéo, pas les deux.")
+        return HttpResponseBadRequest("Utilise le champ visuel unique du formulaire.")
+    uploads = request.FILES.getlist("visual_file")
+    if len(uploads) != 1:
+        return HttpResponseBadRequest("Sélectionne une image ou une vidéo.")
+    upload = uploads[0]
+    visual_type = request.POST.get("visual_type")
+    suffix = Path(upload.name).suffix.lower()
+    if visual_type == "image" and suffix not in {".jpg", ".jpeg", ".png"}:
+        return HttpResponseBadRequest("Formats image acceptés : JPG et PNG.")
+    if visual_type == "video" and suffix not in {".mp4", ".mov"}:
+        return HttpResponseBadRequest("Formats vidéo acceptés : MP4 et MOV.")
+    if visual_type not in {"image", "video"}:
+        return HttpResponseBadRequest("Choisis le type Image ou Vidéo.")
+    if upload.size <= 0:
+        return HttpResponseBadRequest("Le fichier sélectionné est vide.")
+    if visual_type == "video" and upload.size > MAX_VIDEO_CLIP_BYTES:
+        return HttpResponseBadRequest("La vidéo dépasse la limite de 200 Mo.")
+    if visual_type == "image" and upload.size > 25 * 1024 * 1024:
+        return HttpResponseBadRequest("L’image dépasse la limite de 25 Mo.")
 
     created_files = []
     try:
         with tempfile.TemporaryDirectory(prefix=f"petit-studio-assembly-image-{project.pk}-") as folder:
-            staged_scenes, _pixels = _scene_images(upload, Path(folder), max_scenes=1)
-            if len(staged_scenes) != 1:
-                raise ValueError("Sélectionne une seule image JPG ou PNG pour cet emplacement.")
-            _kind, filename, staged_path = staged_scenes[0]
+            staging_dir = Path(folder)
+            if visual_type == "image":
+                staged_scenes, _pixels = _scene_images(upload, staging_dir, max_scenes=1)
+                if len(staged_scenes) != 1:
+                    raise ValueError("Sélectionne une seule image JPG ou PNG pour cet emplacement.")
+                filename, staged_path = staged_scenes[0]
+            else:
+                filename = Path(upload.name).name
+                staged_path = staging_dir / f"source{suffix}"
+                _stream_upload_to_path(upload, staged_path)
+                try:
+                    _probe_clip(staged_path)
+                except RuntimeError as exc:
+                    raise ValueError(f"La vidéo est illisible : {exc}") from exc
+
             segment = NarrationSegment.objects.filter(project=project, position=position).order_by("id").first()
             if segment is None:
                 segment = NarrationSegment(project=project, position=position)
@@ -968,8 +996,12 @@ def save_assembly_image(request, project_id):
                 old_files.append((segment.image.storage, segment.image.name))
             if segment.video_clip and segment.video_clip.name:
                 old_files.append((segment.video_clip.storage, segment.video_clip.name))
-            segment.video_clip = ""
-            _save_staged_file(segment.image, filename, staged_path, created_files)
+            if visual_type == "image":
+                segment.video_clip = ""
+                _save_staged_file(segment.image, filename, staged_path, created_files)
+            else:
+                segment.image = ""
+                _save_staged_file(segment.video_clip, filename, staged_path, created_files)
             with transaction.atomic():
                 if is_new:
                     segment.save()
@@ -977,14 +1009,15 @@ def save_assembly_image(request, project_id):
                     segment.save(update_fields=["image", "video_clip", "updated_at"])
                 _invalidate_video(project)
                 _schedule_storage_cleanup(old_files)
-        messages.success(request, f"L’image de l’emplacement {position + 1} a été enregistrée.")
+        label = "L’image" if visual_type == "image" else "La vidéo"
+        messages.success(request, f"{label} de l’emplacement {position + 1} a été enregistrée.")
     except ValueError as exc:
         _delete_storage_files(created_files)
         messages.error(request, str(exc))
     except Exception:
         _delete_storage_files(created_files)
-        logger.exception("Échec de l’enregistrement d’une image d’assemblage pour le projet %s.", project.pk)
-        messages.error(request, "Impossible d’enregistrer cette image.")
+        logger.exception("Échec de l’enregistrement d’un visuel d’assemblage pour le projet %s.", project.pk)
+        messages.error(request, "Impossible d’enregistrer ce visuel.")
     return redirect("project_detail", project_id=project.pk)
 
 

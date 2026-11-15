@@ -147,25 +147,33 @@
   <div class="editor-layout" style="margin-top:16px">
     <div class="editor-left">
       <section class="premium-card" aria-labelledby="assemblyVisualsTitle">
-        <div class="premium-card-head"><h2 id="assemblyVisualsTitle">IMAGES DE L’ASSEMBLAGE</h2><span>{{ assembly_slot_count }} emplacement{{ assembly_slot_count|pluralize:"s" }}</span></div>
+        <div class="premium-card-head"><h2 id="assemblyVisualsTitle">VISUELS DE L’ASSEMBLAGE</h2><span>{{ assembly_slot_count }} emplacement{{ assembly_slot_count|pluralize:"s" }}</span></div>
         <div class="scene-list">
           {% for slot in assembly_slots %}
           <article class="scene-card">
-            <div class="scene-preview">
-              {% if slot.segment.image %}<img src="{{ slot.segment.image.url }}" alt="Image de la scène visuelle {{ slot.position|add:1 }}">
-              {% else %}<div class="scene-empty">＋<small>Image manquante · scène {{ slot.position|add:1 }}</small></div>{% endif %}
+            <div class="scene-preview" data-visual-preview>
+              {% if slot.segment.image and slot.segment.video_clip %}<div class="scene-empty">⚠<small>Choisis une image ou une vidéo, pas les deux.</small></div>
+              {% elif slot.segment.video_clip %}<video src="{{ slot.segment.video_clip.url }}" controls muted playsinline preload="metadata" aria-label="Aperçu vidéo de la scène visuelle {{ slot.position|add:1 }}"></video>
+              {% elif slot.segment.image %}<img src="{{ slot.segment.image.url }}" alt="Aperçu image de la scène visuelle {{ slot.position|add:1 }}">
+              {% else %}<div class="scene-empty">＋<small>Ajoute une image ou une vidéo · scène {{ slot.position|add:1 }}</small></div>{% endif %}
             </div>
             <div class="scene-meta">
-              <div class="scene-meta-title"><span>{{ slot.position|add:1|stringformat:"02d" }}</span><span>Image de la boundary {{ slot.position }}</span></div>
-              <span class="scene-badge">{% if slot.segment.image %}Image prête{% else %}À ajouter{% endif %}</span>
+              <div class="scene-meta-title"><span>{{ slot.position|add:1|stringformat:"02d" }}</span><span>Visuel de la boundary {{ slot.position }}</span></div>
+              <span class="scene-badge">{% if slot.segment.image and slot.segment.video_clip %}À corriger{% elif slot.segment.video_clip %}Vidéo prête{% elif slot.segment.image %}Image prête{% else %}À ajouter{% endif %}</span>
             </div>
-            <form method="post" action="{% url 'save_assembly_image' project.id %}" enctype="multipart/form-data" class="scene-editor-fields">
+            <form method="post" action="{% url 'save_assembly_visual' project.id %}" enctype="multipart/form-data" class="scene-editor-fields" data-assembly-visual-form>
               {% csrf_token %}
               <input type="hidden" name="position" value="{{ slot.position }}">
-              <label class="setting-label" for="assemblyImage{{ slot.position }}">{% if slot.segment.image %}Remplacer l’image{% else %}Ajouter l’image{% endif %}
-                <input id="assemblyImage{{ slot.position }}" type="file" name="image" accept="image/jpeg,image/png,.jpg,.jpeg,.png" required>
+              <label class="setting-label" for="assemblyVisualType{{ slot.position }}">Type de visuel
+                <select class="editor-select" id="assemblyVisualType{{ slot.position }}" name="visual_type" data-visual-type>
+                  <option value="image" {% if not slot.segment.video_clip %}selected{% endif %}>Image</option>
+                  <option value="video" {% if slot.segment.video_clip %}selected{% endif %}>Vidéo</option>
+                </select>
               </label>
-              <button class="editor-button" type="submit">Enregistrer l’image</button>
+              <label class="setting-label" for="assemblyVisualFile{{ slot.position }}">{% if slot.segment.image or slot.segment.video_clip %}Remplacer le visuel{% else %}Ajouter un visuel{% endif %}
+                <input id="assemblyVisualFile{{ slot.position }}" type="file" name="visual_file" data-visual-file accept="image/jpeg,image/png,.jpg,.jpeg,.png" required>
+              </label>
+              <button class="editor-button" type="submit">Enregistrer le visuel</button>
             </form>
           </article>
           {% endfor %}
@@ -243,7 +251,7 @@
             <button class="editor-button primary" type="submit" {% if project.status == 'queued' or project.status == 'processing' %}disabled{% endif %}>Rendre la vidéo ✦</button>
           </form>
           <div class="job-status {% if project.status == 'error' %}error{% elif project.status == 'ready' %}success{% endif %}" id="jobStatus" aria-live="polite">
-            {% if project.status == 'ready' %}{{ project.status_message|default:"Export prêt." }}{% elif project.status == 'processing' or project.status == 'queued' %}{{ project.status_message }}{% elif project.status == 'error' %}{{ project.error_message }}{% else %}Sélectionne l’audio et les images nécessaires.{% endif %}
+            {% if project.status == 'ready' %}{{ project.status_message|default:"Export prêt." }}{% elif project.status == 'processing' or project.status == 'queued' %}{{ project.status_message }}{% elif project.status == 'error' %}{{ project.error_message }}{% else %}Sélectionne l’audio et ajoute les visuels nécessaires.{% endif %}
           </div>
           <div class="cancel-job-row" id="cancelJobContainer" {% if project.status != 'queued' and project.status != 'processing' %}hidden{% endif %}>
             <form method="post" action="{% url 'cancel_job' project.id %}" id="cancelJobForm">{% csrf_token %}<button class="editor-button danger" type="submit" id="cancelJobButton">Annuler le traitement</button></form>

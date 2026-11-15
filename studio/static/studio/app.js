@@ -77,6 +77,56 @@
     });
   });
 
+  document.querySelectorAll('[data-assembly-visual-form]').forEach(form => {
+    const kind = form.querySelector('[data-visual-type]');
+    const file = form.querySelector('[data-visual-file]');
+    const preview = form.closest('.scene-card')?.querySelector('[data-visual-preview]');
+    const savedPreview = preview?.innerHTML || '';
+    let previewUrl = null;
+    const allowedTypes = {
+      image: 'image/jpeg,image/png,.jpg,.jpeg,.png',
+      video: 'video/mp4,video/quicktime,.mp4,.mov'
+    };
+    const updateVisualInput = clearSelection => {
+      if (clearSelection) file.value = '';
+      file.accept = allowedTypes[kind.value] || allowedTypes.image;
+    };
+    updateVisualInput(false);
+    kind.addEventListener('change', () => {
+      updateVisualInput(true);
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+      previewUrl = null;
+      if (preview) preview.innerHTML = savedPreview;
+    });
+    file.addEventListener('change', () => {
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+      previewUrl = null;
+      const selected = file.files?.[0];
+      if (!preview || !selected) {
+        if (preview) preview.innerHTML = savedPreview;
+        return;
+      }
+      previewUrl = URL.createObjectURL(selected);
+      if (kind.value === 'video') {
+        const video = document.createElement('video');
+        video.src = previewUrl;
+        video.controls = true;
+        video.muted = true;
+        video.playsInline = true;
+        video.preload = 'metadata';
+        preview.replaceChildren(video);
+      } else {
+        const image = document.createElement('img');
+        image.src = previewUrl;
+        image.alt = `Aperçu de ${selected.name}`;
+        preview.replaceChildren(image);
+      }
+    });
+    window.addEventListener('pagehide', () => {
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+    }, {once:true});
+  });
+
   document.querySelectorAll('.segment-form textarea').forEach(textarea => {
     const card = textarea.closest('.segment-card');
     const update = () => {
