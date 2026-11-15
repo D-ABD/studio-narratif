@@ -760,6 +760,41 @@ class ProjectViewTests(MediaTestCase):
         project.refresh_from_db()
         self.assertEqual(project.audio_asset_id, asset.pk)
 
+    def test_assembly_music_preview_is_present_for_the_selected_track(self):
+        track = BackgroundTrack(user=self.user, name="Musique sélectionnée", duration=12.0)
+        track.audio_file.save("selected.mp3", ContentFile(b"music bytes"), save=True)
+        project = NarrationProject.objects.create(
+            user=self.user, title="Aperçu musique", mode=NarrationProject.Mode.ASSEMBLY,
+            background_track=track,
+        )
+
+        response = self.client.get(f"/projects/{project.pk}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'id="assemblyMusicPreview"')
+        self.assertContains(response, 'id="assemblyMusicPreviewMessage"')
+        self.assertContains(response, 'data-music-url="%s"' % track.audio_file.url)
+        self.assertContains(response, "Sélectionne une musique")
+        self.assertContains(response, f'value="{track.pk}" data-music-url="{track.audio_file.url}" selected')
+
+    def test_assembly_music_preview_does_not_expose_another_users_track_url(self):
+        own_track = BackgroundTrack(user=self.user, name="Ma musique", duration=12.0)
+        own_track.audio_file.save("own-music.mp3", ContentFile(b"own music"), save=True)
+        other_user = get_user_model().objects.create_user(username="assembly-music-private", password="SafePass123!x")
+        private_track = BackgroundTrack(user=other_user, name="Musique privée", duration=12.0)
+        private_track.audio_file.save("private-music.mp3", ContentFile(b"private music"), save=True)
+        project = NarrationProject.objects.create(
+            user=self.user, title="Musique isolée", mode=NarrationProject.Mode.ASSEMBLY,
+            background_track=own_track,
+        )
+
+        response = self.client.get(f"/projects/{project.pk}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, own_track.audio_file.url)
+        self.assertNotContains(response, private_track.audio_file.url)
+        self.assertNotContains(response, "Musique privée")
+
     def test_assembly_render_route_hides_cross_user_audio_and_validates_inputs_before_queueing(self):
         project = NarrationProject.objects.create(user=self.user, title="Assemblage", mode=NarrationProject.Mode.ASSEMBLY)
         response = self.client.post(f"/projects/{project.pk}/assembly/render/")

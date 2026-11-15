@@ -217,8 +217,10 @@
             <label class="setting-label" for="projectBackgroundTrack">Piste musicale</label>
             <select class="editor-select" id="projectBackgroundTrack" name="background_track_id">
               <option value="">Aucune musique</option>
-              {% for track in background_tracks %}<option value="{{ track.id }}" {% if project.background_track_id == track.id %}selected{% endif %}>{{ track.name }} · {{ track.duration|floatformat:0 }} s</option>{% endfor %}
+              {% for track in background_tracks %}<option value="{{ track.id }}" data-music-url="{{ track.audio_file.url }}" {% if project.background_track_id == track.id %}selected{% endif %}>{{ track.name }} · {{ track.duration|floatformat:0 }} s</option>{% endfor %}
             </select>
+            <audio id="assemblyMusicPreview" controls preload="none" aria-label="Aperçu de la musique sélectionnée" hidden style="width:100%"></audio>
+            <p id="assemblyMusicPreviewMessage" class="editor-muted" role="status" aria-live="polite">Sélectionne une musique</p>
             <label class="setting-label" for="musicVolume">Volume musique</label>
             <div class="music-volume-row">
               <input id="musicVolume" type="range" name="music_volume" min="0" max="100" step="1" value="{{ project.music_volume }}" oninput="document.getElementById('musicVolumeValue').value = this.value + '%'" {% if not background_tracks %}disabled{% endif %}>

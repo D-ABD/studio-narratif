@@ -63,6 +63,45 @@
     updateAssemblyAudioPreview();
   }
 
+  const assemblyMusicSelect = document.querySelector('#projectBackgroundTrack');
+  const assemblyMusicPreview = document.querySelector('#assemblyMusicPreview');
+  const assemblyMusicPreviewMessage = document.querySelector('#assemblyMusicPreviewMessage');
+  if (assemblyMusicSelect && assemblyMusicPreview && assemblyMusicPreviewMessage) {
+    const clearAssemblyMusicPreview = () => {
+      assemblyMusicPreview.pause();
+      assemblyMusicPreview.removeAttribute('src');
+      assemblyMusicPreview.load();
+      assemblyMusicPreview.hidden = true;
+    };
+    const setAssemblyMusicMessage = message => {
+      assemblyMusicPreviewMessage.textContent = message;
+      assemblyMusicPreviewMessage.hidden = false;
+    };
+    const updateAssemblyMusicPreview = () => {
+      clearAssemblyMusicPreview();
+      const selectedOption = assemblyMusicSelect.selectedOptions[0];
+      const musicUrl = selectedOption?.dataset.musicUrl?.trim();
+      if (!selectedOption?.value) {
+        setAssemblyMusicMessage('Sélectionne une musique');
+        return;
+      }
+      if (!musicUrl) {
+        setAssemblyMusicMessage('Fichier audio introuvable');
+        return;
+      }
+      assemblyMusicPreview.src = musicUrl;
+      assemblyMusicPreview.hidden = false;
+      assemblyMusicPreviewMessage.hidden = true;
+    };
+    assemblyMusicSelect.addEventListener('change', updateAssemblyMusicPreview);
+    assemblyMusicPreview.addEventListener('error', () => {
+      if (!assemblyMusicPreview.getAttribute('src')) return;
+      clearAssemblyMusicPreview();
+      setAssemblyMusicMessage('Fichier audio introuvable');
+    });
+    updateAssemblyMusicPreview();
+  }
+
   const sceneFiles = document.querySelector('#sceneFiles');
   const importPreview = document.querySelector('#importPreview');
   const importPreviewHeading = document.querySelector('#importPreviewHeading');
