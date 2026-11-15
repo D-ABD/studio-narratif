@@ -4,35 +4,50 @@
 {% block content %}
 <style>
   .projects-page { display:grid; gap:11px; max-width:1100px; margin:0 auto; }
-  .projects-page-intro { display:flex; align-items:center; justify-content:space-between; gap:12px; color:#929BAA; font-size:11px; }
+  .projects-page-intro { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px; color:#929BAA; font-size:11px; }
   .projects-page-list { display:grid; gap:9px; }
-  .projects-page-item { display:flex; align-items:center; justify-content:space-between; gap:14px; padding:15px; border:1px solid #293241; border-radius:12px; background:#151A22; }
+  .projects-page-item { display:grid; gap:10px; padding:14px; border:1px solid #293241; border-radius:12px; background:#151A22; }
+  .projects-page-summary { min-height:36px; }
+  .projects-page-summary-title { min-width:0; overflow:hidden; color:#E3E7ED; font-size:13px; font-weight:700; text-overflow:ellipsis; white-space:nowrap; }
+  .projects-page-summary-meta { color:#929BAA; font-size:10px; white-space:nowrap; }
+  .projects-page-panel { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px; padding-top:10px; border-top:1px solid #293241; }
+  .projects-page-panel a { color:#FFC65D; }
   .projects-page-item h2 { margin:0; color:#E3E7ED; font-size:13px; }
   .projects-page-item p { margin:4px 0 0; color:#929BAA; font-size:10px; }
   .projects-page-status { flex:0 0 auto; padding:4px 8px; border:1px solid #394454; border-radius:99px; color:#C8D0DA; font-size:9px; }
-  @media(max-width:560px) { .projects-page-item { align-items:flex-start; flex-direction:column; } }
+  @media(max-width:560px) { .projects-page-panel { align-items:flex-start; flex-direction:column; } }
 </style>
 <section class="projects-page">
-  <div class="projects-page-intro"><span>{{ project_total }} projet{{ project_total|pluralize:"s" }}</span><a class="button button-secondary button-small" href="">↻ Actualiser</a></div>
+  <div class="projects-page-intro">
+    <span>{{ project_total }} projet{{ project_total|pluralize:"s" }}</span>
+    <form class="list-page-size" method="get" action="{% url 'project_list' %}">
+      <label for="projectPageSize">Par page</label>
+      <select id="projectPageSize" name="per_page">
+        <option value="5" {% if project_per_page == 5 %}selected{% endif %}>5</option>
+        <option value="10" {% if project_per_page == 10 %}selected{% endif %}>10</option>
+        <option value="20" {% if project_per_page == 20 %}selected{% endif %}>20</option>
+      </select>
+      <button type="submit">Appliquer</button>
+    </form>
+    <a class="button button-secondary button-small" href="">↻ Actualiser</a>
+  </div>
   <div class="projects-page-list">
     {% for project in project_page %}
-    <article class="projects-page-item">
-      <div>
-        <h2><a href="{% url 'project_detail' project.id %}">{{ project.title }}</a></h2>
+    <article class="projects-page-item" data-list-accordion>
+      <button id="project-summary-{{ project.id }}" class="list-accordion-trigger projects-page-summary" type="button" data-list-accordion-trigger aria-expanded="false" aria-controls="project-details-{{ project.id }}">
+        <span class="projects-page-summary-title">{{ project.title }}</span>
+        <span class="projects-page-status">{{ project.get_status_display }}</span>
+        <span class="projects-page-summary-meta">{{ project.get_mode_display }} · {{ project.updated_at|date:"d/m/Y" }}</span>
+        <span class="list-accordion-chevron" aria-hidden="true">▸</span>
+      </button>
+      <div class="projects-page-panel" id="project-details-{{ project.id }}" role="region" aria-labelledby="project-summary-{{ project.id }}" hidden>
         <p>{{ project.updated_at|date:"d/m/Y à H:i" }} · {{ project.segment_count }} segment{{ project.segment_count|pluralize }}</p>
+        <a href="{% url 'project_detail' project.id %}">Ouvrir l’éditeur →</a>
       </div>
-      <span class="projects-page-status">{{ project.get_status_display }}</span>
     </article>
     {% empty %}
     <div class="card muted">Aucun projet pour le moment.</div>
     {% endfor %}
   </div>
   {% if project_page.has_other_pages %}
-  <nav class="pagination-controls" aria-label="Pagination des projets">
-    {% if project_page.has_previous %}<a href="?page={{ project_page.previous_page_number }}" rel="prev">← Précédent</a>{% endif %}
-    <span>Page {{ project_page.number }} / {{ project_page.paginator.num_pages }}</span>
-    {% if project_page.has_next %}<a href="?page={{ project_page.next_page_number }}" rel="next">Suivant →</a>{% endif %}
-  </nav>
-  {% endif %}
-</section>
-{% endblock %}
+  <n
