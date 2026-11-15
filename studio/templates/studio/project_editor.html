@@ -120,6 +120,10 @@
     </div>
     <div class="editor-toolbar-actions">
       <span class="editor-chip"><i aria-hidden="true"></i> Projet · {{ project.get_status_display }}</span>
+      <form method="post" action="{% url 'duplicate_project' project.id %}">
+        {% csrf_token %}
+        <button class="editor-button" type="submit" {% if project.status == 'queued' or project.status == 'processing' %}disabled title="Attends la fin du traitement avant de dupliquer"{% endif %}>Dupliquer ce projet</button>
+      </form>
       <form method="post" action="{% url 'delete_project' project.id %}" onsubmit="return confirm('Supprimer définitivement le projet « {{ project.title|escapejs }} » ?')">
         {% csrf_token %}
         <button class="editor-button danger" type="submit" {% if project.status == 'processing' %}disabled title="Annule d’abord le traitement en cours"{% endif %}>Supprimer le projet</button>

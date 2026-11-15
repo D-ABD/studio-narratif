@@ -1,6 +1,7 @@
 import json
 import logging
 import subprocess
+from copy import deepcopy
 from functools import wraps
 from pathlib import Path
 import tempfile
@@ -13,6 +14,7 @@ from django.contrib.auth.forms import UserCreationForm
 from django.core.files import File
 from django.core.files.base import ContentFile
 from django.db import transaction
+from django.db.models import Q
 from django.db.models.deletion import ProtectedError
 from django.http import Http404, HttpResponse, HttpResponseBadRequest, JsonResponse
 from django.urls import reverse
@@ -146,19 +148,42 @@ def _settings_for_legacy_post(request, segment):
     )
 
 
+def _safe_delete_media_file(file_field):
+    """Delete a stored file only after commit and only when no scene shares it.
+
+    ``file_field`` may be a Django FieldFile or a captured ``(storage, name)``
+    pair. Physical deletion is deliberately centralized here so duplicated
+    projects can safely share image/video paths.
+    """
+    if isinstance(file_field, tuple):
+        storage, name = file_field
+    else:
+        storage, name = file_field.storage, file_field.name
+    if not name:
+        return
+
+    if NarrationSegment.objects.filter(Q(image=name) | Q(video_clip=name)).exists():
+        logger.debug("Conservation du média partagé %s : il est encore référencé.", name)
+        return
+
+    try:
+        storage.delete(name)
+    except FileNotFoundError:
+        logger.warning("Le fichier média %s était déjà absent lors du nettoyage.", name)
+    except Exception:
+        logger.exception("Impossible de supprimer le fichier média %s.", name)
+
+
 def _delete_storage_files(files):
-    for storage, name in files:
-        if not name:
-            continue
-        try:
-            storage.delete(name)
-        except Exception:
-            logger.exception("Impossible de supprimer le fichier média %s.", name)
+    for file_field in files:
+        _safe_delete_media_file(file_field)
 
 
 def _schedule_storage_cleanup(files):
     files_to_delete = tuple(files)
     if files_to_delete:
+        # Storage deletion runs only after the DB commit, so a rollback cannot
+        # restore a reference to a file that has already been removed.
         transaction.on_commit(lambda: _delete_storage_files(files_to_delete))
 
 
@@ -1380,21 +1405,18 @@ def delete_segment(request, project_id, segment_id):
     segment = get_object_or_404(NarrationSegment, pk=segment_id, project=project)
     if project.status in {NarrationProject.Status.QUEUED, NarrationProject.Status.PROCESSING}:
         return JsonResponse({"ok": False, "error": "Attends la fin du traitement avant de modifier le projet."}, status=409)
-    audio = segment.audio
-    image = segment.image
-    video_clip = segment.video_clip
-    segment.delete()
-    if audio:
-        audio.delete(save=False)
-    if image:
-        image.delete(save=False)
-    if video_clip:
-        video_clip.delete(save=False)
     with transaction.atomic():
+        files = [
+            (field.storage, field.name)
+            for field in (segment.audio, segment.image, segment.video_clip)
+            if field and field.name
+        ]
+        segment.delete()
         for index, item in enumerate(project.segments.order_by("position", "id")):
             if item.position != index:
                 NarrationSegment.objects.filter(pk=item.pk).update(position=index)
-    _invalidate_export(project)
+        _invalidate_export(project)
+        _schedule_storage_cleanup(files)
     messages.success(request, "Le segment a été supprimé.")
     return redirect("project_detail", project_id=project.pk)
 
@@ -1439,6 +1461,75 @@ def delete_project(request, project_id):
         _schedule_storage_cleanup(storage_files)
     messages.success(request, "Le projet a été supprimé.")
     return redirect("home")
+
+
+def _duplicate_project_title(user, title):
+    copy_number = 1
+    while True:
+        suffix = " (copie)" if copy_number == 1 else f" (copie {copy_number})"
+        candidate = f"{title[:120 - len(suffix)].rstrip()}{suffix}"
+        if not NarrationProject.objects.filter(user=user, title=candidate).exists():
+            return candidate
+        copy_number += 1
+
+
+@login_required
+@require_POST
+def duplicate_project(request, project_id):
+    with transaction.atomic():
+        source = get_object_or_404(
+            NarrationProject.objects.select_for_update(), pk=project_id, user=request.user,
+        )
+        if source.status in {NarrationProject.Status.QUEUED, NarrationProject.Status.PROCESSING}:
+            messages.error(request, "Attends la fin du traitement avant de dupliquer ce projet.")
+            return redirect("project_detail", project_id=source.pk)
+
+        duplicate = NarrationProject.objects.create(
+            user=request.user,
+            title=_duplicate_project_title(request.user, source.title),
+            mode=source.mode,
+            voice=source.voice,
+            audio_asset=source.audio_asset,
+            background_track=source.background_track,
+            music_volume=source.music_volume,
+            video_format=source.video_format,
+            subtitles_enabled=source.subtitles_enabled,
+            status=NarrationProject.Status.DRAFT,
+            queued_at=None,
+            cancel_requested=False,
+            job_type=NarrationProject.JobType.AUDIO,
+            status_message="",
+            error_message="",
+            progress_percent=0,
+            current_segment=0,
+            total_segments=0,
+            started_at=None,
+            finished_at=None,
+            full_audio="",
+            subtitles="",
+            video_file="",
+            duration_seconds=0,
+        )
+
+        for segment in source.segments.order_by("position", "id"):
+            NarrationSegment.objects.create(
+                project=duplicate,
+                position=segment.position,
+                image=segment.image.name if segment.image else "",
+                video_clip=segment.video_clip.name if segment.video_clip else "",
+                motion=segment.motion,
+                camera_profile=segment.camera_profile,
+                light_breathing=segment.light_breathing,
+                animation_settings=deepcopy(segment.animation_settings),
+                text=segment.text,
+                audio="",
+                subtitle_data=[],
+                duration_seconds=0,
+                cache_key="",
+            )
+
+    messages.success(request, "Projet dupliqué. Tu peux maintenant modifier les visuels.")
+    return redirect("project_detail", project_id=duplicate.pk)
 
 
 @login_required

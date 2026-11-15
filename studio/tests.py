@@ -1,4 +1,5 @@
 import importlib.util
+import json
 from io import BytesIO, StringIO
 import sys
 import math
@@ -2100,6 +2101,231 @@ class ProjectLifecycleAndNamingTests(MediaTestCase):
         response = self.client.post(f"/projects/{project.pk}/delete/")
         self.assertEqual(response.status_code, 302)
         self.assertFalse(NarrationProject.objects.filter(pk=project.pk).exists())
+
+class ProjectDuplicationTests(MediaTestCase):
+    def make_visual(self, segment, filename="visual.png"):
+        buffer = BytesIO()
+        Image.new("RGB", (32, 32), (80, 120, 180)).save(buffer, format="PNG")
+        segment.image.save(filename, ContentFile(buffer.getvalue()), save=True)
+        return segment.image.name
+
+    def make_source_project(self, *, mode=NarrationProject.Mode.ASSEMBLY, title="Projet test"):
+        voice = self.make_voice()
+        asset = AudioAsset.objects.create(
+            user=self.user, name="Narration réutilisable", duration=12.0,
+            source=AudioAsset.Source.XTTS,
+            timings={"version": 1, "words": [], "segments": [], "scene_boundaries": []},
+        )
+        asset.audio_file.save("narration.wav", ContentFile(b"narration"), save=True)
+        track = BackgroundTrack.objects.create(user=self.user, name="Ambiance", duration=20.0)
+        track.audio_file.save("music.mp3", ContentFile(b"music"), save=True)
+        project = NarrationProject.objects.create(
+            user=self.user, title=title, mode=mode, voice=voice, audio_asset=asset,
+            background_track=track, music_volume=37,
+            video_format=NarrationProject.VideoFormat.HORIZONTAL, subtitles_enabled=False,
+            status=NarrationProject.Status.READY,
+            job_type=NarrationProject.JobType.VIDEO,
+            status_message="Ancien état", error_message="Ancienne erreur",
+            progress_percent=80, current_segment=2, total_segments=3,
+            queued_at=timezone.now(), started_at=timezone.now(), finished_at=timezone.now(),
+            duration_seconds=18.5,
+        )
+        project.full_audio.save("full.wav", ContentFile(b"export audio"), save=True)
+        project.subtitles.save("subtitles.ass", ContentFile(b"export subtitles"), save=True)
+        project.video_file.save("render.mp4", ContentFile(b"export video"), save=True)
+        segment = NarrationSegment.objects.create(
+            project=project, position=0, text="Même narration.",
+            motion=NarrationSegment.Motion.PAN_H,
+            camera_profile=NarrationSegment.CameraProfile.ORGANIC,
+            light_breathing=True,
+            animation_settings={"version": 1, "effects": {"example": True}},
+            subtitle_data=[{"text": "ancien"}], duration_seconds=18.5, cache_key="old-cache-key",
+        )
+        image_name = self.make_visual(segment)
+        segment.audio.save("segment.wav", ContentFile(b"generated audio"), save=True)
+        return project, segment, image_name
+
+    def duplicate(self, project):
+        response = self.client.post(f"/projects/{project.pk}/duplicate/")
+        self.assertEqual(response.status_code, 302)
+        return NarrationProject.objects.exclude(pk=project.pk).latest("pk")
+
+    def test_assembly_duplicate_copies_settings_and_media_references_but_resets_runtime_state(self):
+        source, source_segment, image_name = self.make_source_project()
+
+        response = self.client.post(f"/projects/{source.pk}/duplicate/")
+
+        duplicate = NarrationProject.objects.exclude(pk=source.pk).get()
+        self.assertRedirects(response, f"/projects/{duplicate.pk}/")
+        self.assertEqual(duplicate.title, "Projet test (copie)")
+        self.assertEqual(duplicate.mode, source.mode)
+        self.assertEqual(duplicate.voice_id, source.voice_id)
+        self.assertEqual(duplicate.audio_asset_id, source.audio_asset_id)
+        self.assertEqual(duplicate.background_track_id, source.background_track_id)
+        self.assertEqual(duplicate.music_volume, 37)
+        self.assertEqual(duplicate.video_format, source.video_format)
+        self.assertFalse(duplicate.subtitles_enabled)
+        self.assertEqual(duplicate.status, NarrationProject.Status.DRAFT)
+        self.assertEqual(duplicate.job_type, NarrationProject.JobType.AUDIO)
+        self.assertEqual(duplicate.progress_percent, 0)
+        self.assertEqual(duplicate.current_segment, 0)
+        self.assertEqual(duplicate.total_segments, 0)
+        self.assertEqual(duplicate.status_message, "")
+        self.assertEqual(duplicate.error_message, "")
+        self.assertFalse(duplicate.queued_at)
+        self.assertFalse(duplicate.started_at)
+        self.assertFalse(duplicate.finished_at)
+        self.assertFalse(duplicate.cancel_requested)
+        self.assertFalse(duplicate.full_audio)
+        self.assertFalse(duplicate.subtitles)
+        self.assertFalse(duplicate.video_file)
+        self.assertEqual(duplicate.duration_seconds, 0)
+
+        copied_segment = duplicate.segments.get()
+        self.assertNotEqual(copied_segment.pk, source_segment.pk)
+        self.assertEqual(copied_segment.position, source_segment.position)
+        self.assertEqual(copied_segment.text, source_segment.text)
+        self.assertEqual(copied_segment.image.name, image_name)
+        self.assertEqual(copied_segment.video_clip.name, source_segment.video_clip.name)
+        self.assertEqual(copied_segment.motion, source_segment.motion)
+        self.assertEqual(copied_segment.camera_profile, source_segment.camera_profile)
+        self.assertEqual(copied_segment.light_breathing, source_segment.light_breathing)
+        self.assertEqual(copied_segment.animation_settings, source_segment.animation_settings)
+        self.assertFalse(copied_segment.audio)
+        self.assertEqual(copied_segment.subtitle_data, [])
+        self.assertEqual(copied_segment.cache_key, "")
+        self.assertEqual(copied_segment.duration_seconds, 0)
+
+        detail = self.client.get(f"/projects/{duplicate.pk}/")
+        self.assertEqual(detail.context["projects"][0].pk, duplicate.pk)
+        self.assertContains(detail, "Projet dupliqué. Tu peux maintenant modifier les visuels.")
+
+    def test_scene_duplicate_reuses_the_persistent_xtts_cache(self):
+        source, source_segment, _image_name = self.make_source_project(mode=NarrationProject.Mode.SCENES)
+        source_segment.text = "Texte identique pour le cache partagé."
+        source_segment.save(update_fields=["text", "updated_at"])
+        duplicate = self.duplicate(source)
+        copied_segment = duplicate.segments.get()
+        expected_key = cache_key_for(source_segment.text, source.voice)
+        cache_audio, cache_metadata = services._persistent_cache_paths(expected_key)
+        cache_audio.write_bytes(b"cached wav bytes" * 200)
+        cache_metadata.write_text(
+            json.dumps({"captions": [{"text": source_segment.text, "start": 0.0, "end": 1.0}], "duration": 1.0}),
+            encoding="utf-8",
+        )
+
+        with patch("studio.services._synthesize_segment") as synthesize, patch("studio.services.align_audio") as align:
+            _captions, _duration, cached = services._prepare_segment(copied_segment, source.voice, expected_key)
+
+        self.assertTrue(cached)
+        synthesize.assert_not_called()
+        align.assert_not_called()
+        copied_segment.refresh_from_db()
+        self.assertEqual(copied_segment.cache_key, expected_key)
+        self.assertTrue(copied_segment.audio)
+
+    def test_user_cannot_duplicate_another_users_project(self):
+        other_user = get_user_model().objects.create_user(username="private-project-owner", password="SafePass123!x")
+        project = NarrationProject.objects.create(user=other_user, title="Projet privé")
+
+        response = self.client.post(f"/projects/{project.pk}/duplicate/")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(NarrationProject.objects.filter(user=self.user).count(), 0)
+        self.assertTrue(NarrationProject.objects.filter(pk=project.pk).exists())
+
+    def test_duplicate_creation_rolls_back_project_and_partial_segments_on_error(self):
+        source, _segment, _image_name = self.make_source_project()
+        NarrationSegment.objects.create(project=source, position=1, text="Deuxième segment")
+        manager = NarrationSegment.objects
+        original_create = manager.create
+        call_count = 0
+
+        def fail_on_second_segment(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 2:
+                raise RuntimeError("simulated segment failure")
+            return original_create(*args, **kwargs)
+
+        old_raise_request_exception = self.client.raise_request_exception
+        self.client.raise_request_exception = False
+        try:
+            with patch.object(manager, "create", side_effect=fail_on_second_segment):
+                response = self.client.post(f"/projects/{source.pk}/duplicate/")
+        finally:
+            self.client.raise_request_exception = old_raise_request_exception
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(NarrationProject.objects.count(), 1)
+        self.assertEqual(NarrationSegment.objects.filter(project=source).count(), 2)
+
+    def test_duplicate_name_uses_incrementing_copy_suffix(self):
+        source, _segment, _image_name = self.make_source_project(title="Projet 26")
+        NarrationProject.objects.create(user=self.user, title="Projet 26 (copie)")
+
+        duplicate = self.duplicate(source)
+
+        self.assertEqual(duplicate.title, "Projet 26 (copie 2)")
+
+    def test_video_file_is_referenced_by_the_copy_without_a_second_physical_copy(self):
+        source = NarrationProject.objects.create(user=self.user, title="Projet vidéo")
+        segment = NarrationSegment.objects.create(project=source, position=0)
+        segment.video_clip.save("clip.mp4", ContentFile(b"video bytes"), save=True)
+        video_name = segment.video_clip.name
+
+        duplicate = self.duplicate(source)
+
+        copied_segment = duplicate.segments.get()
+        self.assertNotEqual(copied_segment.pk, segment.pk)
+        self.assertEqual(copied_segment.video_clip.name, video_name)
+        self.assertTrue(copied_segment.video_clip.storage.exists(video_name))
+
+    def test_replacing_copy_visual_does_not_change_or_remove_original_file(self):
+        source, source_segment, original_image_name = self.make_source_project()
+        duplicate = self.duplicate(source)
+        copied_segment = duplicate.segments.get()
+        uploaded = ProjectAssemblyRenderTests.png_bytes((210, 40, 70))
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(f"/projects/{duplicate.pk}/assembly/visual/", {
+                "position": "0", "visual_type": "image",
+                "visual_file": SimpleUploadedFile("replacement.png", uploaded, content_type="image/png"),
+            })
+
+        self.assertEqual(response.status_code, 302)
+        source_segment.refresh_from_db()
+        copied_segment.refresh_from_db()
+        self.assertEqual(source_segment.image.name, original_image_name)
+        self.assertTrue(source_segment.image.storage.exists(original_image_name))
+        self.assertNotEqual(copied_segment.image.name, original_image_name)
+        self.assertTrue(copied_segment.image.storage.exists(copied_segment.image.name))
+
+    def test_deleting_duplicate_preserves_media_still_used_by_original(self):
+        source, source_segment, image_name = self.make_source_project()
+        duplicate = self.duplicate(source)
+        copied_segment = duplicate.segments.get()
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(f"/projects/{duplicate.pk}/delete/")
+
+        self.assertEqual(response.status_code, 302)
+        self.assertFalse(NarrationProject.objects.filter(pk=duplicate.pk).exists())
+        source_segment.refresh_from_db()
+        self.assertEqual(source_segment.image.name, image_name)
+        self.assertTrue(source_segment.image.storage.exists(image_name))
+        self.assertFalse(NarrationSegment.objects.filter(pk=copied_segment.pk).exists())
+
+    def test_queued_or_processing_source_cannot_be_duplicated(self):
+        for status in (NarrationProject.Status.QUEUED, NarrationProject.Status.PROCESSING):
+            with self.subTest(status=status):
+                project = NarrationProject.objects.create(user=self.user, title=f"{status} source", status=status)
+                project_count = NarrationProject.objects.filter(user=self.user).count()
+                response = self.client.post(f"/projects/{project.pk}/duplicate/", follow=True)
+                self.assertEqual(response.status_code, 200)
+                self.assertContains(response, "Attends la fin du traitement avant de dupliquer ce projet.")
+                self.assertEqual(NarrationProject.objects.filter(user=self.user).count(), project_count)
+
 
 class QueueSupervisionTests(MediaTestCase):
     def test_queue_page_and_json_api_sort_waiting_projects_and_show_processing(self):
