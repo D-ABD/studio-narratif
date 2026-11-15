@@ -15,10 +15,10 @@ from collections import OrderedDict
 from django.conf import settings
 from django.core.files import File
 from django.core.files.base import ContentFile
-from django.db import close_old_connections
+from django.db import close_old_connections, transaction
 from django.utils import timezone
 
-from .models import NarrationProject, NarrationSegment, Voice
+from .models import AudioAsset, NarrationProject, NarrationSegment, StudioBatch, StudioBatchItem, Voice
 from .job_control import JobCancelled, check_job_cancellation, mark_job_cancelled
 
 MODEL_ID = "xtts_v2"
@@ -404,6 +404,198 @@ def srt_text(segments):
             sequence += 1
         offset += float(segment.duration_seconds)
     return "\n".join(blocks)
+
+
+def _studio_timings(captions, duration):
+    word_timings = []
+    segment_timings = []
+    for caption in captions:
+        start = float(caption["start"])
+        end = float(caption["end"])
+        text = str(caption.get("text") or "").strip()
+        if text and end > start:
+            segment_timings.append({"text": text, "start": start, "end": end})
+        for word in caption.get("words", []):
+            word_text = str(word.get("word") or "").strip()
+            word_start, word_end = word.get("start"), word.get("end")
+            if word_text and word_start is not None and word_end is not None:
+                word_timings.append({
+                    "word": word_text,
+                    "start": float(word_start),
+                    "end": float(word_end),
+                })
+    if not segment_timings or not word_timings:
+        raise RuntimeError("WhisperX n’a pas renvoyé de timings mot-à-mot exploitables.")
+    return {
+        "version": 1,
+        "words": word_timings,
+        "segments": segment_timings,
+        "scene_boundaries": [{"scene_index": 0, "start": 0.0, "end": float(duration)}],
+    }
+
+
+def _read_studio_audio_cache(cache_audio, cache_metadata):
+    if not cache_audio.is_file() or cache_audio.stat().st_size <= 1000 or not cache_metadata.is_file():
+        return None
+    try:
+        metadata = json.loads(cache_metadata.read_text(encoding="utf-8"))
+        captions = metadata["captions"]
+        duration = float(metadata["duration"])
+        if not isinstance(captions, list) or not captions or duration <= 0:
+            return None
+        _studio_timings(captions, duration)
+        return captions, duration
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def _save_studio_asset(batch, item, voice, audio_path, duration, timings):
+    asset = AudioAsset(
+        user=batch.user,
+        name=item.asset_name,
+        duration=duration,
+        source=AudioAsset.Source.XTTS,
+        text=item.text,
+        voice=voice,
+    )
+    stored_file = None
+    try:
+        with transaction.atomic():
+            with Path(audio_path).open("rb") as stream:
+                asset.audio_file.save(f"studio-{item.pk}.wav", File(stream), save=False)
+            if asset.audio_file.name:
+                stored_file = (asset.audio_file.storage, asset.audio_file.name)
+            asset.timings = timings
+            asset.save()
+            item.audio_asset = asset
+            item.status = StudioBatchItem.Status.COMPLETED
+            item.error_message = ""
+            item.save(update_fields=["audio_asset", "status", "error_message", "updated_at"])
+            processed = StudioBatchItem.objects.filter(batch=batch).exclude(
+                status__in=[StudioBatchItem.Status.PENDING, StudioBatchItem.Status.PROCESSING],
+            ).count()
+            batch.completed_items = StudioBatchItem.objects.filter(
+                batch=batch, status=StudioBatchItem.Status.COMPLETED,
+            ).count()
+            batch.current_item = item.position + 1
+            batch.progress_percent = round(processed / max(1, batch.total_items) * 100)
+            batch.status_message = f"Narration {item.position + 1}/{batch.total_items} prête · {item.asset_name}"
+            batch.save(update_fields=[
+                "completed_items", "current_item", "progress_percent", "status_message", "updated_at",
+            ])
+    except Exception:
+        if stored_file:
+            storage, name = stored_file
+            try:
+                storage.delete(name)
+            except Exception:
+                logger.exception("Impossible de nettoyer le fichier audio orphelin %s.", name)
+        raise
+    return asset
+
+
+def generate_studio_batch(batch_id):
+    """Generate one standalone audio asset at a time, sharing the project XTTS cache."""
+    close_old_connections()
+    try:
+        with _PIPELINE_LOCK:
+            batch = StudioBatch.objects.select_related("user", "voice").get(pk=batch_id)
+            if batch.status != StudioBatch.Status.PROCESSING:
+                raise RuntimeError("Le lot n’est pas en cours de traitement.")
+            voice = batch.voice
+            if not voice or voice.user_id != batch.user_id or not voice.consent_confirmed:
+                raise RuntimeError("La voix du lot n’est plus disponible ou son autorisation n’est pas confirmée.")
+            sample_digest = _voice_sample_digest(voice)
+            items = list(batch.items.filter(status=StudioBatchItem.Status.PENDING).order_by("position", "id"))
+            for item in items:
+                item.status = StudioBatchItem.Status.PROCESSING
+                item.error_message = ""
+                item.save(update_fields=["status", "error_message", "updated_at"])
+                batch.current_item = item.position + 1
+                batch.status_message = f"Synthèse XTTS · narration {item.position + 1}/{batch.total_items}"
+                batch.save(update_fields=["current_item", "status_message", "updated_at"])
+                expected_key = cache_key_for(item.text, voice, sample_digest=sample_digest)
+                cache_audio, cache_metadata = _persistent_cache_paths(expected_key)
+                cached = _read_studio_audio_cache(cache_audio, cache_metadata)
+                xtts_seconds = 0.0
+                whisperx_seconds = 0.0
+                try:
+                    if cached:
+                        captions, duration = cached
+                        source_audio = cache_audio
+                        cache_hit = True
+                    else:
+                        cache_hit = False
+                        with tempfile.TemporaryDirectory(prefix=f"petit-studio-batch-{batch.pk}-") as folder:
+                            source_audio = Path(folder) / "narration.wav"
+                            started = time.perf_counter()
+                            _synthesize_segment(item.text, voice, source_audio)
+                            xtts_seconds = time.perf_counter() - started
+                            batch.status_message = f"Alignement WhisperX · narration {item.position + 1}/{batch.total_items}"
+                            batch.save(update_fields=["status_message", "updated_at"])
+                            started = time.perf_counter()
+                            captions = align_audio(source_audio, item.text)
+                            whisperx_seconds = time.perf_counter() - started
+                            duration = wav_duration(source_audio)
+                            cache_audio, cache_metadata = _persistent_cache_paths(expected_key)
+                            temporary_audio = cache_audio.with_suffix(".wav.tmp")
+                            temporary_metadata = cache_metadata.with_suffix(".json.tmp")
+                            try:
+                                shutil.copy2(source_audio, temporary_audio)
+                                temporary_metadata.write_text(
+                                    json.dumps({"captions": captions, "duration": duration}, ensure_ascii=False),
+                                    encoding="utf-8",
+                                )
+                                temporary_audio.replace(cache_audio)
+                                temporary_metadata.replace(cache_metadata)
+                            finally:
+                                temporary_audio.unlink(missing_ok=True)
+                                temporary_metadata.unlink(missing_ok=True)
+                            timings = _studio_timings(captions, duration)
+                            _save_studio_asset(batch, item, voice, source_audio, duration, timings)
+                    if cache_hit:
+                        timings = _studio_timings(captions, duration)
+                        _save_studio_asset(batch, item, voice, source_audio, duration, timings)
+                    print(
+                        f"[Studio batch] Lot {batch.pk} · narration {item.position + 1}/{batch.total_items} · "
+                        f"XTTS {xtts_seconds:.2f}s · WhisperX {whisperx_seconds:.2f}s · "
+                        f"cache={'oui' if cache_hit else 'non'}",
+                        flush=True,
+                    )
+                except Exception as exc:
+                    logger.exception("Échec de la narration %s du lot Studio %s.", item.pk, batch.pk)
+                    StudioBatchItem.objects.filter(pk=item.pk).update(
+                        status=StudioBatchItem.Status.FAILED,
+                        error_message=str(exc)[:2000],
+                        updated_at=timezone.now(),
+                    )
+                    batch.refresh_from_db()
+                    processed = StudioBatchItem.objects.filter(batch=batch).exclude(
+                        status__in=[StudioBatchItem.Status.PENDING, StudioBatchItem.Status.PROCESSING],
+                    ).count()
+                    batch.progress_percent = round(processed / max(1, batch.total_items) * 100)
+                    batch.status_message = f"Échec de la narration {item.position + 1}/{batch.total_items} · poursuite du lot"
+                    batch.save(update_fields=["progress_percent", "status_message", "updated_at"])
+
+            batch.refresh_from_db()
+            failed = batch.items.filter(status=StudioBatchItem.Status.FAILED).count()
+            batch.completed_items = batch.items.filter(status=StudioBatchItem.Status.COMPLETED).count()
+            if failed and batch.completed_items:
+                batch.status = StudioBatch.Status.PARTIAL
+                batch.status_message = f"Lot terminé · {batch.completed_items} réussite(s), {failed} échec(s)."
+            elif failed:
+                batch.status = StudioBatch.Status.FAILED
+                batch.status_message = f"Aucune narration n’a abouti · {failed} échec(s)."
+            else:
+                batch.status = StudioBatch.Status.COMPLETED
+                batch.status_message = "Toutes les narrations sont prêtes dans la bibliothèque audio."
+            batch.progress_percent = 100
+            batch.finished_at = timezone.now()
+            batch.save(update_fields=[
+                "status", "completed_items", "progress_percent", "status_message", "finished_at", "updated_at",
+            ])
+    finally:
+        close_old_connections()
 
 
 def _assemble_wav(segment_paths, output_path):

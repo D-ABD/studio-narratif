@@ -20,6 +20,8 @@
   .studio-batch-card { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:10px; align-items:center; padding:12px; border:1px solid #293241; border-radius:11px; background:#11161F; }
   .studio-batch-card strong { color:#E3E7ED; font-size:12px; }
   .studio-batch-card p { margin:4px 0 0; color:#8E99A9; font-size:10px; }
+  .studio-batch-items { display:grid; gap:3px; margin-top:8px; }
+  .studio-batch-items p { margin:0; }
   .studio-status { padding:4px 8px; border:1px solid #5A4016; border-radius:99px; color:#FFC65D; background:#241D12; font-size:9px; font-weight:700; white-space:nowrap; }
   .studio-empty { padding:18px 12px; border:1px dashed #344050; border-radius:11px; color:#929BAA; background:#11161F; font-size:12px; }
   @media(max-width:680px) { .studio-top-fields { grid-template-columns:1fr; } .studio-text-row { grid-template-columns:1fr; } .studio-text-row > button { justify-self:start; } }
@@ -68,9 +70,19 @@
     <div class="section-title"><div><span class="step-number">▤</span><h2>Mes lots</h2></div></div>
     <div class="studio-batch-list">
       {% for batch in studio_batches %}
-      <article class="studio-batch-card">
-        <div><strong>{% if batch.name_prefix %}{{ batch.name_prefix }}{% else %}Lot #{{ batch.id }}{% endif %}</strong><p>{{ batch.total_items }} narration{{ batch.total_items|pluralize:"s" }} · {{ batch.created_at|date:"d/m/Y H:i" }} · {{ batch.voice.name|default:"Voix supprimée" }}</p></div>
-        <span class="studio-status">{{ batch.get_status_display }}</span>
+      <article class="studio-batch-card" data-studio-batch-card data-status-url="{% url 'studio_batch_status' batch.id %}" data-status="{{ batch.status }}">
+        <div>
+          <strong>{% if batch.name_prefix %}{{ batch.name_prefix }}{% else %}Lot #{{ batch.id }}{% endif %}</strong>
+          <p>{{ batch.total_items }} narration{{ batch.total_items|pluralize:"s" }} · {{ batch.created_at|date:"d/m/Y H:i" }} · {{ batch.voice.name|default:"Voix supprimée" }}</p>
+          <progress value="{{ batch.progress_percent }}" max="100" data-batch-progress aria-label="Progression du lot"></progress>
+          <p data-batch-message>{{ batch.status_message|default:batch.get_status_display }}</p>
+          <div class="studio-batch-items" data-batch-items>
+            {% for item in batch.items.all %}
+            <p data-batch-item data-position="{{ forloop.counter }}"><span>{{ forloop.counter }}. {{ item.asset_name }}</span> · <span data-item-status>{{ item.get_status_display }}</span>{% if item.error_message %} · {{ item.error_message }}{% endif %}{% if item.audio_asset %} · <a class="text-link" data-item-audio-link href="{{ item.audio_asset.audio_file.url }}" download>WAV ↓</a>{% endif %}</p>
+            {% endfor %}
+          </div>
+        </div>
+        <span class="studio-status" data-batch-status>{{ batch.get_status_display }}</span>
       </article>
       {% empty %}<p class="studio-empty">Aucun lot pour le moment.</p>{% endfor %}
     </div>
@@ -117,7 +129,7 @@
     textarea.maxLength = maxChars;
     textarea.required = true;
     textarea.placeholder = 'Saisis le texte à raconter…';
-    label.append(textarea);
+    label.append(document.createTextNode(''), textarea);
     list.append(row);
     renumber();
     textarea.focus();
@@ -127,6 +139,55 @@
     if (remove) { remove.closest('[data-studio-text-row]').remove(); renumber(); }
   });
   renumber();
+})();
+</script>
+<script>
+(() => {
+  const cards = [...document.querySelectorAll('[data-studio-batch-card]')];
+  const terminal = new Set(['completed', 'partial', 'failed']);
+  const refresh = async card => {
+    if (terminal.has(card.dataset.status)) return;
+    try {
+      const response = await fetch(card.dataset.statusUrl, {cache: 'no-store', credentials: 'same-origin'});
+      if (response.status === 401) { window.location.assign('/login/'); return; }
+      if (!response.ok) return;
+      const batch = await response.json();
+      card.dataset.status = batch.status;
+      const progress = card.querySelector('[data-batch-progress]');
+      if (progress) progress.value = batch.progress_percent;
+      const message = card.querySelector('[data-batch-message]');
+      if (message) message.textContent = batch.status_message;
+      const badge = card.querySelector('[data-batch-status]');
+      if (badge) badge.textContent = batch.status_label;
+      batch.items.forEach(item => {
+        const row = card.querySelector(`[data-batch-item][data-position="${item.position}"]`);
+        if (!row) return;
+        const status = row.querySelector('[data-item-status]');
+        if (status) status.textContent = item.status_label;
+        let link = row.querySelector('[data-item-audio-link]');
+        if (item.audio_url && !link) {
+          link = document.createElement('a');
+          link.className = 'text-link';
+          link.dataset.itemAudioLink = '';
+          link.download = '';
+          link.textContent = ' WAV ↓';
+          row.append(link);
+        }
+        if (link && item.audio_url) link.href = item.audio_url;
+        if (item.error && !row.dataset.errorShown) {
+          const error = document.createElement('span');
+          error.textContent = ` · ${item.error}`;
+          row.append(error);
+          row.dataset.errorShown = 'true';
+        }
+      });
+    } catch (error) {
+      console.error('Impossible de rafraîchir le lot Studio.', error);
+    }
+  };
+  const poll = () => cards.filter(card => !terminal.has(card.dataset.status)).forEach(refresh);
+  poll();
+  window.setInterval(poll, 2500);
 })();
 </script>
 {% endblock %}

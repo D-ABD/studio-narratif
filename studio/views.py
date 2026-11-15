@@ -365,7 +365,9 @@ def musics(request):
 def _studio_page_context(request, *, texts=None, selected_voice_id="", name_prefix=""):
     return {
         "voices": Voice.objects.filter(user=request.user, consent_confirmed=True),
-        "studio_batches": StudioBatch.objects.filter(user=request.user).prefetch_related("items")[:10],
+        "studio_batches": StudioBatch.objects.filter(user=request.user).select_related("voice").prefetch_related(
+            "items__audio_asset",
+        )[:10],
         "projects": NarrationProject.objects.filter(user=request.user)[:30],
         "texts": texts or [""],
         "selected_voice_id": str(selected_voice_id),
@@ -422,9 +424,10 @@ def create_studio_batch(request):
             user=request.user,
             voice=voice,
             name_prefix=name_prefix,
-            status=StudioBatch.Status.DRAFT,
+            status=StudioBatch.Status.PENDING,
             total_items=len(texts),
-            status_message="Lot validé · génération disponible après branchement du worker.",
+            queued_at=timezone.now(),
+            status_message="Lot ajouté à la file de génération.",
         )
         StudioBatchItem.objects.bulk_create([
             StudioBatchItem(
@@ -435,8 +438,35 @@ def create_studio_batch(request):
             )
             for index, text in enumerate(texts)
         ])
-    messages.success(request, "Le lot est validé et enregistré en brouillon. La génération sera activée au branchement du worker.")
-    return redirect("studio_home")
+    messages.success(request, "Le lot a été ajouté à la file de génération.")
+    return redirect(f"{reverse('studio_home')}?batch={batch.pk}")
+
+
+@login_required
+@require_GET
+def studio_batch_status(request, batch_id):
+    batch = get_object_or_404(StudioBatch, pk=batch_id, user=request.user)
+    items = []
+    for item in batch.items.select_related("audio_asset").order_by("position", "id"):
+        items.append({
+            "position": item.position + 1,
+            "name": item.asset_name,
+            "status": item.status,
+            "status_label": item.get_status_display(),
+            "error": item.error_message,
+            "audio_url": item.audio_asset.audio_file.url if item.audio_asset and item.audio_asset.audio_file else None,
+        })
+    return JsonResponse({
+        "id": batch.pk,
+        "status": batch.status,
+        "status_label": batch.get_status_display(),
+        "status_message": batch.status_message,
+        "total_items": batch.total_items,
+        "completed_items": batch.completed_items,
+        "current_item": batch.current_item,
+        "progress_percent": batch.progress_percent,
+        "items": items,
+    })
 
 
 @login_required
