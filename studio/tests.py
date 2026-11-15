@@ -533,6 +533,8 @@ class ProjectViewTests(MediaTestCase):
 
         self.assertEqual(response.status_code, 200)
         hash_sample.assert_called_once_with(voice.sample.path)
+        self.assertContains(response, 'id="prepareForm"')
+        self.assertNotContains(response, 'id="assemblyRenderForm"')
 
     def test_changing_project_voice_is_persisted_and_invalidates_complete_exports(self):
         project = NarrationProject.objects.create(user=self.user, title="Voix différente")
@@ -594,6 +596,336 @@ class ProjectViewTests(MediaTestCase):
         self.assertEqual(self.client.post(f"/projects/{project.pk}/music/", {
             "background_track_id": "", "music_volume": "101",
         }).status_code, 400)
+
+    def test_assembly_mode_and_audio_changes_preserve_xtts_cache(self):
+        asset = AudioAsset.objects.create(
+            user=self.user, name="Narration", duration=1.0, source=AudioAsset.Source.XTTS,
+            timings={"version": 1, "words": [{"word": "bonjour", "start": 0.0, "end": 0.8}],
+                     "segments": [], "scene_boundaries": [{"scene_index": 0, "start": 0.0, "end": 1.0}]},
+        )
+        asset.audio_file.save("narration.wav", ContentFile(b"narration audio"), save=True)
+        project = NarrationProject.objects.create(
+            user=self.user, title="Assemblage", mode=NarrationProject.Mode.ASSEMBLY, audio_asset=asset,
+        )
+        project.video_file.save("render.mp4", ContentFile(b"video"), save=True)
+        segment = NarrationSegment.objects.create(
+            project=project, position=0, text="Texte XTTS conservé", cache_key="stable-cache-key",
+            subtitle_data=[{"start": 0.0, "end": 0.8, "text": "Texte XTTS conservé"}],
+        )
+        segment.audio.save("scene.wav", ContentFile(b"xtts cache"), save=True)
+        segment_audio_name = segment.audio.name
+        segment_cache_key = segment.cache_key
+
+        other_user = get_user_model().objects.create_user(username="assembly-private-audio", password="SafePass123!x")
+        private_asset = AudioAsset.objects.create(
+            user=other_user, name="Privé", duration=1.0, source=AudioAsset.Source.XTTS,
+            timings=asset.timings,
+        )
+        private_asset.audio_file.save("private.wav", ContentFile(b"private audio"), save=True)
+        self.assertEqual(self.client.post(f"/projects/{project.pk}/assembly/audio/", {
+            "audio_asset_id": private_asset.pk,
+        }).status_code, 404)
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(f"/projects/{project.pk}/mode/", {"mode": NarrationProject.Mode.SCENES})
+        self.assertEqual(response.status_code, 302)
+        project.refresh_from_db()
+        segment.refresh_from_db()
+        self.assertEqual(project.mode, NarrationProject.Mode.SCENES)
+        self.assertEqual(project.audio_asset_id, asset.pk)
+        self.assertFalse(project.video_file)
+        self.assertEqual(segment.audio.name, segment_audio_name)
+        self.assertEqual(segment.cache_key, segment_cache_key)
+
+        replacement = AudioAsset.objects.create(
+            user=self.user, name="Autre narration", duration=1.0, source=AudioAsset.Source.XTTS,
+            timings=asset.timings,
+        )
+        replacement.audio_file.save("replacement.wav", ContentFile(b"replacement audio"), save=True)
+        project.video_file.save("again.mp4", ContentFile(b"video"), save=True)
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(f"/projects/{project.pk}/assembly/audio/", {
+                "audio_asset_id": replacement.pk,
+            })
+        self.assertEqual(response.status_code, 302)
+        project.refresh_from_db()
+        segment.refresh_from_db()
+        self.assertEqual(project.audio_asset_id, replacement.pk)
+        self.assertFalse(project.video_file)
+        self.assertEqual(segment.audio.name, segment_audio_name)
+        self.assertEqual(segment.cache_key, segment_cache_key)
+
+        project.mode = NarrationProject.Mode.ASSEMBLY
+        project.save(update_fields=["mode"])
+        project.video_file.save("render-again.mp4", ContentFile(b"video"), save=True)
+        track = BackgroundTrack.objects.create(user=self.user, name="Ambiance", duration=10.0)
+        track.audio_file.save("music.mp3", ContentFile(b"music"), save=True)
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(f"/projects/{project.pk}/music/", {
+                "background_track_id": track.pk, "music_volume": "25",
+            })
+        self.assertEqual(response.status_code, 302)
+        project.refresh_from_db()
+        segment.refresh_from_db()
+        asset.refresh_from_db()
+        self.assertEqual(project.audio_asset_id, replacement.pk)
+        replacement.refresh_from_db()
+        self.assertTrue(replacement.audio_file)
+        self.assertTrue(replacement.timings["words"])
+        self.assertFalse(project.video_file)
+        self.assertEqual(segment.audio.name, segment_audio_name)
+        self.assertEqual(segment.cache_key, segment_cache_key)
+
+    def test_assembly_audio_selector_hides_slots_beyond_boundaries(self):
+        asset = AudioAsset.objects.create(
+            user=self.user, name="Narration visible", duration=1.0, source=AudioAsset.Source.XTTS,
+            timings={"version": 1, "words": [{"word": "bonjour", "start": 0.0, "end": 0.8}],
+                     "segments": [], "scene_boundaries": [{"scene_index": 0, "start": 0.0, "end": 1.0}]},
+        )
+        project = NarrationProject.objects.create(
+            user=self.user, title="Assemblage mono", mode=NarrationProject.Mode.ASSEMBLY, audio_asset=asset,
+        )
+        NarrationSegment.objects.create(project=project, position=0)
+        NarrationSegment.objects.create(project=project, position=1, text="Scène conservée hors rendu")
+
+        response = self.client.get(f"/projects/{project.pk}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Image de la boundary 0")
+        self.assertNotContains(response, "Image de la boundary 1")
+        self.assertContains(response, "Narration visible")
+        self.assertNotContains(response, "Scène conservée hors rendu")
+
+    def test_assembly_render_route_hides_cross_user_audio_and_validates_inputs_before_queueing(self):
+        project = NarrationProject.objects.create(user=self.user, title="Assemblage", mode=NarrationProject.Mode.ASSEMBLY)
+        response = self.client.post(f"/projects/{project.pk}/assembly/render/")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Sélectionne un audio dans la bibliothèque.")
+
+        asset = AudioAsset.objects.create(
+            user=self.user, name="Sans timings", duration=1.0, source=AudioAsset.Source.XTTS,
+        )
+        asset.audio_file.save("without-timings.wav", ContentFile(b"audio"), save=True)
+        project.audio_asset = asset
+        project.save(update_fields=["audio_asset"])
+        response = self.client.post(f"/projects/{project.pk}/assembly/render/")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Cet audio n'a pas de timings utilisables.")
+
+        asset.timings = {"version": 1, "words": [], "segments": [], "scene_boundaries": []}
+        asset.save(update_fields=["timings"])
+        response = self.client.post(f"/projects/{project.pk}/assembly/render/")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Impossible de générer les sous-titres (words manquants).")
+
+        asset.timings = {
+            "version": 1, "words": [{"word": "bonjour", "start": "incorrect", "end": 0.8}],
+            "segments": [], "scene_boundaries": [{"scene_index": 0, "start": 0.0, "end": 1.0}],
+        }
+        asset.save(update_fields=["timings"])
+        response = self.client.post(f"/projects/{project.pk}/assembly/render/")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Cet audio n'a pas de timings utilisables.")
+
+        asset.timings = {
+            "version": 1, "words": [{"word": "bonjour", "start": 0.0, "end": 0.8}],
+            "segments": [], "scene_boundaries": [],
+        }
+        asset.save(update_fields=["timings"])
+        response = self.client.post(f"/projects/{project.pk}/assembly/render/")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Impossible de générer la séquence (boundaries manquantes).")
+
+        asset.timings = {
+            "version": 1, "words": [{"word": "bonjour", "start": 0.0, "end": 0.8}],
+            "segments": [], "scene_boundaries": [{"scene_index": 0, "start": 0.0, "end": 1.0}],
+        }
+        asset.save(update_fields=["timings"])
+        response = self.client.post(f"/projects/{project.pk}/assembly/render/")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Il manque 1 image(s) pour les 1 scènes.", response.json()["error"])
+
+        other_user = get_user_model().objects.create_user(username="assembly-audio-owner", password="SafePass123!x")
+        foreign_asset = AudioAsset.objects.create(
+            user=other_user, name="Privé", duration=1.0, source=AudioAsset.Source.XTTS,
+            timings=asset.timings,
+        )
+        foreign_asset.audio_file.save("private.wav", ContentFile(b"audio"), save=True)
+        project.audio_asset = foreign_asset
+        project.save(update_fields=["audio_asset"])
+        response = self.client.post(f"/projects/{project.pk}/assembly/render/")
+        self.assertEqual(response.status_code, 404)
+
+    def test_valid_assembly_request_queues_the_dedicated_job(self):
+        asset = AudioAsset.objects.create(
+            user=self.user, name="Narration", duration=1.0, source=AudioAsset.Source.XTTS,
+            timings={
+                "version": 1, "words": [{"word": "bonjour", "start": 0.0, "end": 0.8}],
+                "segments": [], "scene_boundaries": [{"scene_index": 0, "start": 0.0, "end": 1.0}],
+            },
+        )
+        asset.audio_file.save("narration.wav", ContentFile(b"audio"), save=True)
+        project = NarrationProject.objects.create(
+            user=self.user, title="Assemblage prêt", mode=NarrationProject.Mode.ASSEMBLY, audio_asset=asset,
+        )
+        visual = NarrationSegment.objects.create(project=project, position=0)
+        visual.image.save("visual.png", ContentFile(ProjectAssemblyRenderTests.png_bytes()), save=True)
+
+        response = self.client.post(f"/projects/{project.pk}/assembly/render/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["ok"])
+        project.refresh_from_db()
+        self.assertEqual(project.status, NarrationProject.Status.QUEUED)
+        self.assertEqual(project.job_type, NarrationProject.JobType.AUDIO_ASSEMBLY)
+        self.assertEqual(project.total_segments, 1)
+
+    def test_worker_dispatches_dedicated_assembly_job_without_xtts(self):
+        from .management.commands.run_narration_worker import Command
+
+        project = NarrationProject.objects.create(
+            user=self.user, title="Assemblage worker", mode=NarrationProject.Mode.ASSEMBLY,
+            status=NarrationProject.Status.QUEUED, queued_at=timezone.now(),
+            job_type=NarrationProject.JobType.AUDIO_ASSEMBLY,
+        )
+        with override_settings(MEDIA_ROOT=Path(self.media_dir.name)):
+            with patch("studio.management.commands.run_narration_worker.render_project_assembly") as render:
+                with patch("studio.management.commands.run_narration_worker.prepare_project") as prepare:
+                    Command().handle(once=True, poll_seconds=0.25)
+        prepare.assert_not_called()
+        render.assert_called_once_with(project.pk)
+
+    def test_worker_rejects_assembly_mode_with_the_wrong_job_type(self):
+        from .management.commands.run_narration_worker import Command
+
+        project = NarrationProject.objects.create(
+            user=self.user, title="Mauvais type", mode=NarrationProject.Mode.ASSEMBLY,
+            status=NarrationProject.Status.QUEUED, queued_at=timezone.now(),
+            job_type=NarrationProject.JobType.AUDIO,
+        )
+        with override_settings(MEDIA_ROOT=Path(self.media_dir.name)):
+            with patch("studio.management.commands.run_narration_worker.render_project_assembly") as render:
+                with patch("studio.management.commands.run_narration_worker.prepare_project") as prepare:
+                    Command().handle(once=True, poll_seconds=0.25)
+        prepare.assert_not_called()
+        render.assert_not_called()
+        project.refresh_from_db()
+        self.assertEqual(project.status, NarrationProject.Status.ERROR)
+
+
+class ProjectAssemblyRenderTests(MediaTestCase):
+    @staticmethod
+    def png_bytes(color=(100, 80, 160)):
+        buffer = BytesIO()
+        Image.new("RGB", (100, 80), color).save(buffer, format="PNG")
+        return buffer.getvalue()
+
+    def make_assembly_project(self, with_music=False):
+        asset = AudioAsset.objects.create(
+            user=self.user, name="Narration de test", duration=1.0, source=AudioAsset.Source.XTTS,
+            timings={
+                "version": 1,
+                "words": [
+                    {"word": "bonjour", "start": 0.0, "end": 0.4},
+                    {"word": "studio", "start": 0.45, "end": 0.9},
+                ],
+                "segments": [{"text": "Bonjour studio", "start": 0.0, "end": 0.9}],
+                "scene_boundaries": [{"scene_index": 0, "start": 0.0, "end": 1.0}],
+            },
+        )
+        asset.audio_file.save("narration.wav", ContentFile(b"mock narration"), save=True)
+        project = NarrationProject.objects.create(
+            user=self.user, title="Rendu assemblage", mode=NarrationProject.Mode.ASSEMBLY,
+            audio_asset=asset, subtitles_enabled=True,
+        )
+        visual = NarrationSegment.objects.create(project=project, position=0)
+        visual.image.save("visual.png", ContentFile(self.png_bytes()), save=True)
+        ignored = NarrationSegment.objects.create(project=project, position=1)
+        ignored.image.save("ignored.png", ContentFile(self.png_bytes((180, 80, 20))), save=True)
+        if with_music:
+            track = BackgroundTrack.objects.create(user=self.user, name="Musique", duration=8.0)
+            track.audio_file.save("music.mp3", ContentFile(b"mock music"), save=True)
+            project.background_track = track
+            project.music_volume = 25
+            project.save(update_fields=["background_track", "music_volume"])
+        return project, visual, ignored
+
+    @patch("studio.video_services._ffmpeg_path", return_value="ffmpeg")
+    @patch("studio.video_services._video_encoder", return_value="libx264")
+    @patch("studio.video_services._run_ffmpeg")
+    def test_assembly_renders_one_global_ass_and_uses_only_boundary_images(self, run_ffmpeg, _encoder, _ffmpeg):
+        from .video_services import render_project_assembly
+
+        project, visual, ignored = self.make_assembly_project()
+        commands = []
+        subtitle_texts = []
+
+        def create_output(command, cwd, *_args, **_kwargs):
+            commands.append(list(command))
+            subtitle_file = Path(cwd) / "assembly.ass"
+            if subtitle_file.exists():
+                subtitle_texts.append(subtitle_file.read_text(encoding="utf-8"))
+            Path(command[-1]).write_bytes(b"v" * 2048)
+
+        run_ffmpeg.side_effect = create_output
+        render_project_assembly(project.pk)
+
+        project.refresh_from_db()
+        self.assertEqual(project.status, NarrationProject.Status.READY)
+        self.assertAlmostEqual(project.duration_seconds, 1.0)
+        self.assertTrue(project.video_file)
+        self.assertEqual(len(commands), 1)
+        self.assertIn(visual.image.path, commands[0])
+        self.assertNotIn(ignored.image.path, commands[0])
+        graph = commands[0][commands[0].index("-filter_complex") + 1]
+        self.assertIn("concat=n=1:v=1:a=0", graph)
+        self.assertIn("subtitles=filename=assembly.ass", graph)
+        self.assertIn(project.audio_asset.audio_file.path, commands[0])
+        self.assertEqual(commands[0][commands[0].index("-c:v") + 1], "libx264")
+        self.assertEqual(len(subtitle_texts), 1)
+        self.assertIn("bonjour", subtitle_texts[0])
+        self.assertIn("studio", subtitle_texts[0])
+        self.assertIn("0:00:00.00", subtitle_texts[0])
+        self.assertIn("\\c&H000B9EF5&", subtitle_texts[0])
+
+    @patch("studio.video_services._ffmpeg_path", return_value="ffmpeg")
+    @patch("studio.video_services._video_encoder", return_value="libx264")
+    @patch("studio.video_services._run_ffmpeg")
+    def test_assembly_renders_then_mixes_music_without_reencoding_video(self, run_ffmpeg, _encoder, _ffmpeg):
+        from .video_services import render_project_assembly
+
+        project, _visual, _ignored = self.make_assembly_project(with_music=True)
+
+        def create_output(command, *_args, **_kwargs):
+            Path(command[-1]).write_bytes(b"v" * 2048)
+
+        run_ffmpeg.side_effect = create_output
+        render_project_assembly(project.pk)
+
+        project.refresh_from_db()
+        self.assertEqual(project.status, NarrationProject.Status.READY)
+        self.assertEqual(run_ffmpeg.call_count, 2)
+        first_command = run_ffmpeg.call_args_list[0].args[0]
+        music_command = run_ffmpeg.call_args_list[1].args[0]
+        self.assertNotIn("-stream_loop", first_command)
+        self.assertEqual(music_command[music_command.index("-c:v") + 1], "copy")
+        self.assertEqual(music_command[music_command.index("-c:a") + 1], "aac")
+
+    @patch("studio.video_services._ffmpeg_path", return_value="ffmpeg")
+    @patch("studio.video_services._run_ffmpeg")
+    def test_invalid_assembly_fails_before_invoking_ffmpeg(self, run_ffmpeg, _ffmpeg):
+        from .video_services import render_project_assembly
+
+        project, visual, _ignored = self.make_assembly_project()
+        visual.image.delete(save=False)
+        NarrationSegment.objects.filter(pk=visual.pk).update(image="")
+
+        render_project_assembly(project.pk)
+
+        run_ffmpeg.assert_not_called()
+        project.refresh_from_db()
+        self.assertEqual(project.status, NarrationProject.Status.ERROR)
+        self.assertIn("Il manque 1 image(s) pour les 1 scènes.", project.error_message)
 
 
 class BackgroundMusicMixTests(MediaTestCase):
