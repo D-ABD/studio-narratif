@@ -140,6 +140,8 @@
           <a class="home-project-open" href="{% url 'project_detail' item.id %}">Ouvrir l’éditeur <span aria-hidden="true">→</span></a>
           <form method="post" action="{% url 'delete_project' item.id %}" onsubmit="return confirm('Supprimer définitivement le projet « {{ item.title|escapejs }} » ?')">
             {% csrf_token %}
+            <input type="hidden" name="confirm" value="1">
+            <input type="hidden" name="next" value="{{ request.get_full_path }}">
             <button class="home-project-delete" type="submit" {% if item.status == 'processing' %}disabled title="Annule d’abord le traitement en cours"{% endif %}>Supprimer</button>
           </form>
         </div>

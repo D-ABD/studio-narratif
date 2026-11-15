@@ -118,6 +118,44 @@
     .premium-create-button { width: 100%; border-color: #3A321F; color: #FFD178; background: #201A11; text-align: left; cursor: pointer; }
     .premium-create-button:hover { border-color: #805514; background: #2A2113; }
     .premium-project-empty { padding: 8px 11px; color: #778294; font-size: 10px; }
+    .premium-project-row { position: relative; display: flex; align-items: center; min-width: 0; border-radius: 11px; }
+    .premium-project-link { flex: 1 1 auto; min-width: 0; }
+    .premium-project-link .premium-link-label { overflow: hidden; text-overflow: ellipsis; }
+    .premium-project-menu-toggle, .premium-project-rename-action {
+      width: 29px; height: 29px; flex: 0 0 29px; display: grid; place-items: center;
+      border: 1px solid transparent; border-radius: 8px; color: #AAB3C1; background: transparent;
+      cursor: pointer; line-height: 1;
+    }
+    .premium-project-menu-toggle { opacity: 0; pointer-events: none; font-size: 19px; }
+    .premium-project-row:hover .premium-project-menu-toggle,
+    .premium-project-row:focus-within .premium-project-menu-toggle { opacity: 1; pointer-events: auto; }
+    .premium-project-menu-toggle:hover, .premium-project-rename-action:hover { color: #FFF4DD; background: #242D3A; border-color: #394456; }
+    .premium-project-dropdown {
+      position: absolute; z-index: 30; top: calc(100% - 3px); right: 3px; min-width: 145px;
+      padding: 5px; border: 1px solid #343D4C; border-radius: 10px; background: #171D27;
+      box-shadow: 0 12px 28px #0008;
+    }
+    .premium-project-dropdown[hidden], .premium-project-rename-form[hidden] { display: none !important; }
+    .premium-project-dropdown button {
+      width: 100%; min-height: 34px; padding: 0 9px; border: 0; border-radius: 7px;
+      color: #DCE1E9; background: transparent; text-align: left; font-size: 11px; cursor: pointer;
+    }
+    .premium-project-dropdown button:hover { background: #242D3A; }
+    .premium-project-dropdown .danger { color: #F49A92; }
+    .premium-project-rename-form { display: flex; flex: 1 1 auto; min-width: 0; align-items: center; gap: 3px; padding: 3px; }
+    .premium-project-rename-form input { min-width: 0; width: 100%; height: 31px; padding: 0 7px; border: 1px solid #4A5668; border-radius: 7px; color: var(--text); background: #111720; font-size: 11px; }
+    .premium-project-row.is-renaming .premium-project-link,
+    .premium-project-row.is-renaming .premium-project-menu-toggle { display: none; }
+    .premium-project-rename-action { width: 27px; height: 27px; flex-basis: 27px; font-size: 14px; }
+    .premium-project-rename-action.save { color: #8ED5A7; }
+    .premium-delete-dialog { width: min(440px, calc(100vw - 32px)); padding: 22px; border: 1px solid #394351; border-radius: 16px; color: var(--text); background: #171D27; box-shadow: 0 24px 80px #000A; }
+    .premium-delete-dialog::backdrop { background: #05070BCC; backdrop-filter: blur(3px); }
+    .premium-delete-dialog h2 { margin: 0 0 9px; font-size: 16px; }
+    .premium-delete-dialog p { margin: 0 0 19px; color: #B4BDCA; font-size: 12px; }
+    .premium-delete-dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+    .premium-delete-dialog-actions button { min-height: 36px; padding: 0 13px; border: 1px solid #374151; border-radius: 8px; color: #DCE1E9; background: #222A36; cursor: pointer; }
+    .premium-delete-dialog-actions button.danger { color: #FFE9E7; border-color: #733B38; background: #512C2B; }
+    .premium-delete-dialog-actions button.danger:hover { background: #693432; }
     .premium-queue-count { min-width: 20px; margin-left: auto; padding: 2px 6px; border: 1px solid #5A4016; border-radius: 99px; color: #FFC65D; background: #241D12; font-size: 9px; font-weight: 800; text-align: center; }
     .sidebar-collapsed .premium-queue-count { display: none; }
     .sidebar-collapsed .premium-sidebar-bottom { justify-content: center; gap: 0; padding-right: 0; padding-left: 0; }
@@ -157,7 +195,7 @@
       font-size: 17px;
       line-height: 1;
     }
-    .premium-projects { display: grid; gap: 3px; min-height: 0; }
+    .premium-projects { display: grid; gap: 3px; min-height: 0; max-height: 36vh; overflow-y: auto; }
     .premium-project-link { min-height: 39px; font-size: 11px; font-weight: 520; }
     .premium-project-link .premium-icon { color: #8792A3; font-size: 13px; }
     .premium-sidebar-bottom {
@@ -239,6 +277,7 @@
     .sidebar-collapsed .premium-nav-link,
     .sidebar-collapsed .premium-project-link { justify-content: center; padding: 0; }
     .sidebar-collapsed .premium-icon { width: 100%; flex-basis: 100%; }
+    .sidebar-collapsed .premium-project-menu-toggle { position: absolute; right: -5px; top: 3px; z-index: 2; width: 23px; height: 27px; background: #171D27; }
     .sidebar-collapsed .premium-sidebar-bottom { justify-content: center; padding-right: 0; padding-left: 0; }
     .premium-editor { max-width: 1500px; margin: 0 auto; }
     .editor-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin: 0 0 18px; }
@@ -350,7 +389,16 @@
       .premium-brand-row { margin: 0; }
       .premium-nav { display: flex; flex-wrap: wrap; gap: 5px; margin: 10px 0 0; }
       .premium-nav-link { min-height: 36px; }
-      .premium-section-title, .premium-projects, .premium-sidebar-bottom { display: none; }
+      .premium-section-title:not(.premium-projects-title), .premium-sidebar-bottom { display: none; }
+      .premium-projects-title { display: block; padding: 12px 10px 6px; }
+      .premium-projects { display: grid; max-height: 28vh; overflow-y: auto; }
+      .premium-project-menu-toggle { opacity: 1; pointer-events: auto; }
+      .premium-project-link { justify-content: flex-start; padding: 0 8px; }
+      .premium-project-link .premium-icon { width: 22px; flex-basis: 22px; }
+      .sidebar-collapsed .premium-project-link { justify-content: flex-start; padding: 0 8px; }
+      .sidebar-collapsed .premium-project-link .premium-icon { width: 22px; flex-basis: 22px; }
+      .sidebar-collapsed .premium-project-menu-toggle { right: -3px; }
+      .sidebar-collapsed .premium-projects-title { display: block; }
       .sidebar-collapsed .premium-brand-row { justify-content: flex-start; }
       .sidebar-collapsed .premium-wordmark { display: block; opacity: 1; }
       .sidebar-collapsed .premium-toggle { position: static; margin-left: auto; transform: none; }
@@ -399,13 +447,28 @@
         <button class="premium-nav-link premium-create-button" type="submit"><span class="premium-icon" aria-hidden="true">＋</span><span class="premium-link-label">Nouvelle narration</span></button>
       </form>
     </nav>
-    <div class="premium-section-title">PROJETS RÉCENTS</div>
+    <div class="premium-section-title premium-projects-title">PROJETS RÉCENTS</div>
     {% with current_project=project %}
     <nav class="premium-projects" aria-label="Projets récents">
       {% for project in projects %}
-      <a class="premium-project-link{% if current_project and current_project.id == project.id %} selected{% endif %}" href="{% url 'project_detail' project.id %}">
-        <span class="premium-icon" aria-hidden="true">◈</span><span class="premium-link-label">{{ project.title }}</span>
-      </a>
+      <div class="premium-project-row" data-sidebar-project data-project-id="{{ project.id }}">
+        <a class="premium-project-link{% if current_project and current_project.id == project.id %} selected{% endif %}" href="{% url 'project_detail' project.id %}">
+          <span class="premium-icon" aria-hidden="true">◈</span><span class="premium-link-label" data-project-title>{{ project.title }}</span>
+        </a>
+        <button class="premium-project-menu-toggle" type="button" data-project-menu-toggle aria-label="Actions pour {{ project.title }}" aria-expanded="false" aria-controls="project-menu-{{ project.id }}">⋯</button>
+        <div class="premium-project-dropdown" id="project-menu-{{ project.id }}" data-project-dropdown hidden>
+          <button type="button" data-project-rename-start>Renommer</button>
+          <button type="button" class="danger" data-project-delete-start data-delete-url="{% url 'delete_project' project.id %}" data-project-title="{{ project.title }}" data-return-url="{{ request.get_full_path }}">Supprimer</button>
+        </div>
+        <form class="premium-project-rename-form" method="post" action="{% url 'rename_project' project.id %}" data-project-rename-form hidden>
+          {% csrf_token %}
+          <input type="hidden" name="next" value="{{ request.get_full_path }}">
+          <label class="sr-only" for="sidebar-project-title-{{ project.id }}">Nouveau nom de {{ project.title }}</label>
+          <input id="sidebar-project-title-{{ project.id }}" name="title" value="{{ project.title }}" maxlength="120" required data-project-rename-input>
+          <button class="premium-project-rename-action save" type="submit" aria-label="Enregistrer le nom">✓</button>
+          <button class="premium-project-rename-action" type="button" data-project-rename-cancel aria-label="Annuler le renommage">✕</button>
+        </form>
+      </div>
       {% empty %}
       <span class="premium-project-empty">Aucun projet pour le moment.</span>
       {% endfor %}
@@ -430,6 +493,19 @@
     <footer class="footer">PETIT STUDIO · Création locale, vos fichiers restent sur cet appareil</footer>
   </main>
 </div>
+<dialog class="premium-delete-dialog" id="projectDeleteDialog" aria-labelledby="projectDeleteTitle">
+  <form method="post" id="sidebarDeleteProjectForm" action="">
+    {% csrf_token %}
+    <input type="hidden" name="confirm" value="1">
+    <input type="hidden" name="next" value="{{ request.get_full_path }}" data-delete-return>
+    <h2 id="projectDeleteTitle">Supprimer le projet ?</h2>
+    <p>Supprimer définitivement « <span id="projectDeleteName"></span> » ? Cette action est irréversible.</p>
+    <div class="premium-delete-dialog-actions">
+      <button type="button" data-project-delete-cancel>Annuler</button>
+      <button class="danger" type="submit">Supprimer</button>
+    </div>
+  </form>
+</dialog>
 <script>
 (() => {
   const body = document.body;
@@ -452,6 +528,6 @@
   });
 })();
 </script>
-  <script src="{% static 'studio/app.js' %}?v=16" defer></script>
+  <script src="{% static 'studio/app.js' %}?v=17" defer></script>
 </body>
 </html>

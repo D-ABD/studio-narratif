@@ -2028,11 +2028,61 @@ class ProjectLifecycleAndNamingTests(MediaTestCase):
 
     def test_project_can_be_renamed_and_home_displays_the_saved_title(self):
         project = NarrationProject.objects.create(user=self.user, title="Avant")
-        response = self.client.post(f"/projects/{project.pk}/rename/", {"title": "Après le montage"})
-        self.assertEqual(response.status_code, 302)
+        response = self.client.post(
+            f"/projects/{project.pk}/rename/",
+            {"title": "Après le montage", "next": "/?from=sidebar"},
+            follow=True,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.redirect_chain, [("/?from=sidebar", 302)])
+        self.assertContains(response, "Projet renommé.")
         project.refresh_from_db()
         self.assertEqual(project.title, "Après le montage")
         self.assertContains(self.client.get("/"), "Après le montage")
+
+    def test_project_rename_rejects_blank_and_overlong_names(self):
+        project = NarrationProject.objects.create(user=self.user, title="Nom conservé")
+        cases = [
+            ("   ", "Le nom ne peut pas être vide."),
+            ("x" * 121, "Le nom est trop long (max 120 caractères)."),
+        ]
+        for title, expected_message in cases:
+            with self.subTest(title_length=len(title)):
+                response = self.client.post(
+                    f"/projects/{project.pk}/rename/", {"title": title}, follow=True,
+                )
+                self.assertEqual(response.status_code, 200)
+                self.assertContains(response, expected_message)
+                project.refresh_from_db()
+                self.assertEqual(project.title, "Nom conservé")
+
+    def test_project_cannot_be_renamed_by_another_user(self):
+        other_user = get_user_model().objects.create_user(username="rename-private", password="SafePass123!x")
+        project = NarrationProject.objects.create(user=other_user, title="Projet privé")
+
+        response = self.client.post(f"/projects/{project.pk}/rename/", {"title": "Intrusion"})
+
+        self.assertEqual(response.status_code, 404)
+        project.refresh_from_db()
+        self.assertEqual(project.title, "Projet privé")
+
+    def test_sidebar_project_actions_use_sibling_controls_and_confirmation_dialog(self):
+        project = NarrationProject.objects.create(user=self.user, title="Projet sidebar")
+
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, f'data-project-id="{project.pk}"')
+        self.assertContains(response, "data-project-menu-toggle")
+        self.assertContains(response, "Renommer")
+        self.assertContains(response, "Supprimer")
+        self.assertContains(response, 'id="projectDeleteDialog"')
+        self.assertContains(response, 'name="confirm" value="1"')
+        content = response.content.decode()
+        project_link = content.index(f'<a class="premium-project-link" href="/projects/{project.pk}/">')
+        link_end = content.index("</a>", project_link)
+        menu_button = content.index("data-project-menu-toggle", link_end)
+        self.assertGreater(menu_button, link_end)
 
 
     def test_ffmpeg_process_is_terminated_when_cancellation_is_requested(self):
@@ -2096,11 +2146,21 @@ class ProjectLifecycleAndNamingTests(MediaTestCase):
 
     def test_delete_project_route_is_post_only_and_removes_project(self):
         project = NarrationProject.objects.create(user=self.user, title="Projet de test")
+        editor = self.client.get(f"/projects/{project.pk}/")
+        self.assertEqual(editor.status_code, 200)
+        self.assertGreaterEqual(editor.content.decode().count('name="confirm" value="1"'), 2)
         response = self.client.get(f"/projects/{project.pk}/delete/")
         self.assertEqual(response.status_code, 405)
 
-        response = self.client.post(f"/projects/{project.pk}/delete/")
-        self.assertEqual(response.status_code, 302)
+        missing_confirmation = self.client.post(f"/projects/{project.pk}/delete/")
+        self.assertEqual(missing_confirmation.status_code, 400)
+        self.assertContains(missing_confirmation, "Confirmation manquante", status_code=400)
+        self.assertTrue(NarrationProject.objects.filter(pk=project.pk).exists())
+
+        response = self.client.post(f"/projects/{project.pk}/delete/", {
+            "confirm": "1", "next": f"/projects/{project.pk}/",
+        })
+        self.assertRedirects(response, "/", fetch_redirect_response=False)
         self.assertFalse(NarrationProject.objects.filter(pk=project.pk).exists())
 
 class ProjectDuplicationTests(MediaTestCase):
@@ -2307,12 +2367,15 @@ class ProjectDuplicationTests(MediaTestCase):
         source, source_segment, image_name = self.make_source_project()
         duplicate = self.duplicate(source)
         copied_segment = duplicate.segments.get()
+        from .views import _safe_delete_media_file
 
-        with self.captureOnCommitCallbacks(execute=True):
-            response = self.client.post(f"/projects/{duplicate.pk}/delete/")
+        with patch("studio.views._safe_delete_media_file", wraps=_safe_delete_media_file) as safe_delete:
+            with self.captureOnCommitCallbacks(execute=True):
+                response = self.client.post(f"/projects/{duplicate.pk}/delete/", {"confirm": "1"})
 
         self.assertEqual(response.status_code, 302)
         self.assertFalse(NarrationProject.objects.filter(pk=duplicate.pk).exists())
+        self.assertTrue(any(call.args[0][1] == image_name for call in safe_delete.call_args_list))
         source_segment.refresh_from_db()
         self.assertEqual(source_segment.image.name, image_name)
         self.assertTrue(source_segment.image.storage.exists(image_name))
@@ -2425,7 +2488,7 @@ class AuthenticationIsolationTests(MediaTestCase):
         project = NarrationProject.objects.create(user=other, title="Projet privé")
 
         detail = self.client.get(f"/projects/{project.pk}/")
-        deletion = self.client.post(f"/projects/{project.pk}/delete/", {"confirm": "yes"})
+        deletion = self.client.post(f"/projects/{project.pk}/delete/", {"confirm": "1"})
 
         self.assertEqual(detail.status_code, 404)
         self.assertEqual(deletion.status_code, 404)

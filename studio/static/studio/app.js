@@ -24,6 +24,105 @@
   const csrfToken = () => document.querySelector('[name=csrfmiddlewaretoken]')?.value || '';
   const wordCount = value => (value.trim() ? value.trim().split(/\s+/).length : 0);
 
+  const projectDeleteDialog = document.querySelector('#projectDeleteDialog');
+  const projectDeleteForm = document.querySelector('#sidebarDeleteProjectForm');
+  const projectDeleteName = document.querySelector('#projectDeleteName');
+  const projectDeleteReturn = projectDeleteForm?.querySelector('[data-delete-return]');
+  const closeProjectMenus = exceptRow => {
+    document.querySelectorAll('[data-sidebar-project]').forEach(row => {
+      if (row === exceptRow) return;
+      const menu = row.querySelector('[data-project-dropdown]');
+      const toggle = row.querySelector('[data-project-menu-toggle]');
+      if (menu) menu.hidden = true;
+      toggle?.setAttribute('aria-expanded', 'false');
+    });
+  };
+  const cancelInlineRename = row => {
+    if (!row) return;
+    row.classList.remove('is-renaming');
+    const form = row.querySelector('[data-project-rename-form]');
+    if (form) form.hidden = true;
+  };
+
+  document.addEventListener('click', event => {
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target) return;
+
+    const menuToggle = target.closest('[data-project-menu-toggle]');
+    if (menuToggle) {
+      const row = menuToggle.closest('[data-sidebar-project]');
+      const menu = row?.querySelector('[data-project-dropdown]');
+      if (!row || !menu) return;
+      const shouldOpen = menu.hidden;
+      closeProjectMenus(row);
+      menu.hidden = !shouldOpen;
+      menuToggle.setAttribute('aria-expanded', String(shouldOpen));
+      return;
+    }
+
+    const renameStart = target.closest('[data-project-rename-start]');
+    if (renameStart) {
+      const row = renameStart.closest('[data-sidebar-project]');
+      const menu = row?.querySelector('[data-project-dropdown]');
+      const toggle = row?.querySelector('[data-project-menu-toggle]');
+      const form = row?.querySelector('[data-project-rename-form]');
+      const input = form?.querySelector('[data-project-rename-input]');
+      if (!row || !form || !input) return;
+      if (menu) menu.hidden = true;
+      toggle?.setAttribute('aria-expanded', 'false');
+      row.classList.add('is-renaming');
+      form.hidden = false;
+      input.value = row.querySelector('[data-project-title]')?.textContent?.trim() || input.value;
+      input.focus();
+      input.select();
+      return;
+    }
+
+    const renameCancel = target.closest('[data-project-rename-cancel]');
+    if (renameCancel) {
+      cancelInlineRename(renameCancel.closest('[data-sidebar-project]'));
+      return;
+    }
+
+    const deleteStart = target.closest('[data-project-delete-start]');
+    if (deleteStart && projectDeleteDialog && projectDeleteForm) {
+      closeProjectMenus();
+      projectDeleteForm.action = deleteStart.dataset.deleteUrl || '';
+      if (projectDeleteReturn) projectDeleteReturn.value = deleteStart.dataset.returnUrl || window.location.pathname;
+      if (projectDeleteName) projectDeleteName.textContent = deleteStart.dataset.projectTitle || '';
+      if (typeof projectDeleteDialog.showModal === 'function') projectDeleteDialog.showModal();
+      else projectDeleteDialog.setAttribute('open', '');
+      return;
+    }
+
+    if (target.closest('[data-project-delete-cancel]')) {
+      if (projectDeleteDialog?.open) projectDeleteDialog.close();
+      else projectDeleteDialog?.removeAttribute('open');
+      return;
+    }
+
+    if (target === projectDeleteDialog) {
+      projectDeleteDialog.close();
+      return;
+    }
+
+    if (!target.closest('[data-project-dropdown], [data-project-menu-toggle], [data-project-rename-form]')) {
+      closeProjectMenus();
+    }
+  });
+
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape') {
+      const activeRename = document.activeElement?.closest?.('[data-project-rename-form]');
+      if (activeRename) {
+        event.preventDefault();
+        cancelInlineRename(activeRename.closest('[data-sidebar-project]'));
+        return;
+      }
+      closeProjectMenus();
+    }
+  });
+
   const assemblyAudioSelect = document.querySelector('#projectAudioAsset');
   const assemblyAudioPreview = document.querySelector('#assemblyAudioPreview');
   const assemblyAudioPreviewMessage = document.querySelector('#assemblyAudioPreviewMessage');

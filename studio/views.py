@@ -20,6 +20,7 @@ from django.http import Http404, HttpResponse, HttpResponseBadRequest, JsonRespo
 from django.urls import reverse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
+from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 from PIL import Image, UnidentifiedImageError
 
@@ -1448,6 +1449,8 @@ def delete_project(request, project_id):
         project = get_object_or_404(
             NarrationProject.objects.select_for_update(), pk=project_id, user=request.user,
         )
+        if request.POST.get("confirm") != "1":
+            return HttpResponseBadRequest("Confirmation manquante")
         if project.status == NarrationProject.Status.PROCESSING:
             messages.error(request, "Annule le traitement et attends son arrêt avant de supprimer le projet.")
             return redirect("project_detail", project_id=project.pk)
@@ -1460,7 +1463,22 @@ def delete_project(request, project_id):
         project.delete()
         _schedule_storage_cleanup(storage_files)
     messages.success(request, "Le projet a été supprimé.")
-    return redirect("home")
+    fallback_url = reverse("home")
+    return_to = _safe_return_url(request, fallback_url)
+    if return_to.split("?", 1)[0] == reverse("project_detail", args=[project_id]):
+        return_to = fallback_url
+    return redirect(return_to)
+
+
+def _safe_return_url(request, fallback_url):
+    candidate = (request.POST.get("next") or "").strip()
+    if candidate and url_has_allowed_host_and_scheme(
+        candidate,
+        allowed_hosts={request.get_host()},
+        require_https=request.is_secure(),
+    ):
+        return candidate
+    return fallback_url
 
 
 def _duplicate_project_title(user, title):
@@ -1577,14 +1595,18 @@ def cancel_job(request, project_id):
 @require_POST
 def rename_project(request, project_id):
     project = get_object_or_404(NarrationProject, pk=project_id, user=request.user)
-    title = (request.POST.get("title") or "").strip()[:120]
+    title = (request.POST.get("title") or "").strip()
     if not title:
-        messages.error(request, "Le nom du projet ne peut pas être vide.")
-    elif title != project.title:
-        project.title = title
-        project.save(update_fields=["title", "updated_at"])
-        messages.success(request, "Le nom du projet a été mis à jour.")
-    return redirect("project_detail", project_id=project.pk)
+        messages.error(request, "Le nom ne peut pas être vide.")
+    elif len(title) > 120:
+        messages.error(request, "Le nom est trop long (max 120 caractères).")
+    else:
+        if title != project.title:
+            project.title = title
+            project.save(update_fields=["title", "updated_at"])
+        messages.success(request, "Projet renommé.")
+    return_to = _safe_return_url(request, reverse("project_detail", args=[project.pk]))
+    return redirect(return_to)
 
 
 @login_required
