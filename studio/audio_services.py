@@ -326,7 +326,7 @@ def build_filter_chain(operations, source_duration, sample_rate):
             if not isinstance(name, str):
                 raise ValueError("Nom d’effet audio invalide.")
             effect_params = {key: value for key, value in params.items() if key != "name"}
-            if name == "reverse" and source_duration > MAX_REVERSE_SECONDS:
+            if name == "reverse" and working_duration > MAX_REVERSE_SECONDS:
                 raise ValueError("Fichier trop long pour l’effet reverse (max 5 min).")
             filters.extend(_effect_filters(name, effect_params, sample_rate))
         elif kind == "preset":
