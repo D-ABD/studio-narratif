@@ -134,6 +134,63 @@ class AudioStudioViewTests(TestCase):
         session.refresh_from_db()
         self.assertTrue(session.current_preview_file.storage.exists(session.current_preview_file.name))
 
+    @patch("studio.views.apply_audio_operations")
+    def test_two_successive_previews_keep_the_previous_file_until_session_cleanup(self, apply_operations):
+        session = self.make_session()
+        counter = iter((b"first preview", b"second preview"))
+
+        def fake_apply(_source, _operations, output_path):
+            output_path.write_bytes(next(counter))
+            return output_path, 7.25
+
+        apply_operations.side_effect = fake_apply
+        url = reverse("audio_studio_preview", args=[session.pk])
+
+        first_response = self.client.post(url)
+        self.assertEqual(first_response.status_code, 200)
+        session.refresh_from_db()
+        first_name = session.current_preview_file.name
+        self.assertTrue(session.current_preview_file.storage.exists(first_name))
+
+        second_response = self.client.post(url)
+        self.assertEqual(second_response.status_code, 200)
+        session.refresh_from_db()
+        second_name = session.current_preview_file.name
+
+        self.assertNotEqual(first_name, second_name)
+        self.assertTrue(session.current_preview_file.storage.exists(first_name))
+        self.assertTrue(session.current_preview_file.storage.exists(second_name))
+
+    @patch("studio.views.apply_audio_operations")
+    def test_cleanup_does_not_delete_session_during_active_preview(self, apply_operations):
+        session = self.make_session()
+        AudioSession.objects.filter(pk=session.pk).update(updated_at=timezone.now() - timedelta(hours=25))
+
+        def fake_apply(_source, _operations, output_path):
+            output_path.write_bytes(b"preview")
+            from .audio_services import cleanup_expired_audio_sessions
+            self.assertEqual(cleanup_expired_audio_sessions(user=self.user), 0)
+            self.assertTrue(AudioSession.objects.filter(pk=session.pk).exists())
+            return output_path, 7.25
+
+        apply_operations.side_effect = fake_apply
+        response = self.client.post(reverse("audio_studio_preview", args=[session.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(AudioSession.objects.filter(pk=session.pk).exists())
+
+    def test_editor_does_not_render_a_missing_preview_url(self):
+        session = self.make_session()
+        session.current_preview_file.save("missing.m4a", ContentFile(b"preview"), save=True)
+        missing_name = session.current_preview_file.name
+        session.current_preview_file.storage.delete(missing_name)
+
+        response = self.client.get(reverse("audio_studio_edit", args=[session.pk]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Aperçu expiré, clique à nouveau sur")
+        self.assertNotContains(response, missing_name)
+
     @patch("studio.views.probe_audio", return_value=(7.25, 48000))
     @patch("studio.views.apply_audio_operations")
     def test_save_creates_music_and_removes_session(self, apply_operations, _probe):

@@ -184,16 +184,29 @@ class AudioEffectServiceTests(TestCase):
                 )
             self.assertFalse(output.exists())
 
-    @patch("studio.audio_services.probe_audio", return_value=(10.0, 48000))
-    def test_empty_operation_list_copies_the_original_without_encoding(self, _probe):
+    @patch("studio.audio_services.probe_audio", side_effect=[(10.0, 44100), (10.0, 48000)])
+    @patch("studio.audio_services._ffmpeg_path", return_value="ffmpeg")
+    @patch("studio.audio_services.subprocess.run")
+    def test_empty_operation_list_is_encoded_as_aac_m4a(self, run, _ffmpeg, _probe):
         with tempfile.TemporaryDirectory() as folder:
             source = Path(folder) / "source.mp3"
-            output = Path(folder) / "preview.mp3"
+            output = Path(folder) / "preview.m4a"
             source.write_bytes(b"original")
+
+            def encode(command, **_kwargs):
+                Path(command[-1]).write_bytes(b"encoded-aac")
+                return Mock(returncode=0, stderr="")
+
+            run.side_effect = encode
             result_path, duration = audio_services.apply_operations(source, [], output)
+
             self.assertEqual(result_path, output)
             self.assertEqual(duration, 10.0)
-            self.assertEqual(output.read_bytes(), b"original")
+            self.assertEqual(output.read_bytes(), b"encoded-aac")
+            command = run.call_args.args[0]
+            self.assertNotIn("-af", command)
+            self.assertEqual(command[command.index("-c:a") + 1], "aac")
+            self.assertEqual(command[command.index("-b:a") + 1], "192k")
 
 
 class FFmpegFilterDetectionTests(TestCase):
@@ -298,6 +311,11 @@ class AudioSessionCleanupTests(TestCase):
         cutoff = now - timedelta(hours=25)
         AudioSession.objects.filter(pk__in=[expired.pk, other_expired.pk]).update(updated_at=cutoff)
         expired_paths = [Path(expired.source_file.path), Path(expired.current_preview_file.path)]
+        old_preview_name = expired.current_preview_file.storage.save(
+            f"audio-sessions/user_{self.user.pk}/session_{expired.pk}_old-preview.m4a",
+            ContentFile(b"old preview version"),
+        )
+        old_preview_path = Path(expired.current_preview_file.storage.path(old_preview_name))
 
         with self.captureOnCommitCallbacks(execute=True):
             deleted = cleanup_expired_audio_sessions(user=self.user, now=now)
@@ -307,3 +325,4 @@ class AudioSessionCleanupTests(TestCase):
         self.assertTrue(AudioSession.objects.filter(pk=active.pk).exists())
         self.assertTrue(AudioSession.objects.filter(pk=other_expired.pk).exists())
         self.assertTrue(all(not path.exists() for path in expired_paths))
+        self.assertFalse(old_preview_path.exists())

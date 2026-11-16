@@ -569,11 +569,15 @@ def audio_studio_edit(request, session_id):
         session.current_preview_file and session.current_preview_file.name
         and session.current_preview_file.storage.exists(session.current_preview_file.name)
     )
+    preview_missing = bool(
+        session.current_preview_file and session.current_preview_file.name and not preview_exists
+    )
     return render(request, "studio/audio_studio_editor.html", {
         "session": session,
         "source_name": source_name,
         "default_track_name": f"Édition de {source_name}"[:120],
         "preview_exists": preview_exists,
+        "preview_missing": preview_missing,
         "preview_is_current": preview_exists and _audio_studio_preview_is_current(session),
         "effects": available_audio_effects(),
         "presets": available_audio_presets(),
@@ -632,17 +636,28 @@ def audio_studio_operations(request, session_id):
 @login_required
 @require_POST
 def audio_studio_preview(request, session_id):
-    session = get_object_or_404(AudioSession, pk=session_id, user=request.user)
-    if not session.source_file or not session.source_file.name:
-        return JsonResponse({"error": "Le fichier source est introuvable."}, status=400)
-    operations = session.operations or []
+    # Refresh activity while briefly holding the row lock. Once this commits,
+    # the expiry cleaner will not remove the source while FFmpeg is using it.
+    with transaction.atomic():
+        session = get_object_or_404(
+            AudioSession.objects.select_for_update(), pk=session_id, user=request.user,
+        )
+        if not session.source_file or not session.source_file.name:
+            return JsonResponse({"error": "Le fichier source est introuvable."}, status=400)
+        source_path = session.source_file.path
+        operations = list(session.operations or [])
+        session.updated_at = timezone.now()
+        session.save(update_fields=["updated_at"])
     signature = _audio_studio_signature(operations)
     try:
         with tempfile.TemporaryDirectory(prefix="petit-studio-audio-preview-") as folder:
             output_path = Path(folder) / "preview.m4a"
-            _result_path, duration = apply_audio_operations(session.source_file.path, operations, output_path)
+            _result_path, duration = apply_audio_operations(source_path, operations, output_path)
             storage = session.current_preview_file.storage
-            target_name = f"audio-sessions/user_{request.user.pk}/{uuid.uuid4().hex}_{signature}.m4a"
+            target_name = (
+                f"audio-sessions/user_{request.user.pk}/session_{session.pk}_"
+                f"{uuid.uuid4().hex}_{signature}.m4a"
+            )
             with output_path.open("rb") as stream:
                 stored_name = storage.save(target_name, File(stream))
 
@@ -654,17 +669,9 @@ def audio_studio_preview(request, session_id):
                 if _audio_studio_signature(current.operations or []) != signature:
                     storage.delete(stored_name)
                     return JsonResponse({"error": "Les opérations ont changé pendant l’aperçu. Relance le rendu."}, status=409)
-                old_name = current.current_preview_file.name
                 current.current_preview_file.name = stored_name
                 current.save(update_fields=["current_preview_file", "updated_at"])
                 session = current
-                if old_name and old_name != stored_name:
-                    def delete_old_preview():
-                        try:
-                            storage.delete(old_name)
-                        except Exception:
-                            logger.warning("Nettoyage de l’ancien aperçu audio échoué pour la session %s.", session_id, exc_info=True)
-                    transaction.on_commit(delete_old_preview)
         except Exception:
             storage.delete(stored_name)
             raise

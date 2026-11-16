@@ -353,31 +353,27 @@ def apply_operations(input_path, operations, output_path):
     source_duration, sample_rate = probe_audio(input_path, timeout=remaining_timeout())
     filter_chain, _base_duration = build_filter_chain(operations, source_duration, sample_rate)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    if not filter_chain:
-        shutil.copyfile(input_path, output_path)
-    else:
-        command = [
-            _ffmpeg_path(), "-y", "-v", "error", "-i", str(input_path), "-map", "0:a:0", "-vn",
-            "-af", filter_chain, "-c:a", "aac", "-b:a", OUTPUT_BITRATE, str(output_path),
-        ]
-        try:
-            result = subprocess.run(
-                command, capture_output=True, text=True, check=False, timeout=remaining_timeout(),
-            )
-        except subprocess.TimeoutExpired as exc:
-            output_path.unlink(missing_ok=True)
-            raise TimeoutError("Le traitement audio a dépassé le délai maximal de 60 secondes.") from exc
-        if result.returncode or not output_path.is_file() or output_path.stat().st_size == 0:
-            output_path.unlink(missing_ok=True)
-            detail = (result.stderr or "").strip().splitlines()[-1:]
-            raise RuntimeError("Traitement audio échoué." + (f" {detail[0]}" if detail else ""))
+    command = [
+        _ffmpeg_path(), "-y", "-v", "error", "-i", str(input_path), "-map", "0:a:0", "-vn",
+    ]
+    if filter_chain:
+        command.extend(["-af", filter_chain])
+    command.extend(["-c:a", "aac", "-b:a", OUTPUT_BITRATE, str(output_path)])
     try:
-        if not filter_chain:
-            output_duration = source_duration
-        else:
-            output_duration, _output_sample_rate = probe_audio(
-                output_path, timeout=remaining_timeout(),
-            )
+        result = subprocess.run(
+            command, capture_output=True, text=True, check=False, timeout=remaining_timeout(),
+        )
+    except subprocess.TimeoutExpired as exc:
+        output_path.unlink(missing_ok=True)
+        raise TimeoutError("Le traitement audio a dépassé le délai maximal de 60 secondes.") from exc
+    if result.returncode or not output_path.is_file() or output_path.stat().st_size == 0:
+        output_path.unlink(missing_ok=True)
+        detail = (result.stderr or "").strip().splitlines()[-1:]
+        raise RuntimeError("Traitement audio échoué." + (f" {detail[0]}" if detail else ""))
+    try:
+        output_duration, _output_sample_rate = probe_audio(
+            output_path, timeout=remaining_timeout(),
+        )
     except Exception:
         output_path.unlink(missing_ok=True)
         raise
@@ -385,14 +381,32 @@ def apply_operations(input_path, operations, output_path):
 
 
 def _delete_audio_session_files(session):
-    """Remove only the private source and preview files owned by a session."""
+    """Remove a session's source and all its versioned previews after commit."""
     files = []
     for field_name in ("source_file", "current_preview_file"):
         field = getattr(session, field_name)
         if field and field.name:
             files.append((field.storage, field.name))
 
+    # Preview names include this stable session prefix so replaced previews are
+    # retained during editing but can all be removed when the session expires.
+    preview_directory = f"audio-sessions/user_{session.user_id}"
+    preview_prefix = f"session_{session.pk}_"
+    preview_storage = session.current_preview_file.storage
+
     def delete_files():
+        try:
+            _directories, names = preview_storage.listdir(preview_directory)
+            files.extend(
+                (preview_storage, f"{preview_directory}/{name}")
+                for name in names if name.startswith(preview_prefix)
+            )
+        except Exception:
+            logger.warning(
+                "Impossible de lister les aperçus de la session audio %s.",
+                session.pk,
+                exc_info=True,
+            )
         for storage, name in files:
             try:
                 storage.delete(name)

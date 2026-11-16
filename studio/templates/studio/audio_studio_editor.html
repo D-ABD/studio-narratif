@@ -30,7 +30,7 @@
   <section class="card">
     <div class="section-title"><div><span class="step-number">1</span><h2>Source audio</h2></div><span class="muted small">{{ source_name }}</span></div>
     {% if preview_exists %}<audio class="audio-editor-player" id="audioStudioPreviewPlayer" controls preload="metadata" src="{{ session.current_preview_file.url }}"></audio><p class="audio-editor-status" data-audio-preview-placeholder hidden></p>
-    {% else %}<audio class="audio-editor-player" id="audioStudioPreviewPlayer" controls preload="none" hidden></audio><p class="audio-editor-status" data-audio-preview-placeholder>Pas encore d’aperçu. Clique sur « Écouter l’aperçu » après avoir choisi tes opérations.</p>{% endif %}
+    {% else %}<audio class="audio-editor-player" id="audioStudioPreviewPlayer" controls preload="none" hidden></audio><p class="audio-editor-status" data-audio-preview-placeholder>{% if preview_missing %}Aperçu expiré, clique à nouveau sur « Écouter » pour le recréer.{% else %}Pas encore d’aperçu. Clique sur « Écouter l’aperçu » après avoir choisi tes opérations.{% endif %}</p>{% endif %}
     <p class="audio-editor-status" data-audio-preview-duration>{% if preview_exists %}Aperçu prêt{% else %}Le fichier source reste inchangé.{% endif %}</p>
   </section>
   <section class="card">
