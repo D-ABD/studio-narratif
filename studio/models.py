@@ -156,6 +156,7 @@ class AudioSession(models.Model):
     source_file = models.FileField("source audio", upload_to=audio_session_upload_to)
     source_kind = models.CharField(max_length=12, choices=SourceKind.choices)
     operations = models.JSONField(default=list, blank=True)
+    operations_version = models.PositiveIntegerField(default=0)
     current_preview_file = models.FileField(
         "aperçu audio", upload_to=audio_session_upload_to, blank=True,
     )

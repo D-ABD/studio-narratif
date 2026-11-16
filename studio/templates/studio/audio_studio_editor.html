@@ -25,6 +25,7 @@
 <div class="audio-editor-page" data-audio-studio-editor
   data-operations-url="{% url 'audio_studio_operations' session.id %}"
   data-preview-url="{% url 'audio_studio_preview' session.id %}"
+  data-operations-version="{{ session.operations_version }}"
   data-preview-valid="{{ preview_is_current|yesno:'true,false' }}"
   data-has-preview="{{ preview_exists|yesno:'true,false' }}">
   <section class="card">
@@ -49,7 +50,7 @@
     </div>
     <button class="button button-primary" type="button" data-audio-preview>Écouter l’aperçu</button>
     <p class="audio-editor-status" data-audio-preview-busy hidden><span class="audio-editor-spinner" aria-hidden="true"></span>Traitement en cours… (peut prendre jusqu’à 45 s pour un fichier long)</p>
-    <p class="audio-editor-error" data-audio-editor-error role="alert" hidden></p>
+    <p class="audio-editor-error" data-audio-editor-error data-audio-player-error role="alert" hidden></p>
     <p class="audio-editor-warning" data-audio-preview-warning {% if not preview_exists or preview_is_current %}hidden{% endif %}>Les opérations ont changé depuis le dernier aperçu. Clique à nouveau sur Écouter pour valider.</p>
   </section>
   <section class="card">

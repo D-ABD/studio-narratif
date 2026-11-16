@@ -9,6 +9,7 @@ import time
 from datetime import timedelta
 from pathlib import Path
 
+from django.core.files.storage import default_storage
 from django.db import transaction
 from django.utils import timezone
 
@@ -438,4 +439,53 @@ def cleanup_expired_audio_sessions(user=None, *, now=None, max_idle=timedelta(ho
             _delete_audio_session_files(session)
             session.delete()
             deleted += 1
+    return deleted
+
+
+def cleanup_orphaned_audio_session_files(*, now=None, max_age=timedelta(hours=24)):
+    """Delete unreferenced session files older than the session retention window."""
+    now = now or timezone.now()
+    cutoff = now - max_age
+    storage = default_storage
+    referenced = set()
+    for source_name, preview_name in AudioSession.objects.values_list("source_file", "current_preview_file"):
+        if source_name:
+            referenced.add(source_name)
+        if preview_name:
+            referenced.add(preview_name)
+
+    deleted = 0
+
+    def scan(directory):
+        nonlocal deleted
+        try:
+            directories, names = storage.listdir(directory)
+        except FileNotFoundError:
+            return
+        except Exception:
+            logger.warning("Impossible de parcourir le répertoire audio %s.", directory, exc_info=True)
+            return
+
+        for name in names:
+            path = f"{directory}/{name}"
+            if path in referenced:
+                continue
+            try:
+                modified = storage.get_modified_time(path)
+                if timezone.is_naive(modified):
+                    modified = timezone.make_aware(modified, timezone.get_current_timezone())
+                if modified > cutoff:
+                    continue
+                storage.delete(path)
+                deleted += 1
+            except FileNotFoundError:
+                continue
+            except Exception:
+                logger.warning("Impossible de supprimer le fichier audio orphelin %s.", path, exc_info=True)
+
+        for child in directories:
+            scan(f"{directory}/{child}")
+
+    scan("audio-sessions")
+    logger.info("Nettoyage des fichiers audio orphelins : %s supprimé(s).", deleted)
     return deleted

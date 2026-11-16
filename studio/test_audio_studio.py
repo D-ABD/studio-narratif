@@ -1,11 +1,16 @@
 import json
+import os
 import tempfile
+import time
+from io import StringIO
 from datetime import timedelta
 from pathlib import Path
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.files.base import ContentFile
+from django.core.files.storage import default_storage
+from django.core.management import call_command
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from django.urls import reverse
@@ -99,12 +104,22 @@ class AudioStudioViewTests(TestCase):
     def test_operations_can_be_added_removed_undone_and_reset(self):
         session = self.make_session()
         url = reverse("audio_studio_operations", args=[session.pk])
+        version = session.operations_version
 
         def post(payload):
-            return self.client.post(url, json.dumps(payload), content_type="application/json")
+            nonlocal version
+            response = self.client.post(
+                url,
+                json.dumps({**payload, "operations_version": version}),
+                content_type="application/json",
+            )
+            if response.status_code == 200:
+                version = response.json()["operations_version"]
+            return response
 
         first = post({"action": "add", "operation": {"type": "volume", "params": {"percent": 80}}})
         self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.json()["operations_version"], 1)
         post({"action": "add", "operation": {"type": "fade", "params": {"in": 1, "out": 1}}})
         post({"action": "remove", "index": 0})
         session.refresh_from_db()
@@ -116,6 +131,32 @@ class AudioStudioViewTests(TestCase):
         post({"action": "reset"})
         session.refresh_from_db()
         self.assertEqual(session.operations, [])
+        self.assertEqual(session.operations_version, 6)
+
+    def test_stale_operations_version_returns_409_without_overwriting(self):
+        session = self.make_session()
+        url = reverse("audio_studio_operations", args=[session.pk])
+        first = self.client.post(url, json.dumps({
+            "action": "add",
+            "operations_version": 0,
+            "operation": {"type": "volume", "params": {"percent": 80}},
+        }), content_type="application/json")
+        self.assertEqual(first.status_code, 200)
+
+        stale = self.client.post(url, json.dumps({
+            "action": "add",
+            "operations_version": 0,
+            "operation": {"type": "fade", "params": {"in": 1, "out": 1}},
+        }), content_type="application/json")
+
+        self.assertEqual(stale.status_code, 409)
+        self.assertEqual(
+            stale.json()["error"],
+            "Un autre onglet a modifié les opérations. Recharge la page.",
+        )
+        session.refresh_from_db()
+        self.assertEqual(session.operations, [{"type": "volume", "params": {"percent": 80}}])
+        self.assertEqual(session.operations_version, 1)
 
     @patch("studio.views.apply_audio_operations")
     def test_preview_post_returns_audio_url_and_duration(self, apply_operations):
@@ -212,6 +253,30 @@ class AudioStudioViewTests(TestCase):
         self.assertTrue(track.audio_file.storage.exists(track.audio_file.name))
         self.assertFalse(AudioSession.objects.filter(pk=session.pk).exists())
 
+    @patch("studio.views.probe_audio", return_value=(7.25, 48000))
+    @patch("studio.views.apply_audio_operations")
+    def test_duplicate_save_posts_create_at_most_one_track_and_second_returns_404(
+        self, apply_operations, _probe,
+    ):
+        session = self.make_session()
+
+        def fake_apply(_source, _operations, output_path):
+            output_path.write_bytes(b"preview for double save")
+            return output_path, 7.25
+
+        apply_operations.side_effect = fake_apply
+        preview = self.client.post(reverse("audio_studio_preview", args=[session.pk]))
+        self.assertEqual(preview.status_code, 200)
+        save_url = reverse("audio_studio_save", args=[session.pk])
+        payload = {"name": "Saved once"}
+
+        first = self.client.post(save_url, payload)
+        second = self.client.post(save_url, payload)
+
+        self.assertEqual(first.status_code, 302)
+        self.assertEqual(second.status_code, 404)
+        self.assertEqual(BackgroundTrack.objects.filter(user=self.user, name="Saved once").count(), 1)
+
     def test_save_requires_a_preview_matching_current_operations(self):
         session = self.make_session()
         session.current_preview_file.save("old.m4a", ContentFile(b"old preview"), save=True)
@@ -241,6 +306,10 @@ class AudioStudioViewTests(TestCase):
         response = self.client.get(reverse("audio_studio_edit", args=[session.pk]))
         self.assertContains(response, "Sauvegarder dans la bibliothèque musique")
         self.assertContains(response, "disabled")
+        self.assertContains(response, 'data-operations-version="0"')
+        self.assertContains(response, "data-audio-player-error")
+        app_js = (Path(__file__).parent / "static" / "studio" / "app.js").read_text()
+        self.assertIn("Impossible de lire l’aperçu. Clique à nouveau sur Écouter.", app_js)
         session.operations = [{"type": "volume", "params": {"percent": 80}}]
         session.current_preview_file.save("old.m4a", ContentFile(b"old preview"), save=True)
         response = self.client.get(reverse("audio_studio_edit", args=[session.pk]))
@@ -252,4 +321,31 @@ class AudioStudioViewTests(TestCase):
         response = self.client.get(reverse("audio_studio"))
         self.assertEqual(response.status_code, 200)
         self.assertFalse(AudioSession.objects.filter(pk=expired.pk).exists())
+
+    def test_cleanup_management_command_removes_expired_sessions_and_old_orphans(self):
+        expired = self.make_session(self.user)
+        active = self.make_session()
+        AudioSession.objects.filter(pk=expired.pk).update(updated_at=timezone.now() - timedelta(hours=25))
+        expired_files = [
+            name for name in (expired.source_file.name, expired.current_preview_file.name)
+            if name
+        ]
+        orphan_name = default_storage.save(
+            f"audio-sessions/user_{self.user.pk}/session_999_orphan.m4a",
+            ContentFile(b"orphan"),
+        )
+        orphan_path = Path(default_storage.path(orphan_name))
+        old_epoch = time.time() - timedelta(hours=25).total_seconds()
+        os.utime(orphan_path, (old_epoch, old_epoch))
+        output = StringIO()
+
+        with self.captureOnCommitCallbacks(execute=True):
+            call_command("cleanup_audio_sessions", stdout=output)
+
+        self.assertFalse(AudioSession.objects.filter(pk=expired.pk).exists())
+        self.assertTrue(AudioSession.objects.filter(pk=active.pk).exists())
+        self.assertTrue(all(not default_storage.exists(name) for name in expired_files))
+        self.assertFalse(default_storage.exists(orphan_name))
+        self.assertIn("1 session(s) audio expirée(s) supprimée(s)", output.getvalue())
+        self.assertIn("1 fichier(s) orphelin(s) supprimé(s)", output.getvalue())
 
