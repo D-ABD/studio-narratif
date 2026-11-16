@@ -1,4 +1,5 @@
 import json
+import hashlib
 import logging
 import subprocess
 from copy import deepcopy
@@ -27,11 +28,20 @@ from django.views.decorators.http import require_GET, require_http_methods, requ
 from PIL import Image, UnidentifiedImageError
 
 from .models import (
-    ANIMATION_EFFECTS, ANIMATION_LEVEL_CHOICES, AudioAsset, BackgroundTrack, NarrationProject,
+    ANIMATION_EFFECTS, ANIMATION_LEVEL_CHOICES, AudioAsset, AudioSession, BackgroundTrack, NarrationProject,
     NarrationSegment, StudioBatch, StudioBatchItem, Voice,
     default_animation_settings, legacy_animation_settings,
 )
 from .services import _voice_sample_digest, cache_key_for, hash_file, normalize_voice_sample, srt_text
+from .audio_services import (
+    MAX_OPERATIONS as MAX_AUDIO_OPERATIONS,
+    _delete_audio_session_files,
+    apply_operations as apply_audio_operations,
+    available_effects as available_audio_effects,
+    available_presets as available_audio_presets,
+    cleanup_expired_audio_sessions,
+    probe_audio,
+)
 from .video_services import _probe_clip, validate_assembly_project
 
 logger = logging.getLogger(__name__)
@@ -51,6 +61,7 @@ MAX_IMPORT_BYTES = 500 * 1024 * 1024
 MAX_IMPORT_PIXELS = 100_000_000
 MAX_MUSIC_BYTES = 50 * 1024 * 1024
 MAX_AUDIO_ASSET_BYTES = 100 * 1024 * 1024
+MAX_AUDIO_STUDIO_UPLOAD_BYTES = MAX_AUDIO_ASSET_BYTES
 MAX_STUDIO_BATCH_ITEMS = 20
 MAX_STUDIO_TEXT_CHARS = 12000
 ALLOWED_MUSIC_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg"}
@@ -459,6 +470,257 @@ def musics(request):
         "pagination_params": _pagination_params(request),
         "projects": NarrationProject.objects.filter(user=request.user)[:30],
     })
+
+
+def _audio_studio_signature(operations):
+    payload = json.dumps(operations, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:20]
+
+
+def _audio_studio_preview_is_current(session):
+    if not session.current_preview_file or not session.current_preview_file.name:
+        return False
+    signature = _audio_studio_signature(session.operations or [])
+    return session.current_preview_file.name.endswith(f"_{signature}.m4a")
+
+
+def _audio_studio_editor_url(session, source_name=""):
+    url = reverse("audio_studio_edit", args=[session.pk])
+    return f"{url}?{urlencode({'source_name': source_name})}" if source_name else url
+
+
+@login_required
+def audio_studio(request):
+    try:
+        cleanup_expired_audio_sessions(user=request.user)
+    except Exception:
+        logger.warning("Nettoyage opportuniste des sessions audio échoué pour l’utilisateur %s.", request.user.pk, exc_info=True)
+    return render(request, "studio/audio_studio.html", {
+        "background_tracks": BackgroundTrack.objects.filter(user=request.user).order_by("name", "id"),
+        "audio_assets": AudioAsset.objects.filter(user=request.user).order_by("-created_at", "-id"),
+        "audio_sessions": AudioSession.objects.filter(user=request.user).order_by("-updated_at", "-id"),
+        "projects": NarrationProject.objects.filter(user=request.user)[:30],
+        "max_audio_studio_upload_mb": MAX_AUDIO_STUDIO_UPLOAD_BYTES // (1024 * 1024),
+    })
+
+
+@login_required
+@require_POST
+def create_audio_studio_session(request):
+    source_kind = request.POST.get("source_kind")
+    source_name = ""
+    session = AudioSession(user=request.user, source_kind=source_kind or "")
+    if source_kind == AudioSession.SourceKind.UPLOAD:
+        upload = request.FILES.get("audio_file")
+        if not upload or upload.size <= 0:
+            messages.error(request, "Sélectionne un fichier audio.")
+            return redirect("audio_studio")
+        if upload.size > MAX_AUDIO_STUDIO_UPLOAD_BYTES:
+            messages.error(request, "Le fichier dépasse la limite de 100 Mo.")
+            return redirect("audio_studio")
+        if Path(upload.name).suffix.lower() not in ALLOWED_AUDIO_ASSET_EXTENSIONS:
+            messages.error(request, "Formats acceptés : MP3, WAV, M4A et OGG.")
+            return redirect("audio_studio")
+        source_name = Path(upload.name).stem.strip() or "Audio importé"
+        source_filename = Path(upload.name).name
+        source_file = upload
+    elif source_kind == AudioSession.SourceKind.FROM_MUSIC:
+        track_id = request.POST.get("source_id")
+        track = get_object_or_404(BackgroundTrack, pk=track_id, user=request.user)
+        if not track.audio_file:
+            messages.error(request, "Le fichier de cette musique est introuvable.")
+            return redirect("audio_studio")
+        source_name = track.name
+        source_filename = f"{source_name}{Path(track.audio_file.name).suffix.lower()}"
+        source_file = track.audio_file
+    elif source_kind == AudioSession.SourceKind.FROM_AUDIO:
+        asset_id = request.POST.get("source_id")
+        asset = get_object_or_404(AudioAsset, pk=asset_id, user=request.user)
+        if not asset.audio_file:
+            messages.error(request, "Le fichier de cet audio est introuvable.")
+            return redirect("audio_studio")
+        source_name = asset.name
+        source_filename = f"{source_name}{Path(asset.audio_file.name).suffix.lower()}"
+        source_file = asset.audio_file
+    else:
+        return HttpResponseBadRequest("Source audio invalide.")
+
+    try:
+        if source_kind == AudioSession.SourceKind.UPLOAD:
+            session.source_file.save(source_filename, source_file, save=False)
+        else:
+            with source_file.open("rb") as stream:
+                session.source_file.save(source_filename, File(stream), save=False)
+        session.save()
+    except Exception:
+        if session.source_file and session.source_file.name:
+            session.source_file.storage.delete(session.source_file.name)
+        logger.exception("Création de session audio impossible pour l’utilisateur %s.", request.user.pk)
+        messages.error(request, "Impossible de préparer ce fichier audio.")
+        return redirect("audio_studio")
+    return redirect(_audio_studio_editor_url(session, source_name))
+
+
+@login_required
+def audio_studio_edit(request, session_id):
+    session = get_object_or_404(AudioSession, pk=session_id, user=request.user)
+    source_name = (request.GET.get("source_name") or Path(session.source_file.name).stem).strip()
+    preview_exists = bool(
+        session.current_preview_file and session.current_preview_file.name
+        and session.current_preview_file.storage.exists(session.current_preview_file.name)
+    )
+    return render(request, "studio/audio_studio_editor.html", {
+        "session": session,
+        "source_name": source_name,
+        "default_track_name": f"Édition de {source_name}"[:120],
+        "preview_exists": preview_exists,
+        "preview_is_current": preview_exists and _audio_studio_preview_is_current(session),
+        "effects": available_audio_effects(),
+        "presets": available_audio_presets(),
+        "projects": NarrationProject.objects.filter(user=request.user)[:30],
+    })
+
+
+@login_required
+@require_POST
+def audio_studio_operations(request, session_id):
+    session = get_object_or_404(AudioSession, pk=session_id, user=request.user)
+    try:
+        payload = json.loads(request.body or b"{}")
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return JsonResponse({"error": "Requête audio invalide."}, status=400)
+    if not isinstance(payload, dict):
+        return JsonResponse({"error": "Requête audio invalide."}, status=400)
+
+    operations = list(session.operations or [])
+    action = payload.get("action")
+    if action == "add":
+        operation = payload.get("operation")
+        if (not isinstance(operation, dict) or set(operation) != {"type", "params"}
+                or operation.get("type") not in {"trim", "fade", "volume", "effect", "preset"}
+                or not isinstance(operation.get("params"), dict)):
+            return JsonResponse({"error": "Opération audio invalide."}, status=400)
+        if len(operations) >= MAX_AUDIO_OPERATIONS:
+            return JsonResponse({"error": f"Limite de {MAX_AUDIO_OPERATIONS} opérations atteinte."}, status=400)
+        operations.append(operation)
+    elif action == "remove":
+        try:
+            index = int(payload.get("index"))
+            if index < 0:
+                raise ValueError
+            operations.pop(index)
+        except (TypeError, ValueError, IndexError):
+            return JsonResponse({"error": "Opération introuvable."}, status=400)
+    elif action == "undo":
+        if operations:
+            operations.pop()
+    elif action == "reset":
+        operations = []
+    else:
+        return JsonResponse({"error": "Action audio inconnue."}, status=400)
+
+    session.operations = operations
+    session.save(update_fields=["operations", "updated_at"])
+    preview_exists = bool(session.current_preview_file and session.current_preview_file.name)
+    return JsonResponse({
+        "operations": operations,
+        "has_preview": preview_exists,
+        "preview_valid": preview_exists and _audio_studio_preview_is_current(session),
+    })
+
+
+@login_required
+@require_POST
+def audio_studio_preview(request, session_id):
+    session = get_object_or_404(AudioSession, pk=session_id, user=request.user)
+    if not session.source_file or not session.source_file.name:
+        return JsonResponse({"error": "Le fichier source est introuvable."}, status=400)
+    operations = session.operations or []
+    signature = _audio_studio_signature(operations)
+    try:
+        with tempfile.TemporaryDirectory(prefix="petit-studio-audio-preview-") as folder:
+            output_path = Path(folder) / "preview.m4a"
+            _result_path, duration = apply_audio_operations(session.source_file.path, operations, output_path)
+            storage = session.current_preview_file.storage
+            target_name = f"audio-sessions/user_{request.user.pk}/{uuid.uuid4().hex}_{signature}.m4a"
+            with output_path.open("rb") as stream:
+                stored_name = storage.save(target_name, File(stream))
+
+        try:
+            with transaction.atomic():
+                current = get_object_or_404(
+                    AudioSession.objects.select_for_update(), pk=session_id, user=request.user,
+                )
+                if _audio_studio_signature(current.operations or []) != signature:
+                    storage.delete(stored_name)
+                    return JsonResponse({"error": "Les opérations ont changé pendant l’aperçu. Relance le rendu."}, status=409)
+                old_name = current.current_preview_file.name
+                current.current_preview_file.name = stored_name
+                current.save(update_fields=["current_preview_file", "updated_at"])
+                session = current
+                if old_name and old_name != stored_name:
+                    def delete_old_preview():
+                        try:
+                            storage.delete(old_name)
+                        except Exception:
+                            logger.warning("Nettoyage de l’ancien aperçu audio échoué pour la session %s.", session_id, exc_info=True)
+                    transaction.on_commit(delete_old_preview)
+        except Exception:
+            storage.delete(stored_name)
+            raise
+        return JsonResponse({"url": session.current_preview_file.url, "duration": duration})
+    except (OSError, ValueError, RuntimeError, TimeoutError, subprocess.SubprocessError) as exc:
+        logger.warning("Aperçu audio échoué pour la session %s : %s", session_id, exc)
+        return JsonResponse({"error": f"Traitement audio échoué : {exc}"}, status=400)
+
+
+@login_required
+@require_POST
+def audio_studio_save(request, session_id):
+    name = (request.POST.get("name") or "").strip()
+    session = get_object_or_404(AudioSession, pk=session_id, user=request.user)
+    if not name:
+        messages.error(request, "Le nom de la musique est obligatoire.")
+        return redirect(_audio_studio_editor_url(session, request.POST.get("source_name", "")))
+    if len(name) > 120:
+        messages.error(request, "Le nom ne peut pas dépasser 120 caractères.")
+        return redirect(_audio_studio_editor_url(session, request.POST.get("source_name", "")))
+    if not _audio_studio_preview_is_current(session):
+        messages.error(request, "Les opérations ont changé depuis le dernier aperçu. Clique à nouveau sur Écouter pour valider.")
+        return redirect(_audio_studio_editor_url(session, request.POST.get("source_name", "")))
+    if not session.current_preview_file.storage.exists(session.current_preview_file.name):
+        messages.error(request, "Le fichier d’aperçu est introuvable. Relance l’aperçu.")
+        return redirect(_audio_studio_editor_url(session, request.POST.get("source_name", "")))
+
+    track = BackgroundTrack(user=request.user, name=name, duration=0)
+    created_file = None
+    try:
+        with transaction.atomic():
+            session = get_object_or_404(
+                AudioSession.objects.select_for_update(), pk=session_id, user=request.user,
+            )
+            if not _audio_studio_preview_is_current(session):
+                messages.error(request, "Les opérations ont changé depuis le dernier aperçu. Clique à nouveau sur Écouter pour valider.")
+                return redirect(_audio_studio_editor_url(session, request.POST.get("source_name", "")))
+            duration, _sample_rate = probe_audio(session.current_preview_file.path)
+            track.duration = duration
+            with session.current_preview_file.open("rb") as stream:
+                track.audio_file.save(f"{name}.m4a", File(stream), save=False)
+            created_file = (track.audio_file.storage, track.audio_file.name)
+            track.save()
+            _delete_audio_session_files(session)
+            session.delete()
+    except Exception:
+        if created_file:
+            try:
+                created_file[0].delete(created_file[1])
+            except Exception:
+                logger.warning("Nettoyage du fichier musique échoué après erreur de sauvegarde.", exc_info=True)
+        logger.exception("Sauvegarde de la session audio %s échouée.", session_id)
+        messages.error(request, "Impossible de sauvegarder cette musique. La session est conservée.")
+        return redirect(_audio_studio_editor_url(session, request.POST.get("source_name", "")))
+    messages.success(request, f"Musique ajoutée : {track.name}")
+    return redirect("musics")
 
 
 def _studio_page_context(request, *, texts=None, selected_voice_id="", name_prefix="", studio_page=None, per_page=20):

@@ -1,0 +1,78 @@
+{% extends "studio/base.html" %}
+{% block title %}Édition audio · Petit Studio{% endblock %}
+{% block heading %}Éditeur audio{% endblock %}
+{% block content %}
+<style>
+  .audio-editor-page { display:grid; gap:16px; max-width:1000px; margin:0 auto; }
+  .audio-editor-player { width:min(100%,620px); }
+  .audio-editor-controls { display:flex; flex-wrap:wrap; gap:8px; }
+  .audio-operation-list { display:flex; flex-wrap:wrap; gap:8px; margin:12px 0; }
+  .audio-operation-chip { display:flex; align-items:center; gap:8px; padding:7px 10px; border:1px solid #344052; border-radius:999px; background:#10141C; color:#DDE2EA; font-size:11px; }
+  .audio-operation-chip button { border:0; color:#F59E0B; background:transparent; cursor:pointer; font-size:15px; }
+  .audio-operation-dialog { width:min(480px,calc(100vw - 28px)); border:1px solid #394455; border-radius:16px; color:#E7EAF0; background:#151A22; }
+  .audio-operation-dialog::backdrop { background:#07090dcc; }
+  .audio-operation-dialog form { display:grid; gap:12px; }
+  .audio-operation-dialog label { display:grid; gap:5px; color:#A8B1BF; font-size:11px; }
+  .audio-operation-dialog input,.audio-operation-dialog select,.audio-editor-name { width:100%; min-height:39px; padding:9px 11px; border:1px solid #2B3442; border-radius:9px; color:#E7EAF0; background:#10141C; }
+  .audio-operation-dialog-actions { display:flex; justify-content:flex-end; gap:8px; margin-top:8px; }
+  .audio-editor-warning { color:#FBBF24; font-size:12px; }
+  .audio-editor-error { color:#FCA5A5; font-size:12px; }
+  .audio-editor-status { color:#A8B1BF; font-size:11px; }
+  .audio-editor-save { display:grid; gap:10px; max-width:540px; }
+  .audio-editor-spinner { display:inline-block; width:13px; height:13px; margin-right:7px; border:2px solid currentColor; border-right-color:transparent; border-radius:50%; animation:audio-spin .7s linear infinite; vertical-align:-2px; }
+  @keyframes audio-spin { to { transform:rotate(360deg); } }
+</style>
+<div class="audio-editor-page" data-audio-studio-editor
+  data-operations-url="{% url 'audio_studio_operations' session.id %}"
+  data-preview-url="{% url 'audio_studio_preview' session.id %}"
+  data-preview-valid="{{ preview_is_current|yesno:'true,false' }}"
+  data-has-preview="{{ preview_exists|yesno:'true,false' }}">
+  <section class="card">
+    <div class="section-title"><div><span class="step-number">1</span><h2>Source audio</h2></div><span class="muted small">{{ source_name }}</span></div>
+    {% if preview_exists %}<audio class="audio-editor-player" id="audioStudioPreviewPlayer" controls preload="metadata" src="{{ session.current_preview_file.url }}"></audio><p class="audio-editor-status" data-audio-preview-placeholder hidden></p>
+    {% else %}<audio class="audio-editor-player" id="audioStudioPreviewPlayer" controls preload="none" hidden></audio><p class="audio-editor-status" data-audio-preview-placeholder>Pas encore d’aperçu. Clique sur « Écouter l’aperçu » après avoir choisi tes opérations.</p>{% endif %}
+    <p class="audio-editor-status" data-audio-preview-duration>{% if preview_exists %}Aperçu prêt{% else %}Le fichier source reste inchangé.{% endif %}</p>
+  </section>
+  <section class="card">
+    <div class="section-title"><div><span class="step-number">2</span><h2>Opérations</h2></div></div>
+    <p class="muted">Les opérations sont appliquées dans l’ordre prévu par le moteur audio. Ajoute-les, puis lance explicitement l’aperçu.</p>
+    <div class="audio-operation-list" data-audio-operation-list aria-live="polite"></div>
+    {{ session.operations|json_script:"audioStudioOperationsData" }}
+    <div class="audio-editor-controls">
+      <button class="button button-secondary button-small" type="button" data-operation-open="trim" data-operation-control>Ajouter trim</button>
+      <button class="button button-secondary button-small" type="button" data-operation-open="fade" data-operation-control>Ajouter fade</button>
+      <button class="button button-secondary button-small" type="button" data-operation-open="volume" data-operation-control>Ajouter volume</button>
+      {% if effects %}<button class="button button-secondary button-small" type="button" data-operation-open="effect" data-operation-control>Ajouter effet</button>{% else %}<button class="button button-secondary button-small" type="button" disabled>Effets indisponibles avec ce FFmpeg</button>{% endif %}
+      {% if presets %}<button class="button button-secondary button-small" type="button" data-operation-open="preset" data-operation-control>Ajouter preset</button>{% else %}<button class="button button-secondary button-small" type="button" disabled>Presets indisponibles avec ce FFmpeg</button>{% endif %}
+      <button class="button button-secondary button-small" type="button" data-operation-action="undo" data-operation-control>Annuler la dernière opération</button>
+      <button class="button button-secondary button-small" type="button" data-operation-action="reset" data-operation-control>Réinitialiser</button>
+    </div>
+    <button class="button button-primary" type="button" data-audio-preview>Écouter l’aperçu</button>
+    <p class="audio-editor-status" data-audio-preview-busy hidden><span class="audio-editor-spinner" aria-hidden="true"></span>Traitement en cours… (peut prendre jusqu’à 45 s pour un fichier long)</p>
+    <p class="audio-editor-error" data-audio-editor-error role="alert" hidden></p>
+    <p class="audio-editor-warning" data-audio-preview-warning {% if not preview_exists or preview_is_current %}hidden{% endif %}>Les opérations ont changé depuis le dernier aperçu. Clique à nouveau sur Écouter pour valider.</p>
+  </section>
+  <section class="card">
+    <div class="section-title"><div><span class="step-number">3</span><h2>Sauvegarder dans la bibliothèque musique</h2></div></div>
+    <form class="audio-editor-save" method="post" action="{% url 'audio_studio_save' session.id %}">
+      {% csrf_token %}<input type="hidden" name="source_name" value="{{ source_name }}">
+      <label for="audioStudioTrackName">Nom de la musique</label>
+      <input class="audio-editor-name" id="audioStudioTrackName" type="text" name="name" maxlength="120" value="{{ default_track_name }}" required>
+      <button class="button button-primary" type="submit" data-audio-save {% if not preview_is_current %}disabled{% endif %}>Sauvegarder dans la bibliothèque musique</button>
+    </form>
+  </section>
+  <a class="text-link" href="{% url 'audio_studio' %}">← Choisir une autre source</a>
+</div>
+
+<dialog class="audio-operation-dialog" data-audio-operation-dialog>
+  <form data-audio-operation-form>
+    <h2 data-operation-dialog-title>Ajouter une opération</h2>
+    <div data-operation-fields="trim" hidden><label>Début (secondes)<input type="number" name="trim_start" min="0" step="0.01" value="0"></label><label>Fin (secondes)<input type="number" name="trim_end" min="0" step="0.01" value="10"></label></div>
+    <div data-operation-fields="fade" hidden><label>Fondu d’entrée (secondes)<input type="number" name="fade_in" min="0" step="0.1" value="1"></label><label>Fondu de sortie (secondes)<input type="number" name="fade_out" min="0" step="0.1" value="1"></label></div>
+    <div data-operation-fields="volume" hidden><label>Volume (%)<input type="number" name="volume_percent" min="0" max="200" step="1" value="100"></label></div>
+    <div data-operation-fields="effect" hidden><label>Effet<select name="effect_name">{% for key,label in effects %}<option value="{{ key }}">{{ label }}</option>{% endfor %}</select></label><label data-audio-direction-field>Direction<select name="effect_direction"><option value="up">Plus / plus rapide</option><option value="down">Moins / plus lent</option></select></label></div>
+    <div data-operation-fields="preset" hidden><label>Preset<select name="preset_name">{% for key,label in presets %}<option value="{{ key }}">{{ label }}</option>{% endfor %}</select></label></div>
+    <div class="audio-operation-dialog-actions"><button class="button button-secondary button-small" type="button" data-operation-dialog-close>Annuler</button><button class="button button-primary button-small" type="submit">Ajouter</button></div>
+  </form>
+</dialog>
+{% endblock %}

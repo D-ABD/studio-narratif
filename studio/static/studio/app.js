@@ -743,3 +743,197 @@
     console.error('Erreur pendant l’initialisation de app.js', error);
   }
 })();
+
+(() => {
+  const editor = document.querySelector('[data-audio-studio-editor]');
+  if (!editor) return;
+
+  try {
+    const operationUrl = editor.dataset.operationsUrl;
+    const previewUrl = editor.dataset.previewUrl;
+    const csrf = document.querySelector('[name=csrfmiddlewaretoken]')?.value || '';
+    const operationList = editor.querySelector('[data-audio-operation-list]');
+    const operationData = document.getElementById('audioStudioOperationsData');
+    const previewButton = editor.querySelector('[data-audio-preview]');
+    const previewPlayer = editor.querySelector('#audioStudioPreviewPlayer');
+    const previewPlaceholder = editor.querySelector('[data-audio-preview-placeholder]');
+    const previewDuration = editor.querySelector('[data-audio-preview-duration]');
+    const busyMessage = editor.querySelector('[data-audio-preview-busy]');
+    const errorMessage = editor.querySelector('[data-audio-editor-error]');
+    const warningMessage = editor.querySelector('[data-audio-preview-warning]');
+    const saveButton = editor.querySelector('[data-audio-save]');
+    const dialog = document.querySelector('[data-audio-operation-dialog]');
+    const dialogForm = dialog?.querySelector('[data-audio-operation-form]');
+    const dialogTitle = dialog?.querySelector('[data-operation-dialog-title]');
+    const effectSelect = dialog?.querySelector('[name="effect_name"]');
+    const directionField = dialog?.querySelector('[data-audio-direction-field]');
+    const updateDirectionField = () => {
+      if (directionField) directionField.hidden = !['tempo', 'pitch'].includes(effectSelect?.value);
+    };
+    effectSelect?.addEventListener('change', updateDirectionField);
+    let operations = [];
+    try { operations = JSON.parse(operationData?.textContent || '[]'); } catch (_) {}
+    let working = false;
+    let hasPreview = editor.dataset.hasPreview === 'true';
+    let previewValid = editor.dataset.previewValid === 'true';
+
+    const labelFor = operation => {
+      const params = operation.params || {};
+      if (operation.type === 'trim') return `Trim · ${params.start}s → ${params.end}s`;
+      if (operation.type === 'fade') return `Fade · entrée ${params.in}s / sortie ${params.out}s`;
+      if (operation.type === 'volume') return `Volume · ${params.percent}%`;
+      if (operation.type === 'effect') {
+        const select = dialog?.querySelector('[name="effect_name"]');
+        const label = select?.querySelector(`option[value="${CSS.escape(params.name || '')}"]`)?.textContent || params.name;
+        return ['tempo', 'pitch'].includes(params.name) ? `${label} · ${params.direction}` : label;
+      }
+      if (operation.type === 'preset') {
+        const select = dialog?.querySelector('[name="preset_name"]');
+        return select?.querySelector(`option[value="${CSS.escape(params.name || '')}"]`)?.textContent || params.name;
+      }
+      return 'Opération audio';
+    };
+
+    const updateFreshness = () => {
+      editor.dataset.hasPreview = String(hasPreview);
+      editor.dataset.previewValid = String(previewValid);
+      if (saveButton) saveButton.disabled = working || !previewValid;
+      if (warningMessage) warningMessage.hidden = !hasPreview || previewValid;
+    };
+
+    const setWorking = (value, previewing = false) => {
+      working = value;
+      editor.querySelectorAll('[data-operation-control]').forEach(button => { button.disabled = value; });
+      if (previewButton) {
+        previewButton.disabled = value;
+        previewButton.innerHTML = value && previewing
+          ? '<span class="audio-editor-spinner" aria-hidden="true"></span>Traitement en cours… (peut prendre jusqu’à 45 s pour un fichier long)'
+          : 'Écouter l’aperçu';
+      }
+      editor.querySelectorAll('[data-remove-operation]').forEach(button => { button.disabled = value; });
+      if (busyMessage) busyMessage.hidden = !value || !previewing;
+      updateFreshness();
+    };
+
+    const renderOperations = () => {
+      if (!operationList) return;
+      operationList.replaceChildren();
+      operations.forEach((operation, index) => {
+        const chip = document.createElement('span');
+        chip.className = 'audio-operation-chip';
+        const label = document.createElement('span');
+        label.textContent = labelFor(operation);
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.textContent = '×';
+        remove.setAttribute('aria-label', `Supprimer ${label.textContent}`);
+        remove.dataset.removeOperation = String(index);
+        remove.disabled = working;
+        chip.append(label, remove);
+        operationList.append(chip);
+      });
+      updateFreshness();
+    };
+
+    const postJson = async (url, payload) => {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json', 'X-CSRFToken': csrf},
+        body: JSON.stringify(payload),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'La demande audio a échoué.');
+      return data;
+    };
+
+    const applyOperationState = data => {
+      operations = data.operations || [];
+      hasPreview = Boolean(data.has_preview);
+      previewValid = Boolean(data.preview_valid);
+      if (errorMessage) errorMessage.hidden = true;
+      renderOperations();
+    };
+
+    const showError = error => {
+      if (!errorMessage) return;
+      errorMessage.textContent = error?.message || 'Le traitement audio a échoué.';
+      errorMessage.hidden = false;
+    };
+
+    const mutate = async payload => {
+      if (working) return;
+      setWorking(true, true);
+      try { applyOperationState(await postJson(operationUrl, payload)); }
+      catch (error) { showError(error); }
+      finally { setWorking(false); renderOperations(); }
+    };
+
+    document.querySelectorAll('[data-operation-open]').forEach(button => {
+      button.addEventListener('click', () => {
+        if (!dialog || !dialogForm || working) return;
+        const type = button.dataset.operationOpen;
+        dialogForm.dataset.operationType = type;
+        if (dialogTitle) dialogTitle.textContent = `Ajouter ${type === 'preset' ? 'un preset' : type}`;
+        dialog.querySelectorAll('[data-operation-fields]').forEach(section => {
+          section.hidden = section.dataset.operationFields !== type;
+        });
+        updateDirectionField();
+        dialog.showModal?.();
+      });
+    });
+
+    dialog?.querySelector('[data-operation-dialog-close]')?.addEventListener('click', () => dialog.close());
+    dialogForm?.addEventListener('submit', async event => {
+      event.preventDefault();
+      const values = new FormData(dialogForm);
+      const type = dialogForm.dataset.operationType;
+      let params = {};
+      if (type === 'trim') params = {start: Number(values.get('trim_start')), end: Number(values.get('trim_end'))};
+      if (type === 'fade') params = {in: Number(values.get('fade_in')), out: Number(values.get('fade_out'))};
+      if (type === 'volume') params = {percent: Number(values.get('volume_percent'))};
+      if (type === 'effect') {
+        const name = values.get('effect_name');
+        params = ['tempo', 'pitch'].includes(name) ? {name, direction: values.get('effect_direction')} : {name};
+      }
+      if (type === 'preset') params = {name: values.get('preset_name')};
+      dialog.close();
+      await mutate({action: 'add', operation: {type, params}});
+    });
+
+    operationList?.addEventListener('click', event => {
+      const remove = event.target.closest('[data-remove-operation]');
+      if (remove) mutate({action: 'remove', index: Number(remove.dataset.removeOperation)});
+    });
+    editor.querySelectorAll('[data-operation-action]').forEach(button => {
+      button.addEventListener('click', () => mutate({action: button.dataset.operationAction}));
+    });
+
+    previewButton?.addEventListener('click', async () => {
+      if (working) return;
+      if (errorMessage) errorMessage.hidden = true;
+      setWorking(true);
+      try {
+        const data = await postJson(previewUrl, {});
+        if (previewPlayer) {
+          previewPlayer.src = `${data.url}${data.url.includes('?') ? '&' : '?'}_=${Date.now()}`;
+          previewPlayer.hidden = false;
+          previewPlayer.load();
+        }
+        if (previewPlaceholder) previewPlaceholder.hidden = true;
+        if (previewDuration) previewDuration.textContent = `Aperçu prêt · ${Number(data.duration).toFixed(2)} s`;
+        hasPreview = true;
+        previewValid = true;
+      } catch (error) {
+        showError(error);
+      } finally {
+        setWorking(false);
+        renderOperations();
+      }
+    });
+
+    renderOperations();
+    updateFreshness();
+  } catch (error) {
+    console.error('Erreur pendant l’initialisation du studio audio', error);
+  }
+})();
