@@ -865,6 +865,18 @@
       const params = operationOf('fade')?.params || {};
       return {in: Math.max(0, Number(params.in) || 0), out: Math.max(0, Number(params.out) || 0)};
     };
+    const emitSamplerState = boundsOverride => {
+      if (!waveSurfer || !waveDuration) return;
+      const bounds = boundsOverride || trimBounds();
+      window.dispatchEvent(new CustomEvent('audio-studio:waveform-state', {
+        detail: {
+          buffer: waveSurfer.getDecodedData(),
+          duration: waveDuration,
+          start: Math.max(0, Math.min(Number(bounds.start) || 0, waveDuration)),
+          end: Math.max(0, Math.min(Number(bounds.end) || waveDuration, waveDuration)),
+        },
+      }));
+    };
     const formatWaveTime = seconds => {
       const value = Math.max(0, Math.floor(seconds || 0));
       return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, '0')}`;
@@ -913,6 +925,7 @@
         });
       }
       drawFadeHandles();
+      emitSamplerState(bounds);
     };
     const restoreWaveformState = () => {
       syncRegionFromOperations();
@@ -1000,6 +1013,7 @@
         if (waveform) waveform.hidden = true;
         if (waveformError) waveformError.hidden = false;
         if (waveformFallback) waveformFallback.hidden = false;
+        window.dispatchEvent(new CustomEvent('audio-studio:waveform-state', {detail: {buffer: null, duration: 0, start: 0, end: 0}}));
         return;
       }
       waveform.hidden = false;
@@ -1041,10 +1055,12 @@
           if (waveformToolbar) waveformToolbar.hidden = true;
           if (waveformError) waveformError.hidden = false;
           if (waveformFallback) waveformFallback.hidden = false;
+          window.dispatchEvent(new CustomEvent('audio-studio:waveform-state', {detail: {buffer: null, duration: 0, start: 0, end: 0}}));
         });
         regions.on('region-updated', region => {
           if (region !== trimRegion || working) return;
           pendingTrim = {start: region.start, end: region.end};
+          emitSamplerState(pendingTrim);
           pendingRegionFlush = true;
           flushPendingTrim();
         });
@@ -1057,6 +1073,7 @@
         if (waveform) waveform.hidden = true;
         if (waveformError) waveformError.hidden = false;
         if (waveformFallback) waveformFallback.hidden = false;
+        window.dispatchEvent(new CustomEvent('audio-studio:waveform-state', {detail: {buffer: null, duration: 0, start: 0, end: 0}}));
       }
     };
 
@@ -1112,7 +1129,10 @@
     const mutate = async payload => {
       if (working) return;
       setWorking(true);
-      try { applyOperationState(await postJson(operationUrl, payload)); }
+      try {
+        applyOperationState(await postJson(operationUrl, payload));
+        restoreWaveformState();
+      }
       catch (error) { showError(error); }
       finally { setWorking(false); renderOperations(); }
     };

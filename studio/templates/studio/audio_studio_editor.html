@@ -31,6 +31,11 @@
   data-has-preview="{{ preview_exists|yesno:'true,false' }}">
   <section class="card">
     <div class="section-title"><div><span class="step-number">1</span><h2>Source audio</h2></div><span class="muted small">{{ source_name }}</span></div>
+    <div class="sampler-mode-toggle" role="tablist" aria-label="Mode d’écoute">
+      <button class="sampler-mode-button is-active" type="button" role="tab" aria-selected="true" aria-controls="samplerWaveformPanel" id="samplerWaveformTab" data-sampler-mode="waveform">Mode Waveform</button>
+      <button class="sampler-mode-button" type="button" role="tab" aria-selected="false" aria-controls="samplerPadsPanel" id="samplerPadsTab" data-sampler-mode="pads">Mode Pads</button>
+    </div>
+    <div id="samplerWaveformPanel" data-sampler-panel="waveform" role="tabpanel" aria-labelledby="samplerWaveformTab">
     <div class="audio-waveform-shell" data-audio-waveform-shell>
       <p class="audio-editor-status" data-waveform-loading role="status"><span class="audio-editor-spinner" aria-hidden="true"></span>Chargement de la forme d’onde…</p>
       <div class="audio-waveform" id="audioSourceWaveform" data-audio-waveform aria-label="Forme d’onde du fichier source" hidden>
@@ -52,6 +57,32 @@
         <button class="button button-secondary button-small" type="button" data-waveform-play aria-label="Lire le fichier source">▶ Lecture source</button>
         <span class="audio-editor-status" data-waveform-time>0:00 / 0:00</span>
       </div>
+    </div>
+    </div>
+    <div id="samplerPadsPanel" class="sampler-pads-panel" data-sampler-panel="pads" role="tabpanel" aria-labelledby="samplerPadsTab" hidden>
+      <div class="sampler-pads-heading">
+        <div><h3>Sampler · 16 pads</h3><p class="audio-editor-status">Découpage égal de la zone Trim. Clique un pad ou utilise la touche indiquée.</p></div>
+        <span class="sampler-audio-state" data-sampler-audio-state role="status">Chargement du son…</span>
+      </div>
+      <div class="sampler-pad-grid" data-sampler-grid role="group" aria-label="Grille de 16 pads du sampler">
+        <button type="button" class="sampler-pad" data-sampler-pad="0" data-sampler-key="A" disabled><span class="sampler-pad-number">01</span><span class="sampler-pad-key">A</span><span class="sampler-pad-duration" data-sampler-duration>—</span></button>
+        <button type="button" class="sampler-pad" data-sampler-pad="1" data-sampler-key="Z" disabled><span class="sampler-pad-number">02</span><span class="sampler-pad-key">Z</span><span class="sampler-pad-duration" data-sampler-duration>—</span></button>
+        <button type="button" class="sampler-pad" data-sampler-pad="2" data-sampler-key="E" disabled><span class="sampler-pad-number">03</span><span class="sampler-pad-key">E</span><span class="sampler-pad-duration" data-sampler-duration>—</span></button>
+        <button type="button" class="sampler-pad" data-sampler-pad="3" data-sampler-key="R" disabled><span class="sampler-pad-number">04</span><span class="sampler-pad-key">R</span><span class="sampler-pad-duration" data-sampler-duration>—</span></button>
+        <button type="button" class="sampler-pad" data-sampler-pad="4" data-sampler-key="Q" disabled><span class="sampler-pad-number">05</span><span class="sampler-pad-key">Q</span><span class="sampler-pad-duration" data-sampler-duration>—</span></button>
+        <button type="button" class="sampler-pad" data-sampler-pad="5" data-sampler-key="S" disabled><span class="sampler-pad-number">06</span><span class="sampler-pad-key">S</span><span class="sampler-pad-duration" data-sampler-duration>—</span></button>
+        <button type="button" class="sampler-pad" data-sampler-pad="6" data-sampler-key="D" disabled><span class="sampler-pad-number">07</span><span class="sampler-pad-key">D</span><span class="sampler-pad-duration" data-sampler-duration>—</span></button>
+        <button type="button" class="sampler-pad" data-sampler-pad="7" data-sampler-key="F" disabled><span class="sampler-pad-number">08</span><span class="sampler-pad-key">F</span><span class="sampler-pad-duration" data-sampler-duration>—</span></button>
+        <button type="button" class="sampler-pad" data-sampler-pad="8" data-sampler-key="W" disabled><span class="sampler-pad-number">09</span><span class="sampler-pad-key">W</span><span class="sampler-pad-duration" data-sampler-duration>—</span></button>
+        <button type="button" class="sampler-pad" data-sampler-pad="9" data-sampler-key="X" disabled><span class="sampler-pad-number">10</span><span class="sampler-pad-key">X</span><span class="sampler-pad-duration" data-sampler-duration>—</span></button>
+        <button type="button" class="sampler-pad" data-sampler-pad="10" data-sampler-key="C" disabled><span class="sampler-pad-number">11</span><span class="sampler-pad-key">C</span><span class="sampler-pad-duration" data-sampler-duration>—</span></button>
+        <button type="button" class="sampler-pad" data-sampler-pad="11" data-sampler-key="V" disabled><span class="sampler-pad-number">12</span><span class="sampler-pad-key">V</span><span class="sampler-pad-duration" data-sampler-duration>—</span></button>
+        <button type="button" class="sampler-pad" data-sampler-pad="12" data-sampler-code="Digit1" data-sampler-key="1" disabled><span class="sampler-pad-number">13</span><span class="sampler-pad-key">1</span><span class="sampler-pad-duration" data-sampler-duration>—</span></button>
+        <button type="button" class="sampler-pad" data-sampler-pad="13" data-sampler-code="Digit2" data-sampler-key="2" disabled><span class="sampler-pad-number">14</span><span class="sampler-pad-key">2</span><span class="sampler-pad-duration" data-sampler-duration>—</span></button>
+        <button type="button" class="sampler-pad" data-sampler-pad="14" data-sampler-code="Digit3" data-sampler-key="3" disabled><span class="sampler-pad-number">15</span><span class="sampler-pad-key">3</span><span class="sampler-pad-duration" data-sampler-duration>—</span></button>
+        <button type="button" class="sampler-pad" data-sampler-pad="15" data-sampler-code="Digit4" data-sampler-key="4" disabled><span class="sampler-pad-number">16</span><span class="sampler-pad-key">4</span><span class="sampler-pad-duration" data-sampler-duration>—</span></button>
+      </div>
+      <p class="audio-editor-status">Sur Safari, le premier clic sur un pad active aussi le son. Les pads peuvent se superposer.</p>
     </div>
     {% if preview_exists %}<audio class="audio-editor-player" id="audioStudioPreviewPlayer" controls preload="metadata" src="{{ session.current_preview_file.url }}"></audio><p class="audio-editor-status" data-audio-preview-placeholder hidden></p>
     {% else %}<audio class="audio-editor-player" id="audioStudioPreviewPlayer" controls preload="none" hidden></audio><p class="audio-editor-status" data-audio-preview-placeholder>{% if preview_missing %}Aperçu expiré, clique à nouveau sur « Écouter » pour le recréer.{% else %}Pas encore d’aperçu. Clique sur « Écouter l’aperçu » après avoir choisi tes opérations.{% endif %}</p>{% endif %}
@@ -99,4 +130,5 @@
 </dialog>
 <script src="{% static 'studio/vendor/wavesurfer.min.js' %}" defer></script>
 <script src="{% static 'studio/vendor/regions.min.js' %}" defer></script>
+<script src="{% static 'studio/sampler.js' %}?v=1" defer></script>
 {% endblock %}
