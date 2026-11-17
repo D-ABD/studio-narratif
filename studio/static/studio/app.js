@@ -756,6 +756,15 @@
     const operationData = document.getElementById('audioStudioOperationsData');
     const previewButton = editor.querySelector('[data-audio-preview]');
     const previewPlayer = editor.querySelector('#audioStudioPreviewPlayer');
+    const waveformShell = editor.querySelector('[data-audio-waveform-shell]');
+    const waveform = editor.querySelector('[data-audio-waveform]');
+    const waveformLoading = editor.querySelector('[data-waveform-loading]');
+    const waveformError = editor.querySelector('[data-waveform-error]');
+    const waveformFallback = editor.querySelector('[data-waveform-fallback]');
+    const waveformToolbar = editor.querySelector('[data-waveform-toolbar]');
+    const waveformTime = editor.querySelector('[data-waveform-time]');
+    const waveformPlay = editor.querySelector('[data-waveform-play]');
+    const fadeHandles = [...editor.querySelectorAll('[data-wave-fade]')];
     const previewPlaceholder = editor.querySelector('[data-audio-preview-placeholder]');
     const previewDuration = editor.querySelector('[data-audio-preview-duration]');
     const busyMessage = editor.querySelector('[data-audio-preview-busy]');
@@ -803,6 +812,7 @@
 
     const setWorking = (value, previewing = false) => {
       working = value;
+      if (waveformShell) waveformShell.dataset.waveBusy = String(value);
       editor.querySelectorAll('[data-operation-control]').forEach(button => { button.disabled = value; });
       if (previewButton) {
         previewButton.disabled = value;
@@ -835,6 +845,80 @@
       updateFreshness();
     };
 
+    let waveSurfer = null;
+    let regions = null;
+    let trimRegion = null;
+    let waveDuration = 0;
+    let visualFadeValues = null;
+    let pendingTrim = null;
+    let pendingRegionFlush = false;
+    const operationOf = type => operations.find(operation => operation.type === type);
+    const trimBounds = () => {
+      const params = operationOf('trim')?.params || {};
+      return {
+        start: Math.max(0, Number(params.start) || 0),
+        end: Math.min(waveDuration, Number(params.end) || waveDuration),
+      };
+    };
+    const fadeValues = () => {
+      if (visualFadeValues) return {...visualFadeValues};
+      const params = operationOf('fade')?.params || {};
+      return {in: Math.max(0, Number(params.in) || 0), out: Math.max(0, Number(params.out) || 0)};
+    };
+    const formatWaveTime = seconds => {
+      const value = Math.max(0, Math.floor(seconds || 0));
+      return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, '0')}`;
+    };
+    const drawFadeHandles = () => {
+      if (!waveDuration || !waveform) return;
+      const bounds = trimBounds();
+      const fades = fadeValues();
+      const positions = {
+        in: Math.min(bounds.end, bounds.start + fades.in),
+        out: Math.max(bounds.start, bounds.end - fades.out),
+      };
+      fadeHandles.forEach(handle => {
+        const kind = handle.dataset.waveFade;
+        const value = kind === 'in' ? Math.max(0, positions.in - bounds.start) : Math.max(0, bounds.end - positions.out);
+        const max = Math.max(0, bounds.end - bounds.start);
+        handle.style.left = `${Math.min(100, Math.max(0, positions[kind] / waveDuration * 100))}%`;
+        handle.setAttribute('aria-valuemax', max.toFixed(2));
+        handle.setAttribute('aria-valuenow', value.toFixed(2));
+        handle.title = `${kind === 'in' ? 'Fondu d’entrée' : 'Fondu de sortie'} · ${value.toFixed(2)} s`;
+      });
+      editor.querySelectorAll('[data-fade-band]').forEach(band => {
+        const kind = band.dataset.fadeBand;
+        const left = kind === 'in' ? bounds.start : positions.out;
+        const width = kind === 'in' ? fades.in : fades.out;
+        band.style.left = `${Math.min(100, Math.max(0, left / waveDuration * 100))}%`;
+        band.style.width = `${Math.min(100, Math.max(0, width / waveDuration * 100))}%`;
+      });
+      if (waveformTime) waveformTime.textContent = `${formatWaveTime(bounds.start)}–${formatWaveTime(bounds.end)} / ${formatWaveTime(waveDuration)} · fondus ${fades.in.toFixed(1)} s / ${fades.out.toFixed(1)} s`;
+    };
+    const syncRegionFromOperations = () => {
+      if (!regions || !waveDuration) return;
+      const bounds = trimBounds();
+      if (trimRegion && !trimRegion.isRemoved) {
+        trimRegion.setOptions({start: bounds.start, end: Math.max(bounds.start + 0.01, bounds.end)});
+      } else {
+        trimRegion = regions.addRegion({
+          start: bounds.start,
+          end: Math.max(bounds.start + 0.01, bounds.end),
+          drag: false,
+          resize: true,
+          content: 'TRIM',
+          color: 'rgba(245, 158, 11, 0.14)',
+          minLength: 0.02,
+          id: 'audio-trim-region',
+        });
+      }
+      drawFadeHandles();
+    };
+    const restoreWaveformState = () => {
+      syncRegionFromOperations();
+      drawFadeHandles();
+    };
+
     const postJson = async (url, payload) => {
       const response = await fetch(url, {
         method: 'POST',
@@ -860,9 +944,174 @@
       errorMessage.hidden = false;
     };
 
+    const replaceOperation = async (type, params) => {
+      if (working) return false;
+      const previous = operations.map(operation => ({type: operation.type, params: {...(operation.params || {})}}));
+      const oldIndex = previous.findIndex(operation => operation.type === type);
+      const oldOperation = oldIndex >= 0 ? previous[oldIndex] : null;
+      let removed = false;
+      visualFadeValues = null;
+      restoreWaveformState();
+      setWorking(true);
+      try {
+        if (oldIndex >= 0) {
+          await postJson(operationUrl, {action: 'remove', index: oldIndex});
+          removed = true;
+        }
+        const data = await postJson(operationUrl, {action: 'add', operation: {type, params}});
+        visualFadeValues = null;
+        applyOperationState(data);
+        restoreWaveformState();
+        return true;
+      } catch (error) {
+        if (removed && oldOperation) {
+          try { await postJson(operationUrl, {action: 'add', operation: oldOperation}); } catch (_) {}
+        }
+        operations = previous;
+        visualFadeValues = null;
+        if (removed) previewValid = false;
+        renderOperations();
+        restoreWaveformState();
+        showError(new Error('Erreur de synchronisation, veuillez réessayer'));
+        window.alert('Erreur de synchronisation, veuillez réessayer');
+        return false;
+      } finally {
+        setWorking(false);
+        renderOperations();
+      }
+    };
+
+    const syncTrim = async (start, end) => {
+      const safeStart = Math.max(0, Math.min(start, waveDuration));
+      const safeEnd = Math.max(safeStart + 0.02, Math.min(end, waveDuration));
+      pendingTrim = null;
+      await replaceOperation('trim', {start: Number(safeStart.toFixed(2)), end: Number(safeEnd.toFixed(2))});
+    };
+    const flushPendingTrim = () => {
+      if (!pendingRegionFlush || !pendingTrim || working) return;
+      pendingRegionFlush = false;
+      const bounds = pendingTrim;
+      syncTrim(bounds.start, bounds.end);
+    };
+
+    const initializeWaveform = () => {
+      if (!waveform || !window.WaveSurfer?.create || !window.WaveSurfer?.Regions?.create) {
+        if (waveformLoading) waveformLoading.hidden = true;
+        if (waveform) waveform.hidden = true;
+        if (waveformError) waveformError.hidden = false;
+        if (waveformFallback) waveformFallback.hidden = false;
+        return;
+      }
+      waveform.hidden = false;
+      try {
+        regions = window.WaveSurfer.Regions.create();
+        waveSurfer = window.WaveSurfer.create({
+          container: waveform,
+          url: editor.dataset.sourceUrl,
+          height: 116,
+          normalize: true,
+          waveColor: '#748196',
+          progressColor: '#F59E0B',
+          cursorColor: '#FFE0A0',
+          cursorWidth: 2,
+          barWidth: 2,
+          barGap: 1,
+          barRadius: 2,
+          plugins: [regions],
+        });
+        waveSurfer.on('ready', duration => {
+          waveDuration = Number(duration) || waveSurfer.getDuration();
+          if (waveformLoading) waveformLoading.hidden = true;
+          if (waveformToolbar) waveformToolbar.hidden = false;
+          if (waveSurfer.getMediaElement()) waveSurfer.getMediaElement().setAttribute('aria-label', 'Lecture du fichier source');
+          syncRegionFromOperations();
+          drawFadeHandles();
+        });
+        waveSurfer.on('timeupdate', time => {
+          if (waveformTime && waveDuration) {
+            const bounds = trimBounds();
+            const fades = fadeValues();
+            waveformTime.textContent = `${formatWaveTime(time)} / ${formatWaveTime(waveDuration)} · trim ${formatWaveTime(bounds.start)}–${formatWaveTime(bounds.end)} · fades ${fades.in.toFixed(1)} s / ${fades.out.toFixed(1)} s`;
+          }
+        });
+        waveSurfer.on('error', error => {
+          console.warn('WaveSurfer n’a pas pu décoder le fichier source.', error);
+          if (waveformLoading) waveformLoading.hidden = true;
+          if (waveform) waveform.hidden = true;
+          if (waveformToolbar) waveformToolbar.hidden = true;
+          if (waveformError) waveformError.hidden = false;
+          if (waveformFallback) waveformFallback.hidden = false;
+        });
+        regions.on('region-updated', region => {
+          if (region !== trimRegion || working) return;
+          pendingTrim = {start: region.start, end: region.end};
+          pendingRegionFlush = true;
+          flushPendingTrim();
+        });
+        regions.on('region-out', region => {
+          if (region === trimRegion) flushPendingTrim();
+        });
+      } catch (error) {
+        console.warn('Initialisation WaveSurfer impossible.', error);
+        if (waveformLoading) waveformLoading.hidden = true;
+        if (waveform) waveform.hidden = true;
+        if (waveformError) waveformError.hidden = false;
+        if (waveformFallback) waveformFallback.hidden = false;
+      }
+    };
+
+    const updateFadeFromPointer = (handle, clientX) => {
+      const rect = waveform?.getBoundingClientRect();
+      if (!rect || !waveDuration) return null;
+      const time = Math.max(0, Math.min(waveDuration, (clientX - rect.left) / rect.width * waveDuration));
+      const bounds = trimBounds();
+      const fades = fadeValues();
+      if (handle.dataset.waveFade === 'in') fades.in = Math.max(0, Math.min(bounds.end - bounds.start, time - bounds.start));
+      else fades.out = Math.max(0, Math.min(bounds.end - bounds.start, bounds.end - time));
+      visualFadeValues = fades;
+      drawFadeHandles();
+      return fades;
+    };
+    fadeHandles.forEach(handle => {
+      handle.addEventListener('pointerdown', event => {
+        if (working || !waveDuration) return;
+        event.preventDefault();
+        handle.setPointerCapture(event.pointerId);
+        const kind = handle.dataset.waveFade;
+        const initial = fadeValues();
+        const move = moveEvent => updateFadeFromPointer(handle, moveEvent.clientX);
+        const finish = async finishEvent => {
+          handle.removeEventListener('pointermove', move);
+          handle.removeEventListener('pointerup', finish);
+          handle.removeEventListener('pointercancel', finish);
+          const values = updateFadeFromPointer(handle, finishEvent.clientX) || initial;
+          const result = await replaceOperation('fade', {in: Number(values.in.toFixed(2)), out: Number(values.out.toFixed(2))});
+          if (!result) restoreWaveformState();
+        };
+        handle.addEventListener('pointermove', move);
+        handle.addEventListener('pointerup', finish, {once: true});
+        handle.addEventListener('pointercancel', finish, {once: true});
+        handle.dataset.dragKind = kind;
+      });
+      handle.addEventListener('keydown', async event => {
+        if (!['ArrowLeft', 'ArrowRight'].includes(event.key) || working || !waveDuration) return;
+        event.preventDefault();
+        const values = fadeValues();
+        const delta = (event.key === 'ArrowRight' ? 0.1 : -0.1);
+        const bounds = trimBounds();
+        if (handle.dataset.waveFade === 'in') values.in = Math.max(0, Math.min(bounds.end - bounds.start, values.in + delta));
+        else values.out = Math.max(0, Math.min(bounds.end - bounds.start, values.out + delta));
+        visualFadeValues = values;
+        drawFadeHandles();
+        await replaceOperation('fade', {in: Number(values.in.toFixed(2)), out: Number(values.out.toFixed(2))});
+      });
+    });
+    waveformPlay?.addEventListener('click', () => waveSurfer?.playPause());
+    initializeWaveform();
+
     const mutate = async payload => {
       if (working) return;
-      setWorking(true, true);
+      setWorking(true);
       try { applyOperationState(await postJson(operationUrl, payload)); }
       catch (error) { showError(error); }
       finally { setWorking(false); renderOperations(); }
@@ -897,7 +1146,8 @@
       }
       if (type === 'preset') params = {name: values.get('preset_name')};
       dialog.close();
-      await mutate({action: 'add', operation: {type, params}});
+      if (type === 'trim' || type === 'fade') await replaceOperation(type, params);
+      else await mutate({action: 'add', operation: {type, params}});
     });
 
     operationList?.addEventListener('click', event => {

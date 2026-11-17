@@ -1,4 +1,5 @@
 {% extends "studio/base.html" %}
+{% load static %}
 {% block title %}Édition audio · Petit Studio{% endblock %}
 {% block heading %}Éditeur audio{% endblock %}
 {% block content %}
@@ -25,10 +26,33 @@
 <div class="audio-editor-page" data-audio-studio-editor
   data-operations-url="{% url 'audio_studio_operations' session.id %}"
   data-preview-url="{% url 'audio_studio_preview' session.id %}"
+  data-source-url="{{ session.source_file.url }}"
   data-preview-valid="{{ preview_is_current|yesno:'true,false' }}"
   data-has-preview="{{ preview_exists|yesno:'true,false' }}">
   <section class="card">
     <div class="section-title"><div><span class="step-number">1</span><h2>Source audio</h2></div><span class="muted small">{{ source_name }}</span></div>
+    <div class="audio-waveform-shell" data-audio-waveform-shell>
+      <p class="audio-editor-status" data-waveform-loading role="status"><span class="audio-editor-spinner" aria-hidden="true"></span>Chargement de la forme d’onde…</p>
+      <div class="audio-waveform" id="audioSourceWaveform" data-audio-waveform aria-label="Forme d’onde du fichier source" hidden>
+        <div class="audio-waveform-overlay" data-waveform-overlay aria-label="Réglages de trim et de fondu">
+          <span class="audio-waveform-fade-band fade-in" data-fade-band="in" aria-hidden="true"></span>
+          <span class="audio-waveform-fade-band fade-out" data-fade-band="out" aria-hidden="true"></span>
+          <button class="audio-waveform-fade-handle fade-in" type="button" data-wave-fade="in" role="slider" aria-label="Durée du fondu d’entrée" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" title="Fondu d’entrée"></button>
+          <button class="audio-waveform-fade-handle fade-out" type="button" data-wave-fade="out" role="slider" aria-label="Durée du fondu de sortie" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0" title="Fondu de sortie"></button>
+        </div>
+      </div>
+      <p class="audio-editor-status" data-waveform-instructions>Fais glisser les poignées verticales pour régler les fondus, ou les bords de la zone orange pour ajuster le trim. Le lecteur ci-dessous reste l’aperçu traité.</p>
+      <p class="audio-editor-error" data-waveform-error role="alert" hidden>Impossible de charger la forme d'onde (fichier trop lourd). Utilisez les champs numériques ci-dessous.</p>
+      <div class="audio-waveform-fallback" data-waveform-fallback hidden>
+        <p class="audio-editor-status">La sélection visuelle est indisponible. Utilise les champs numériques pour régler trim et fade.</p>
+        <button class="button button-secondary button-small" type="button" data-operation-open="trim" data-operation-control>Régler le trim</button>
+        <button class="button button-secondary button-small" type="button" data-operation-open="fade" data-operation-control>Régler les fondus</button>
+      </div>
+      <div class="audio-waveform-toolbar" data-waveform-toolbar hidden>
+        <button class="button button-secondary button-small" type="button" data-waveform-play aria-label="Lire le fichier source">▶ Lecture source</button>
+        <span class="audio-editor-status" data-waveform-time>0:00 / 0:00</span>
+      </div>
+    </div>
     {% if preview_exists %}<audio class="audio-editor-player" id="audioStudioPreviewPlayer" controls preload="metadata" src="{{ session.current_preview_file.url }}"></audio><p class="audio-editor-status" data-audio-preview-placeholder hidden></p>
     {% else %}<audio class="audio-editor-player" id="audioStudioPreviewPlayer" controls preload="none" hidden></audio><p class="audio-editor-status" data-audio-preview-placeholder>{% if preview_missing %}Aperçu expiré, clique à nouveau sur « Écouter » pour le recréer.{% else %}Pas encore d’aperçu. Clique sur « Écouter l’aperçu » après avoir choisi tes opérations.{% endif %}</p>{% endif %}
     <p class="audio-editor-status" data-audio-preview-duration>{% if preview_exists %}Aperçu prêt{% else %}Le fichier source reste inchangé.{% endif %}</p>
@@ -39,8 +63,6 @@
     <div class="audio-operation-list" data-audio-operation-list aria-live="polite"></div>
     {{ session.operations|json_script:"audioStudioOperationsData" }}
     <div class="audio-editor-controls">
-      <button class="button button-secondary button-small" type="button" data-operation-open="trim" data-operation-control>Ajouter trim</button>
-      <button class="button button-secondary button-small" type="button" data-operation-open="fade" data-operation-control>Ajouter fade</button>
       <button class="button button-secondary button-small" type="button" data-operation-open="volume" data-operation-control>Ajouter volume</button>
       {% if effects %}<button class="button button-secondary button-small" type="button" data-operation-open="effect" data-operation-control>Ajouter effet</button>{% else %}<button class="button button-secondary button-small" type="button" disabled>Effets indisponibles avec ce FFmpeg</button>{% endif %}
       {% if presets %}<button class="button button-secondary button-small" type="button" data-operation-open="preset" data-operation-control>Ajouter preset</button>{% else %}<button class="button button-secondary button-small" type="button" disabled>Presets indisponibles avec ce FFmpeg</button>{% endif %}
@@ -75,4 +97,6 @@
     <div class="audio-operation-dialog-actions"><button class="button button-secondary button-small" type="button" data-operation-dialog-close>Annuler</button><button class="button button-primary button-small" type="submit">Ajouter</button></div>
   </form>
 </dialog>
+<script src="{% static 'studio/vendor/wavesurfer.min.js' %}" defer></script>
+<script src="{% static 'studio/vendor/regions.min.js' %}" defer></script>
 {% endblock %}
