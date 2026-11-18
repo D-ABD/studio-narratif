@@ -218,6 +218,15 @@
 .sampler-pad-number { color:#9CA7B7; font-size:10px; font-weight:800; }
 .sampler-pad-key { grid-column:2; grid-row:1 / span 2; min-width:33px; height:33px; display:grid; place-items:center; border:1px solid #465266; border-radius:8px; color:#FFD889; background:#141A23; font-size:12px; font-weight:800; }
 .sampler-pad-duration { grid-column:1 / -1; align-self:end; color:#AAB3C1; font-size:10px; }
+.sampler-sequencer { display:grid; gap:10px; width:min(100%,700px); margin:3px auto 0; padding:14px; border:1px solid #303A49; border-radius:12px; background:#111720; }
+.sampler-sequencer-transport,.sampler-sequencer-save-row { display:flex; align-items:center; flex-wrap:wrap; gap:9px; }
+.sampler-sequencer-clock { min-width:74px; color:#FFD889; font:700 15px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace; font-variant-numeric:tabular-nums; }
+.sampler-sequencer-name-label { color:#A8B1BF; font-size:11px; font-weight:700; }
+.sampler-sequencer-name { flex:1 1 220px; min-width:0; min-height:36px; padding:7px 10px; border:1px solid #394455; border-radius:8px; color:#E9EDF4; background:#0B0E14; }
+.sampler-sequencer-name:focus-visible { outline:2px solid #F59E0B; outline-offset:2px; }
+.sampler-sequencer [data-sequencer-status] { margin:0; }
+.sampler-sequencer [data-sequencer-error] { margin:0; }
+.sampler-sequencer button:disabled { opacity:.48; cursor:not-allowed; }
 @media(max-width:620px) {
   .sampler-pad-grid { gap:7px; }
   .sampler-pad { min-height:82px; padding:8px; border-radius:10px; }

@@ -27,6 +27,7 @@ urlpatterns = [
     path("audio-studio/<int:session_id>/operations/", views.audio_studio_operations, name="audio_studio_operations"),
     path("audio-studio/<int:session_id>/preview/", views.audio_studio_preview, name="audio_studio_preview"),
     path("audio-studio/<int:session_id>/save/", views.audio_studio_save, name="audio_studio_save"),
+    path("audio-studio/<int:session_id>/save-sequence/", views.audio_studio_save_sequence, name="audio_studio_save_sequence"),
     path("voices/create/", views.create_voice, name="create_voice"),
     path("voices/<int:voice_id>/edit/", views.edit_voice, name="edit_voice"),
     path("voices/<int:voice_id>/delete/", views.delete_voice, name="delete_voice"),

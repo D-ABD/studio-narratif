@@ -22,7 +22,7 @@ from django.utils import timezone
 from PIL import Image
 
 from .models import (
-    AudioAsset, BackgroundTrack, NarrationProject, NarrationSegment, StudioBatch, StudioBatchItem, Voice,
+    AudioAsset, AudioSession, BackgroundTrack, NarrationProject, NarrationSegment, StudioBatch, StudioBatchItem, Voice,
     default_animation_settings,
 )
 from .services import (
@@ -2794,3 +2794,114 @@ class AuthenticationIsolationTests(MediaTestCase):
         self.assertEqual(response.status_code, 302)
         self.assertTrue(get_user_model().objects.filter(username="new-user").exists())
         self.assertEqual(self.client.get("/").status_code, 200)
+
+
+class PadSequenceSaveTests(MediaTestCase):
+    def make_session(self, user=None):
+        session = AudioSession(user=user or self.user, source_kind=AudioSession.SourceKind.UPLOAD)
+        session.source_file.save("pad-source.wav", ContentFile(b"source audio"), save=True)
+        return session
+
+    @staticmethod
+    def valid_payload():
+        return {
+            "name": "Composition test",
+            "sequence_data": {
+                "version": 1,
+                "recording_duration_ms": 1800,
+                "events": [
+                    {"pad_index": 0, "timestamp_ms": 200},
+                    {"pad_index": 3, "timestamp_ms": 800},
+                ],
+            },
+            "pad_boundaries": [[index * 0.5, (index + 1) * 0.5] for index in range(16)],
+        }
+
+    @patch("studio.views.render_pad_sequence")
+    def test_save_sequence_renders_and_creates_background_track(self, render):
+        session = self.make_session()
+
+        def fake_render(_source, sequence, boundaries, output_path):
+            self.assertEqual(sequence["events"][1], {"pad_index": 3, "timestamp_ms": 800})
+            self.assertEqual(len(boundaries), 16)
+            output_path.write_bytes(b"test m4a output")
+            return output_path, 1.8
+
+        render.side_effect = fake_render
+        response = self.client.post(
+            f"/audio-studio/{session.pk}/save-sequence/",
+            data=json.dumps(self.valid_payload()),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"redirect_url": "/musics/"})
+        track = BackgroundTrack.objects.get(user=self.user, name="Composition test")
+        self.assertEqual(track.duration, 1.8)
+        self.assertTrue(track.audio_file.name.startswith(f"musics/user_{self.user.pk}/"))
+        self.assertTrue(Path(track.audio_file.path).exists())
+        self.assertFalse(AudioSession.objects.filter(pk=session.pk).exists())
+        render.assert_called_once()
+
+    @patch("studio.views.render_pad_sequence")
+    def test_save_sequence_rejects_invalid_pad_without_rendering(self, render):
+        session = self.make_session()
+        payload = self.valid_payload()
+        payload["sequence_data"]["events"][0]["pad_index"] = 16
+
+        response = self.client.post(
+            f"/audio-studio/{session.pk}/save-sequence/",
+            data=json.dumps(payload),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("indice de pad", response.json()["error"])
+        render.assert_not_called()
+        self.assertFalse(BackgroundTrack.objects.exists())
+        self.assertTrue(AudioSession.objects.filter(pk=session.pk).exists())
+
+    @patch("studio.views.render_pad_sequence")
+    def test_save_sequence_rejects_more_than_500_events(self, render):
+        session = self.make_session()
+        payload = self.valid_payload()
+        payload["sequence_data"]["events"] = [
+            {"pad_index": 0, "timestamp_ms": 0} for _ in range(501)
+        ]
+
+        response = self.client.post(
+            f"/audio-studio/{session.pk}/save-sequence/",
+            data=json.dumps(payload),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        render.assert_not_called()
+        self.assertFalse(BackgroundTrack.objects.exists())
+
+    def test_user_cannot_save_sequence_for_another_users_session(self):
+        other = get_user_model().objects.create_user(
+            username="pad-sequence-owner", password="PadSequencePass123!x",
+        )
+        session = self.make_session(other)
+
+        response = self.client.post(
+            f"/audio-studio/{session.pk}/save-sequence/",
+            data=json.dumps(self.valid_payload()),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertTrue(AudioSession.objects.filter(pk=session.pk, user=other).exists())
+
+    def test_editor_exposes_sequencer_controls_and_save_endpoint(self):
+        session = self.make_session()
+
+        response = self.client.get(f"/audio-studio/{session.pk}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "data-sequencer-record")
+        self.assertContains(response, "data-sequencer-stop")
+        self.assertContains(response, "data-sequencer-play")
+        self.assertContains(response, "data-sequencer-save")
+        self.assertContains(response, f"/audio-studio/{session.pk}/save-sequence/")

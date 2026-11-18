@@ -41,6 +41,7 @@ from .audio_services import (
     available_presets as available_audio_presets,
     cleanup_expired_audio_sessions,
     probe_audio,
+    render_pad_sequence,
 )
 from .video_services import _probe_clip, validate_assembly_project
 
@@ -62,6 +63,7 @@ MAX_IMPORT_PIXELS = 100_000_000
 MAX_MUSIC_BYTES = 50 * 1024 * 1024
 MAX_AUDIO_ASSET_BYTES = 100 * 1024 * 1024
 MAX_AUDIO_STUDIO_UPLOAD_BYTES = MAX_AUDIO_ASSET_BYTES
+MAX_PAD_SEQUENCE_EVENTS = 500
 MAX_STUDIO_BATCH_ITEMS = 20
 MAX_STUDIO_TEXT_CHARS = 12000
 ALLOWED_MUSIC_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg"}
@@ -728,6 +730,103 @@ def audio_studio_save(request, session_id):
         return redirect(_audio_studio_editor_url(session, request.POST.get("source_name", "")))
     messages.success(request, f"Musique ajoutée : {track.name}")
     return redirect("musics")
+
+
+@login_required
+@require_POST
+def audio_studio_save_sequence(request, session_id):
+    session = get_object_or_404(AudioSession, pk=session_id, user=request.user)
+    if request.content_type != "application/json" or len(request.body) > 200_000:
+        return JsonResponse({"error": "Requête de séquence invalide ou trop volumineuse."}, status=400)
+    try:
+        payload = json.loads(request.body or b"{}")
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return JsonResponse({"error": "Le JSON de la séquence est invalide."}, status=400)
+    if not isinstance(payload, dict) or set(payload) != {"name", "sequence_data", "pad_boundaries"}:
+        return JsonResponse({"error": "Les données de la composition sont incomplètes."}, status=400)
+
+    name = payload.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return JsonResponse({"error": "Donne un nom à la composition."}, status=400)
+    name = name.strip()
+    if len(name) > 120:
+        return JsonResponse({"error": "Le nom ne peut pas dépasser 120 caractères."}, status=400)
+
+    sequence_data = payload.get("sequence_data")
+    if (not isinstance(sequence_data, dict)
+            or set(sequence_data) != {"version", "recording_duration_ms", "events"}
+            or type(sequence_data.get("version")) is not int
+            or sequence_data.get("version") != 1):
+        return JsonResponse({"error": "Le format de la séquence n’est pas valide."}, status=400)
+    events = sequence_data.get("events")
+    if not isinstance(events, list) or not events:
+        return JsonResponse({"error": "Enregistre au moins un pad avant de sauvegarder."}, status=400)
+    if len(events) > MAX_PAD_SEQUENCE_EVENTS:
+        return JsonResponse({"error": f"La séquence est limitée à {MAX_PAD_SEQUENCE_EVENTS} déclenchements."}, status=400)
+    recording_duration_ms = sequence_data.get("recording_duration_ms")
+    if (isinstance(recording_duration_ms, bool) or not isinstance(recording_duration_ms, int)
+            or recording_duration_ms < 1):
+        return JsonResponse({"error": "La durée d’enregistrement est invalide."}, status=400)
+    for event in events:
+        if not isinstance(event, dict) or set(event) != {"pad_index", "timestamp_ms"}:
+            return JsonResponse({"error": "Un événement de pad est invalide."}, status=400)
+        pad_index, timestamp_ms = event["pad_index"], event["timestamp_ms"]
+        if isinstance(pad_index, bool) or not isinstance(pad_index, int) or not 0 <= pad_index <= 15:
+            return JsonResponse({"error": "Un indice de pad doit être compris entre 0 et 15."}, status=400)
+        if (isinstance(timestamp_ms, bool) or not isinstance(timestamp_ms, int)
+                or not 0 <= timestamp_ms <= recording_duration_ms):
+            return JsonResponse({"error": "Un horodatage de pad est invalide."}, status=400)
+    pad_boundaries = payload.get("pad_boundaries")
+    if not isinstance(pad_boundaries, list) or len(pad_boundaries) != 16:
+        return JsonResponse({"error": "Les 16 bornes des pads sont requises."}, status=400)
+
+    created_file = None
+    try:
+        with transaction.atomic():
+            session = get_object_or_404(
+                AudioSession.objects.select_for_update(), pk=session_id, user=request.user,
+            )
+            if not session.source_file or not session.source_file.name:
+                return JsonResponse({"error": "Le fichier source est introuvable."}, status=400)
+            source_path = session.source_file.path
+            session.sequencer_data = sequence_data
+            session.updated_at = timezone.now()
+            session.save(update_fields=["sequencer_data", "updated_at"])
+
+        track = BackgroundTrack(user=request.user, name=name, duration=0)
+        with tempfile.TemporaryDirectory(prefix="petit-studio-pad-sequence-") as folder:
+            output_path = Path(folder) / "composition.m4a"
+            _result_path, duration = render_pad_sequence(
+                source_path, sequence_data, pad_boundaries, output_path,
+            )
+            track.duration = duration
+            with transaction.atomic():
+                current = get_object_or_404(
+                    AudioSession.objects.select_for_update(), pk=session_id, user=request.user,
+                )
+                if current.sequencer_data != sequence_data:
+                    return JsonResponse({"error": "La séquence a changé. Recharge la page avant de réessayer."}, status=409)
+                with output_path.open("rb") as stream:
+                    track.audio_file.save("composition.m4a", File(stream), save=False)
+                created_file = (track.audio_file.storage, track.audio_file.name)
+                track.save()
+                _delete_audio_session_files(current)
+                current.delete()
+        messages.success(request, f"Composition ajoutée : {track.name}")
+        return JsonResponse({"redirect_url": reverse("musics")})
+    except Http404:
+        raise
+    except (OSError, ValueError, RuntimeError, TimeoutError, subprocess.SubprocessError) as exc:
+        logger.warning("Rendu de composition échoué pour la session %s : %s", session_id, exc)
+        return JsonResponse({"error": f"Impossible de créer la composition : {exc}"}, status=400)
+    except Exception:
+        if created_file:
+            try:
+                created_file[0].delete(created_file[1])
+            except Exception:
+                logger.warning("Nettoyage du fichier de composition échoué.", exc_info=True)
+        logger.exception("Sauvegarde de composition échouée pour la session %s.", session_id)
+        return JsonResponse({"error": "Impossible de sauvegarder la composition. La session est conservée."}, status=500)
 
 
 def _studio_page_context(request, *, texts=None, selected_voice_id="", name_prefix="", studio_page=None, per_page=20):

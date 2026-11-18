@@ -26,6 +26,7 @@
 <div class="audio-editor-page" data-audio-studio-editor
   data-operations-url="{% url 'audio_studio_operations' session.id %}"
   data-preview-url="{% url 'audio_studio_preview' session.id %}"
+  data-sequence-save-url="{% url 'audio_studio_save_sequence' session.id %}"
   data-source-url="{{ session.source_file.url }}"
   data-preview-valid="{{ preview_is_current|yesno:'true,false' }}"
   data-has-preview="{{ preview_exists|yesno:'true,false' }}">
@@ -81,6 +82,21 @@
         <button type="button" class="sampler-pad" data-sampler-pad="13" data-sampler-code="Digit2" data-sampler-key="2" disabled><span class="sampler-pad-number">14</span><span class="sampler-pad-key">2</span><span class="sampler-pad-duration" data-sampler-duration>—</span></button>
         <button type="button" class="sampler-pad" data-sampler-pad="14" data-sampler-code="Digit3" data-sampler-key="3" disabled><span class="sampler-pad-number">15</span><span class="sampler-pad-key">3</span><span class="sampler-pad-duration" data-sampler-duration>—</span></button>
         <button type="button" class="sampler-pad" data-sampler-pad="15" data-sampler-code="Digit4" data-sampler-key="4" disabled><span class="sampler-pad-number">16</span><span class="sampler-pad-key">4</span><span class="sampler-pad-duration" data-sampler-duration>—</span></button>
+      </div>
+      <div class="sampler-sequencer" data-sequencer>
+        <div class="sampler-sequencer-transport" role="group" aria-label="Enregistrement de la séquence">
+          <button class="button button-primary button-small" type="button" data-sequencer-record disabled>● Enregistrer</button>
+          <button class="button button-secondary button-small" type="button" data-sequencer-stop hidden disabled>■ Stop</button>
+          <output class="sampler-sequencer-clock" data-sequencer-clock aria-live="off">00:00.0</output>
+          <button class="button button-secondary button-small" type="button" data-sequencer-play disabled>▶ Écouter la séquence</button>
+        </div>
+        <label class="sampler-sequencer-name-label" for="samplerCompositionName">Nom de la composition</label>
+        <div class="sampler-sequencer-save-row">
+          <input class="sampler-sequencer-name" id="samplerCompositionName" type="text" maxlength="120" value="Composition de {{ source_name }}" data-sequencer-name required>
+          <button class="button button-primary button-small" type="button" data-sequencer-save disabled>Sauvegarder la compo</button>
+        </div>
+        <p class="audio-editor-status" data-sequencer-status role="status" aria-live="polite">Clique sur « Enregistrer », joue les pads, puis arrête pour écouter ou sauvegarder.</p>
+        <p class="audio-editor-error" data-sequencer-error role="alert" hidden></p>
       </div>
       <p class="audio-editor-status">Sur Safari, le premier clic sur un pad active aussi le son. Les pads peuvent se superposer.</p>
     </div>
