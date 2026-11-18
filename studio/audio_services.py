@@ -384,18 +384,23 @@ def apply_operations(input_path, operations, output_path):
 def render_pad_sequence(source_audio_path, sequence_data, pad_boundaries, output_path):
     """Render a recorded pad performance as an AAC/M4A track.
 
-    ``sequence_data`` is a versioned object containing ``recording_duration_ms``
-    and ``events``. Each event selects one of the supplied (start, end) source
-    boundaries and starts it at ``timestamp_ms``. The final duration preserves
+    ``sequence_data`` contains ``recording_duration_ms``, ``bpm`` and ``events``.
+    Each event selects one of the supplied (start, end) source boundaries and
+    starts it at ``timestamp_ms``. BPM changes playback speed and pitch together,
+    matching the browser's vinyl-style sampler. The final duration preserves
     both the recorded tail silence and any pad that is still playing at Stop.
     """
     source_audio_path, output_path = Path(source_audio_path), Path(output_path)
     if not isinstance(sequence_data, dict) or set(sequence_data) != {
-        "version", "recording_duration_ms", "events",
+        "version", "recording_duration_ms", "bpm", "events",
     }:
         raise ValueError("Données de séquence invalides.")
     if sequence_data["version"] != 1:
         raise ValueError("Version de séquence non prise en charge.")
+    bpm = sequence_data["bpm"]
+    if isinstance(bpm, bool) or not isinstance(bpm, int) or not 60 <= bpm <= 200:
+        raise ValueError("Le BPM doit être un entier compris entre 60 et 200.")
+    playback_rate = bpm / 120
     recording_duration_ms = sequence_data["recording_duration_ms"]
     if (isinstance(recording_duration_ms, bool)
             or not isinstance(recording_duration_ms, int)
@@ -430,7 +435,8 @@ def render_pad_sequence(source_audio_path, sequence_data, pad_boundaries, output
             raise TimeoutError("Le rendu de la séquence a dépassé le délai maximal de 60 secondes.")
         return remaining
 
-    source_duration, _sample_rate = probe_audio(source_audio_path, timeout=remaining_timeout())
+    source_duration, sample_rate = probe_audio(source_audio_path, timeout=remaining_timeout())
+    adjusted_sample_rate = round(sample_rate * playback_rate)
     normalized_boundaries = []
     for boundary in pad_boundaries:
         if not isinstance(boundary, (list, tuple)) or len(boundary) != 2:
@@ -446,7 +452,7 @@ def render_pad_sequence(source_audio_path, sequence_data, pad_boundaries, output
     for pad_index, timestamp_ms in parsed_events:
         start, end = normalized_boundaries[pad_index]
         timestamp = timestamp_ms / 1000
-        output_duration = max(output_duration, timestamp + (end - start))
+        output_duration = max(output_duration, timestamp + (end - start) / playback_rate)
         validated_events.append((start, end, timestamp_ms))
 
     if output_duration <= 0:
@@ -457,6 +463,7 @@ def render_pad_sequence(source_audio_path, sequence_data, pad_boundaries, output
     for index, ((start, end, timestamp_ms), label) in enumerate(zip(validated_events, labels)):
         graph.append(
             f"[{label}]atrim=start={start:.6f}:end={end:.6f},"
+            f"asetrate={adjusted_sample_rate},aresample={sample_rate},"
             f"asetpts=PTS-STARTPTS,adelay={timestamp_ms}:all=1[event{index}]"
         )
     inputs = "".join(f"[event{index}]" for index in range(len(labels)))

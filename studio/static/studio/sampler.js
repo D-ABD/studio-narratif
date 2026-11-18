@@ -15,6 +15,7 @@
   const sequencerStatus = editor.querySelector('[data-sequencer-status]');
   const sequencerError = editor.querySelector('[data-sequencer-error]');
   const bpmInput = editor.querySelector('[data-sequencer-bpm]');
+  const bpmRateLabel = editor.querySelector('[data-sequencer-bpm-rate]');
   const metronomeToggle = editor.querySelector('[data-metronome-toggle]');
   const metronomeBeat = editor.querySelector('[data-metronome-beat]');
   const metronomeBeatCount = editor.querySelector('[data-metronome-beat-count]');
@@ -29,6 +30,7 @@
   let recording = false;
   let recordingStartTime = 0;
   let recordingBpm = 120;
+  let sequenceBpm = 120;
   let recordingDurationMs = 0;
   let recordedEvents = [];
   let recordingBoundaries = null;
@@ -51,6 +53,12 @@
   const getBpm = () => {
     const value = Number(bpmInput?.value);
     return Number.isInteger(value) && value >= 60 && value <= 200 ? value : 120;
+  };
+  const updateBpmRateLabel = () => {
+    if (!bpmRateLabel) return;
+    const bpm = getBpm();
+    const description = bpm === 120 ? 'Normal' : bpm < 120 ? 'Ralenti' : 'Accéléré';
+    bpmRateLabel.textContent = `${bpm} BPM (${description})`;
   };
   const formatClock = milliseconds => {
     const totalTenths = Math.floor(Math.max(0, milliseconds) / 100);
@@ -242,13 +250,14 @@
     startMetronome(recordingStartTime, recordingBpm, nextBeatIndex);
   };
 
-  const schedulePad = (index, when, boundaries) => {
+  const schedulePad = (index, when, boundaries, bpm) => {
     if (!audioBuffer || !boundaries || !boundaries[index]) return;
     const [start, end] = boundaries[index];
     const duration = end - start;
     if (duration <= 0) return;
     const source = audioContext.createBufferSource();
     source.buffer = audioBuffer;
+    source.playbackRate.setValueAtTime(bpm / 120, when);
     source.connect(audioContext.destination);
     const pad = pads[index];
     activeVoices[index] += 1;
@@ -268,7 +277,8 @@
     try {
       await getAudioContext();
       const scheduledAt = audioContext.currentTime;
-      schedulePad(index, scheduledAt, boundaries);
+      const playbackBpm = recording ? recordingBpm : getBpm();
+      schedulePad(index, scheduledAt, boundaries, playbackBpm);
       if (recording) {
         if (recordedEvents.length >= MAX_RECORDED_EVENTS) {
           if (sequencerStatus) sequencerStatus.textContent = `Limite de ${MAX_RECORDED_EVENTS} déclenchements atteinte. Enregistrement arrêté.`;
@@ -304,6 +314,7 @@
       recordingBoundaries = boundaries.map(boundary => [...boundary]);
       recordingDurationMs = 0;
       recordingBpm = getBpm();
+      sequenceBpm = recordingBpm;
       recordingStartTime = audioContext.currentTime;
       recording = true;
       if (metronomeEnabled) startMetronome(recordingStartTime, recordingBpm);
@@ -343,7 +354,7 @@
       await getAudioContext();
       const startAt = audioContext.currentTime + 0.08;
       recordedEvents.forEach(event => {
-        schedulePad(event.pad_index, startAt + event.timestamp_ms / 1000, recordingBoundaries);
+        schedulePad(event.pad_index, startAt + event.timestamp_ms / 1000, recordingBoundaries, sequenceBpm);
       });
       if (sequencerStatus) sequencerStatus.textContent = 'Lecture de la séquence…';
     } catch (error) {
@@ -380,6 +391,7 @@
           sequence_data: {
             version: 1,
             recording_duration_ms: recordingDurationMs,
+            bpm: sequenceBpm,
             events: recordedEvents,
           },
           pad_boundaries: recordingBoundaries,
@@ -424,14 +436,18 @@
     if (!Number.isInteger(value) || value < 60 || value > 200) {
       const fallback = bpmInput.value.trim() === '' || !Number.isFinite(value) ? 120 : Math.min(200, Math.max(60, Math.round(value)));
       bpmInput.value = String(fallback);
+      updateBpmRateLabel();
       showError('Le BPM doit être un nombre entier compris entre 60 et 200.');
       return;
     }
     showError('');
+    updateBpmRateLabel();
     if (recording && sequencerStatus) {
       sequencerStatus.textContent = `Prise en cours à ${recordingBpm} BPM. Le nouveau tempo sera utilisé à la prochaine prise.`;
     }
   });
+
+  updateBpmRateLabel();
 
   document.addEventListener('keydown', event => {
     if (currentMode !== 'pads') return;

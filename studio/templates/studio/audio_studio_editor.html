@@ -87,6 +87,7 @@
         <div class="sampler-sequencer-tempo" role="group" aria-label="Tempo et métronome">
           <label class="sampler-sequencer-bpm-label" for="samplerBpm">BPM</label>
           <input class="sampler-sequencer-bpm" id="samplerBpm" type="number" min="60" max="200" step="1" value="120" inputmode="numeric" data-sequencer-bpm aria-describedby="samplerBpmHint">
+          <span class="sampler-sequencer-bpm-rate" data-sequencer-bpm-rate aria-live="polite">120 BPM (Normal)</span>
           <button class="button button-secondary button-small sampler-metronome-toggle" type="button" data-metronome-toggle aria-pressed="false">♫ Métronome OFF</button>
           <span class="sampler-metronome-beat" data-metronome-beat aria-live="off" aria-label="Métronome arrêté">
             <span class="sampler-metronome-indicator" data-metronome-indicator aria-hidden="true"></span>
@@ -156,5 +157,5 @@
 </dialog>
 <script src="{% static 'studio/vendor/wavesurfer.min.js' %}" defer></script>
 <script src="{% static 'studio/vendor/regions.min.js' %}" defer></script>
-<script src="{% static 'studio/sampler.js' %}?v=2" defer></script>
+<script src="{% static 'studio/sampler.js' %}?v=3" defer></script>
 {% endblock %}

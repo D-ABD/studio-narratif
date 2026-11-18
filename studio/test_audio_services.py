@@ -227,6 +227,7 @@ class AudioEffectServiceTests(TestCase):
             sequence = {
                 "version": 1,
                 "recording_duration_ms": 2000,
+                "bpm": 90,
                 "events": [
                     {"pad_index": 0, "timestamp_ms": 200},
                     {"pad_index": 3, "timestamp_ms": 800},
@@ -242,6 +243,8 @@ class AudioEffectServiceTests(TestCase):
             command = run.call_args.args[0]
             graph = command[command.index("-filter_complex") + 1]
             self.assertIn("atrim=start=0.000000:end=1.000000", graph)
+            self.assertIn("asetrate=36000,aresample=48000", graph)
+            self.assertEqual(command[command.index("-t") + 1], "2.133333")
             self.assertIn("adelay=200:all=1", graph)
             self.assertIn("atrim=start=3.000000:end=4.000000", graph)
             self.assertIn("adelay=800:all=1", graph)
@@ -253,15 +256,24 @@ class AudioEffectServiceTests(TestCase):
         boundaries = [(float(index), float(index + 1)) for index in range(16)]
         with self.assertRaisesMessage(ValueError, "La séquence ne contient aucun pad joué."):
             audio_services.render_pad_sequence(
-                "source.wav", {"version": 1, "recording_duration_ms": 1000, "events": []},
+                "source.wav", {"version": 1, "recording_duration_ms": 1000, "bpm": 120, "events": []},
                 boundaries, "out.m4a",
             )
         with self.assertRaisesMessage(ValueError, "Indice de pad invalide."):
             audio_services.render_pad_sequence(
                 "source.wav", {
-                    "version": 1, "recording_duration_ms": 1000,
+                    "version": 1, "recording_duration_ms": 1000, "bpm": 120,
                     "events": [{"pad_index": 16, "timestamp_ms": 0}],
                 }, boundaries, "out.m4a",
+            )
+
+    def test_render_pad_sequence_rejects_bpm_outside_supported_range(self):
+        with self.assertRaisesMessage(ValueError, "BPM doit être un entier compris entre 60 et 200"):
+            audio_services.render_pad_sequence(
+                "source.wav", {
+                    "version": 1, "recording_duration_ms": 1000, "bpm": 201,
+                    "events": [{"pad_index": 0, "timestamp_ms": 0}],
+                }, [(float(index), float(index + 1)) for index in range(16)], "out.m4a",
             )
 
     @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg/FFprobe non installé")
@@ -278,6 +290,7 @@ class AudioEffectServiceTests(TestCase):
             sequence = {
                 "version": 1,
                 "recording_duration_ms": 750,
+                "bpm": 120,
                 "events": [
                     {"pad_index": 0, "timestamp_ms": 100},
                     {"pad_index": 3, "timestamp_ms": 600},

@@ -160,7 +160,7 @@ class AudioSession(models.Model):
         "aperçu audio", upload_to=audio_session_upload_to, blank=True,
     )
     # Versioned pad performance: {"version": 1, "recording_duration_ms": int,
-    # "events": [{"pad_index": int, "timestamp_ms": int}, ...]}.
+    # "bpm": int, "events": [{"pad_index": int, "timestamp_ms": int}, ...]}.
     sequencer_data = models.JSONField("séquence des pads", null=True, blank=True)
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)

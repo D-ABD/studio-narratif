@@ -754,10 +754,13 @@ def audio_studio_save_sequence(request, session_id):
 
     sequence_data = payload.get("sequence_data")
     if (not isinstance(sequence_data, dict)
-            or set(sequence_data) != {"version", "recording_duration_ms", "events"}
+            or set(sequence_data) != {"version", "recording_duration_ms", "bpm", "events"}
             or type(sequence_data.get("version")) is not int
             or sequence_data.get("version") != 1):
         return JsonResponse({"error": "Le format de la séquence n’est pas valide."}, status=400)
+    bpm = sequence_data.get("bpm")
+    if isinstance(bpm, bool) or not isinstance(bpm, int) or not 60 <= bpm <= 200:
+        return JsonResponse({"error": "Le BPM doit être un entier compris entre 60 et 200."}, status=400)
     events = sequence_data.get("events")
     if not isinstance(events, list) or not events:
         return JsonResponse({"error": "Enregistre au moins un pad avant de sauvegarder."}, status=400)

@@ -2809,6 +2809,7 @@ class PadSequenceSaveTests(MediaTestCase):
             "sequence_data": {
                 "version": 1,
                 "recording_duration_ms": 1800,
+                "bpm": 120,
                 "events": [
                     {"pad_index": 0, "timestamp_ms": 200},
                     {"pad_index": 3, "timestamp_ms": 800},
@@ -2823,6 +2824,7 @@ class PadSequenceSaveTests(MediaTestCase):
 
         def fake_render(_source, sequence, boundaries, output_path):
             self.assertEqual(sequence["events"][1], {"pad_index": 3, "timestamp_ms": 800})
+            self.assertEqual(sequence["bpm"], 120)
             self.assertEqual(len(boundaries), 16)
             output_path.write_bytes(b"test m4a output")
             return output_path, 1.8
@@ -2860,6 +2862,22 @@ class PadSequenceSaveTests(MediaTestCase):
         render.assert_not_called()
         self.assertFalse(BackgroundTrack.objects.exists())
         self.assertTrue(AudioSession.objects.filter(pk=session.pk).exists())
+
+    @patch("studio.views.render_pad_sequence")
+    def test_save_sequence_rejects_bpm_outside_supported_range(self, render):
+        session = self.make_session()
+        payload = self.valid_payload()
+        payload["sequence_data"]["bpm"] = 201
+
+        response = self.client.post(
+            f"/audio-studio/{session.pk}/save-sequence/",
+            data=json.dumps(payload),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("BPM", response.json()["error"])
+        render.assert_not_called()
 
     @patch("studio.views.render_pad_sequence")
     def test_save_sequence_rejects_more_than_500_events(self, render):
