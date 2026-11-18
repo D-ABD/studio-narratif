@@ -23,6 +23,7 @@ FILTER_PROBE_TIMEOUT_SECONDS = 5
 MAX_REVERSE_SECONDS = 5 * 60
 MAX_OPERATIONS = 50
 OUTPUT_BITRATE = "192k"
+MAX_PAD_SEQUENCE_EVENTS = 512
 
 # Tempo and pitch are effect families with a direction parameter. This keeps
 # the catalog at 25 effects while offering both faster/slower and higher/lower.
@@ -378,6 +379,119 @@ def apply_operations(input_path, operations, output_path):
         output_path.unlink(missing_ok=True)
         raise
     return output_path, output_duration
+
+
+def render_pad_sequence(source_audio_path, sequence_data, pad_boundaries, output_path):
+    """Render a recorded pad performance as an AAC/M4A track.
+
+    ``sequence_data`` is a versioned object containing ``recording_duration_ms``
+    and ``events``. Each event selects one of the supplied (start, end) source
+    boundaries and starts it at ``timestamp_ms``. The final duration preserves
+    both the recorded tail silence and any pad that is still playing at Stop.
+    """
+    source_audio_path, output_path = Path(source_audio_path), Path(output_path)
+    if not isinstance(sequence_data, dict) or set(sequence_data) != {
+        "version", "recording_duration_ms", "events",
+    }:
+        raise ValueError("Données de séquence invalides.")
+    if sequence_data["version"] != 1:
+        raise ValueError("Version de séquence non prise en charge.")
+    recording_duration_ms = sequence_data["recording_duration_ms"]
+    if (isinstance(recording_duration_ms, bool)
+            or not isinstance(recording_duration_ms, int)
+            or recording_duration_ms < 0):
+        raise ValueError("Durée d’enregistrement invalide.")
+    events = sequence_data["events"]
+    if not isinstance(events, list) or not events:
+        raise ValueError("La séquence ne contient aucun pad joué.")
+    if len(events) > MAX_PAD_SEQUENCE_EVENTS:
+        raise ValueError(f"La séquence dépasse la limite de {MAX_PAD_SEQUENCE_EVENTS} déclenchements.")
+    if not isinstance(pad_boundaries, (list, tuple)) or len(pad_boundaries) != 16:
+        raise ValueError("Les 16 bornes des pads sont requises.")
+
+    parsed_events = []
+    for event in events:
+        if not isinstance(event, dict) or set(event) != {"pad_index", "timestamp_ms"}:
+            raise ValueError("Événement de pad invalide.")
+        pad_index, timestamp_ms = event["pad_index"], event["timestamp_ms"]
+        if isinstance(pad_index, bool) or not isinstance(pad_index, int) or not 0 <= pad_index < 16:
+            raise ValueError("Indice de pad invalide.")
+        if isinstance(timestamp_ms, bool) or not isinstance(timestamp_ms, int) or timestamp_ms < 0:
+            raise ValueError("Horodatage de pad invalide.")
+        if timestamp_ms > recording_duration_ms:
+            raise ValueError("Un pad ne peut pas être déclenché après l’arrêt de l’enregistrement.")
+        parsed_events.append((pad_index, timestamp_ms))
+
+    deadline = time.monotonic() + FFMPEG_TIMEOUT_SECONDS
+
+    def remaining_timeout():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("Le rendu de la séquence a dépassé le délai maximal de 60 secondes.")
+        return remaining
+
+    source_duration, _sample_rate = probe_audio(source_audio_path, timeout=remaining_timeout())
+    normalized_boundaries = []
+    for boundary in pad_boundaries:
+        if not isinstance(boundary, (list, tuple)) or len(boundary) != 2:
+            raise ValueError("Borne de pad invalide.")
+        start = _number(boundary[0], "pad_start", 0, source_duration)
+        end = _number(boundary[1], "pad_end", 0, source_duration)
+        if end <= start:
+            raise ValueError("La fin d’un pad doit être après son début.")
+        normalized_boundaries.append((start, end))
+
+    validated_events = []
+    output_duration = recording_duration_ms / 1000
+    for pad_index, timestamp_ms in parsed_events:
+        start, end = normalized_boundaries[pad_index]
+        timestamp = timestamp_ms / 1000
+        output_duration = max(output_duration, timestamp + (end - start))
+        validated_events.append((start, end, timestamp_ms))
+
+    if output_duration <= 0:
+        raise ValueError("La durée de la séquence doit être positive.")
+
+    labels = [f"pad{index}" for index in range(len(validated_events))]
+    graph = [f"[0:a]asplit={len(labels)}" + "".join(f"[{label}]" for label in labels)]
+    for index, ((start, end, timestamp_ms), label) in enumerate(zip(validated_events, labels)):
+        graph.append(
+            f"[{label}]atrim=start={start:.6f}:end={end:.6f},"
+            f"asetpts=PTS-STARTPTS,adelay={timestamp_ms}:all=1[event{index}]"
+        )
+    inputs = "".join(f"[event{index}]" for index in range(len(labels)))
+    graph.append(
+        f"{inputs}amix=inputs={len(labels)}:duration=longest:normalize=0:dropout_transition=0,"
+        f"apad=whole_dur={output_duration:.6f},atrim=duration={output_duration:.6f}[mixed]"
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    command = [
+        _ffmpeg_path(), "-y", "-v", "error", "-i", str(source_audio_path),
+        "-filter_complex", ";".join(graph), "-map", "[mixed]",
+        "-vn", "-t", f"{output_duration:.6f}", "-c:a", "aac",
+        "-b:a", OUTPUT_BITRATE, str(output_path),
+    ]
+    output_path.unlink(missing_ok=True)
+    try:
+        result = subprocess.run(
+            command, capture_output=True, text=True, check=False, timeout=remaining_timeout(),
+        )
+    except subprocess.TimeoutExpired as exc:
+        output_path.unlink(missing_ok=True)
+        raise TimeoutError("Le rendu de la séquence a dépassé le délai maximal de 60 secondes.") from exc
+    except OSError as exc:
+        output_path.unlink(missing_ok=True)
+        raise RuntimeError(f"Impossible de lancer FFmpeg pour la séquence : {exc}") from exc
+    if result.returncode or not output_path.is_file() or output_path.stat().st_size == 0:
+        output_path.unlink(missing_ok=True)
+        detail = (result.stderr or "").strip().splitlines()[-1:]
+        raise RuntimeError("Rendu de la séquence échoué." + (f" {detail[0]}" if detail else ""))
+    try:
+        actual_duration, _sample_rate = probe_audio(output_path, timeout=remaining_timeout())
+    except Exception:
+        output_path.unlink(missing_ok=True)
+        raise
+    return output_path, actual_duration
 
 
 def _delete_audio_session_files(session):

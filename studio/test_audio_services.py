@@ -1,6 +1,7 @@
 import shutil
 import subprocess
 import tempfile
+import unittest
 from datetime import timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -207,6 +208,88 @@ class AudioEffectServiceTests(TestCase):
             self.assertNotIn("-af", command)
             self.assertEqual(command[command.index("-c:a") + 1], "aac")
             self.assertEqual(command[command.index("-b:a") + 1], "192k")
+
+    @patch("studio.audio_services.probe_audio", side_effect=[(20.0, 48000), (2.8, 48000)])
+    @patch("studio.audio_services._ffmpeg_path", return_value="ffmpeg")
+    @patch("studio.audio_services.subprocess.run")
+    def test_render_pad_sequence_mixes_events_at_their_timestamps(self, run, _ffmpeg, _probe):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "source.wav"
+            output = Path(folder) / "sequence.m4a"
+            source.write_bytes(b"source")
+
+            def create_output(command, **_kwargs):
+                output.write_bytes(b"encoded sequence")
+                return Mock(returncode=0, stderr="")
+
+            run.side_effect = create_output
+            boundaries = [(float(index), float(index + 1)) for index in range(16)]
+            sequence = {
+                "version": 1,
+                "recording_duration_ms": 2000,
+                "events": [
+                    {"pad_index": 0, "timestamp_ms": 200},
+                    {"pad_index": 3, "timestamp_ms": 800},
+                ],
+            }
+
+            result_path, duration = audio_services.render_pad_sequence(
+                source, sequence, boundaries, output,
+            )
+
+            self.assertEqual(result_path, output)
+            self.assertEqual(duration, 2.8)
+            command = run.call_args.args[0]
+            graph = command[command.index("-filter_complex") + 1]
+            self.assertIn("atrim=start=0.000000:end=1.000000", graph)
+            self.assertIn("adelay=200:all=1", graph)
+            self.assertIn("atrim=start=3.000000:end=4.000000", graph)
+            self.assertIn("adelay=800:all=1", graph)
+            self.assertIn("amix=inputs=2:duration=longest:normalize=0", graph)
+            self.assertEqual(command[command.index("-c:a") + 1], "aac")
+            self.assertEqual(command[command.index("-b:a") + 1], "192k")
+
+    def test_render_pad_sequence_rejects_empty_or_invalid_events(self):
+        boundaries = [(float(index), float(index + 1)) for index in range(16)]
+        with self.assertRaisesMessage(ValueError, "La séquence ne contient aucun pad joué."):
+            audio_services.render_pad_sequence(
+                "source.wav", {"version": 1, "recording_duration_ms": 1000, "events": []},
+                boundaries, "out.m4a",
+            )
+        with self.assertRaisesMessage(ValueError, "Indice de pad invalide."):
+            audio_services.render_pad_sequence(
+                "source.wav", {
+                    "version": 1, "recording_duration_ms": 1000,
+                    "events": [{"pad_index": 16, "timestamp_ms": 0}],
+                }, boundaries, "out.m4a",
+            )
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg/FFprobe non installé")
+    def test_render_pad_sequence_with_real_ffmpeg_preserves_event_offsets(self):
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "source.wav"
+            output = Path(folder) / "sequence.m4a"
+            subprocess.run(
+                ["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
+                 "sine=frequency=440:duration=4", "-c:a", "pcm_s16le", str(source)],
+                check=True, capture_output=True,
+            )
+            boundaries = [(index * 0.25, (index + 1) * 0.25) for index in range(16)]
+            sequence = {
+                "version": 1,
+                "recording_duration_ms": 750,
+                "events": [
+                    {"pad_index": 0, "timestamp_ms": 100},
+                    {"pad_index": 3, "timestamp_ms": 600},
+                ],
+            }
+
+            result_path, duration = audio_services.render_pad_sequence(
+                source, sequence, boundaries, output,
+            )
+
+            self.assertTrue(result_path.is_file())
+            self.assertAlmostEqual(duration, 0.85, delta=0.12)
 
 
 class FFmpegFilterDetectionTests(TestCase):
