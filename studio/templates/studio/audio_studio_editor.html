@@ -84,6 +84,16 @@
         <button type="button" class="sampler-pad" data-sampler-pad="15" data-sampler-code="Digit4" data-sampler-key="4" disabled><span class="sampler-pad-number">16</span><span class="sampler-pad-key">4</span><span class="sampler-pad-duration" data-sampler-duration>—</span></button>
       </div>
       <div class="sampler-sequencer" data-sequencer>
+        <div class="sampler-sequencer-tempo" role="group" aria-label="Tempo et métronome">
+          <label class="sampler-sequencer-bpm-label" for="samplerBpm">BPM</label>
+          <input class="sampler-sequencer-bpm" id="samplerBpm" type="number" min="60" max="200" step="1" value="120" inputmode="numeric" data-sequencer-bpm aria-describedby="samplerBpmHint">
+          <button class="button button-secondary button-small sampler-metronome-toggle" type="button" data-metronome-toggle aria-pressed="false">♫ Métronome OFF</button>
+          <span class="sampler-metronome-beat" data-metronome-beat aria-live="off" aria-label="Métronome arrêté">
+            <span class="sampler-metronome-indicator" data-metronome-indicator aria-hidden="true"></span>
+            <span data-metronome-beat-count>—</span>
+          </span>
+        </div>
+        <p class="sampler-sequencer-tempo-hint" id="samplerBpmHint">Le tempo modifié pendant une prise s’appliquera à la suivante.</p>
         <div class="sampler-sequencer-transport" role="group" aria-label="Enregistrement de la séquence">
           <button class="button button-primary button-small" type="button" data-sequencer-record disabled>● Enregistrer</button>
           <button class="button button-secondary button-small" type="button" data-sequencer-stop hidden disabled>■ Stop</button>
@@ -146,5 +156,5 @@
 </dialog>
 <script src="{% static 'studio/vendor/wavesurfer.min.js' %}" defer></script>
 <script src="{% static 'studio/vendor/regions.min.js' %}" defer></script>
-<script src="{% static 'studio/sampler.js' %}?v=1" defer></script>
+<script src="{% static 'studio/sampler.js' %}?v=2" defer></script>
 {% endblock %}

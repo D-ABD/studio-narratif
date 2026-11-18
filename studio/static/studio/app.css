@@ -219,6 +219,15 @@
 .sampler-pad-key { grid-column:2; grid-row:1 / span 2; min-width:33px; height:33px; display:grid; place-items:center; border:1px solid #465266; border-radius:8px; color:#FFD889; background:#141A23; font-size:12px; font-weight:800; }
 .sampler-pad-duration { grid-column:1 / -1; align-self:end; color:#AAB3C1; font-size:10px; }
 .sampler-sequencer { display:grid; gap:10px; width:min(100%,700px); margin:3px auto 0; padding:14px; border:1px solid #303A49; border-radius:12px; background:#111720; }
+.sampler-sequencer-tempo { display:flex; align-items:center; flex-wrap:wrap; gap:9px; }
+.sampler-sequencer-bpm-label { color:#A8B1BF; font-size:11px; font-weight:800; }
+.sampler-sequencer-bpm { width:72px; min-height:34px; padding:5px 8px; border:1px solid #394455; border-radius:8px; color:#FFD889; background:#0B0E14; font:700 13px ui-monospace,SFMono-Regular,Menlo,monospace; font-variant-numeric:tabular-nums; }
+.sampler-sequencer-bpm:focus-visible,.sampler-metronome-toggle:focus-visible { outline:2px solid #F59E0B; outline-offset:2px; }
+.sampler-metronome-toggle[aria-pressed="true"] { border-color:#795123; color:#FFE0A0; background:#302313; }
+.sampler-metronome-beat { display:inline-flex; align-items:center; gap:7px; min-width:38px; color:#A8B1BF; font:700 11px ui-monospace,SFMono-Regular,Menlo,monospace; }
+.sampler-metronome-indicator { width:9px; height:9px; border-radius:50%; background:#586474; box-shadow:0 0 0 2px #58647425; }
+.sampler-metronome-beat.is-accent .sampler-metronome-indicator { background:#F05252; box-shadow:0 0 0 3px #F0525230,0 0 12px #F0525280; animation:metronome-accent .16s ease-out; }
+.sampler-sequencer-tempo-hint { margin:-5px 0 0; color:#7F8B9C; font-size:10px; }
 .sampler-sequencer-transport,.sampler-sequencer-save-row { display:flex; align-items:center; flex-wrap:wrap; gap:9px; }
 .sampler-sequencer-clock { min-width:74px; color:#FFD889; font:700 15px/1.2 ui-monospace,SFMono-Regular,Menlo,monospace; font-variant-numeric:tabular-nums; }
 .sampler-sequencer-name-label { color:#A8B1BF; font-size:11px; font-weight:700; }
@@ -227,12 +236,14 @@
 .sampler-sequencer [data-sequencer-status] { margin:0; }
 .sampler-sequencer [data-sequencer-error] { margin:0; }
 .sampler-sequencer button:disabled { opacity:.48; cursor:not-allowed; }
+@keyframes metronome-accent { 0% { transform:scale(.75); } 45% { transform:scale(1.35); } 100% { transform:scale(1); } }
 @media(max-width:620px) {
   .sampler-pad-grid { gap:7px; }
   .sampler-pad { min-height:82px; padding:8px; border-radius:10px; }
   .sampler-pad-key { min-width:28px; height:28px; }
   .sampler-pads-heading { align-items:flex-start; flex-direction:column; }
   .sampler-audio-state { text-align:left; }
+  .sampler-sequencer-tempo { gap:7px; }
 }
 @media(max-width:620px) {
   .audio-waveform { min-height:104px; }

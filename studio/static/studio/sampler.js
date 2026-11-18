@@ -14,6 +14,10 @@
   const nameInput = editor.querySelector('[data-sequencer-name]');
   const sequencerStatus = editor.querySelector('[data-sequencer-status]');
   const sequencerError = editor.querySelector('[data-sequencer-error]');
+  const bpmInput = editor.querySelector('[data-sequencer-bpm]');
+  const metronomeToggle = editor.querySelector('[data-metronome-toggle]');
+  const metronomeBeat = editor.querySelector('[data-metronome-beat]');
+  const metronomeBeatCount = editor.querySelector('[data-metronome-beat-count]');
   if (!tabs.length || !panels.length || pads.length !== 16) return;
 
   let audioBuffer = null;
@@ -24,15 +28,30 @@
   let audioContext = null;
   let recording = false;
   let recordingStartTime = 0;
+  let recordingBpm = 120;
   let recordingDurationMs = 0;
   let recordedEvents = [];
   let recordingBoundaries = null;
   let clockFrame = null;
+  let metronomeEnabled = false;
+  let metronomeRunning = false;
+  let metronomeTimer = null;
+  let metronomeVisualFrame = null;
+  let nextMetronomeBeatTime = 0;
+  let nextMetronomeBeatIndex = 0;
+  const scheduledMetronomeClicks = new Set();
   const activeVoices = new Array(pads.length).fill(0);
   const keyToPad = new Map();
   const MAX_RECORDED_EVENTS = 500;
+  const METRONOME_LOOKAHEAD_SECONDS = 0.1;
+  const METRONOME_SCHEDULER_INTERVAL_MS = 25;
+  const METRONOME_CLICK_SECONDS = 0.05;
 
   const formatDuration = seconds => `${Math.max(0, seconds).toFixed(2)} s`;
+  const getBpm = () => {
+    const value = Number(bpmInput?.value);
+    return Number.isInteger(value) && value >= 60 && value <= 200 ? value : 120;
+  };
   const formatClock = milliseconds => {
     const totalTenths = Math.floor(Math.max(0, milliseconds) / 100);
     const minutes = Math.floor(totalTenths / 600);
@@ -113,6 +132,116 @@
     return audioContext.state === 'suspended' ? audioContext.resume() : Promise.resolve();
   };
 
+  const refreshMetronomeToggle = () => {
+    if (!metronomeToggle) return;
+    metronomeToggle.setAttribute('aria-pressed', String(metronomeEnabled));
+    metronomeToggle.textContent = `♫ Métronome ${metronomeEnabled ? 'ON' : 'OFF'}`;
+  };
+
+  const scheduleMetronomeClick = (when, beatIndex) => {
+    const accent = beatIndex % 4 === 0;
+    const oscillator = audioContext.createOscillator();
+    const gain = audioContext.createGain();
+    oscillator.type = 'sine';
+    oscillator.frequency.setValueAtTime(accent ? 1000 : 800, when);
+    gain.gain.setValueAtTime(0.0001, when);
+    gain.gain.exponentialRampToValueAtTime(accent ? 0.24 : 0.14, when + 0.006);
+    gain.gain.exponentialRampToValueAtTime(0.0001, when + METRONOME_CLICK_SECONDS);
+    oscillator.connect(gain);
+    gain.connect(audioContext.destination);
+
+    const click = { oscillator, gain, when };
+    scheduledMetronomeClicks.add(click);
+    oscillator.onended = () => {
+      scheduledMetronomeClicks.delete(click);
+      oscillator.disconnect();
+      gain.disconnect();
+    };
+    oscillator.start(when);
+    oscillator.stop(when + METRONOME_CLICK_SECONDS + 0.005);
+  };
+
+  const runMetronomeScheduler = () => {
+    if (!metronomeRunning || !audioContext) return;
+    const horizon = audioContext.currentTime + METRONOME_LOOKAHEAD_SECONDS;
+    const beatDuration = 60 / recordingBpm;
+    while (nextMetronomeBeatTime < horizon) {
+      if (nextMetronomeBeatTime >= audioContext.currentTime - 0.005) {
+        scheduleMetronomeClick(nextMetronomeBeatTime, nextMetronomeBeatIndex);
+      }
+      nextMetronomeBeatTime += beatDuration;
+      nextMetronomeBeatIndex += 1;
+    }
+    metronomeTimer = window.setTimeout(runMetronomeScheduler, METRONOME_SCHEDULER_INTERVAL_MS);
+  };
+
+  const updateMetronomeBeatDisplay = () => {
+    if (!metronomeRunning || !audioContext) return;
+    const beatDuration = 60 / recordingBpm;
+    const elapsed = Math.max(0, audioContext.currentTime - recordingStartTime);
+    const beatPosition = elapsed / beatDuration;
+    const beatIndex = Math.floor(beatPosition);
+    const beatInMeasure = (beatIndex % 4) + 1;
+    const withinBeat = beatPosition - beatIndex;
+    const accentPulse = beatInMeasure === 1 && withinBeat < 0.2;
+    if (metronomeBeatCount) metronomeBeatCount.textContent = String(beatInMeasure);
+    if (metronomeBeat) {
+      metronomeBeat.classList.toggle('is-accent', accentPulse);
+      metronomeBeat.setAttribute('aria-label', `Métronome actif · temps ${beatInMeasure} sur 4${accentPulse ? ' · premier temps' : ''}`);
+    }
+    metronomeVisualFrame = requestAnimationFrame(updateMetronomeBeatDisplay);
+  };
+
+  const stopMetronome = () => {
+    metronomeRunning = false;
+    if (metronomeTimer !== null) window.clearTimeout(metronomeTimer);
+    metronomeTimer = null;
+    if (metronomeVisualFrame !== null) cancelAnimationFrame(metronomeVisualFrame);
+    metronomeVisualFrame = null;
+    const now = audioContext?.currentTime || 0;
+    scheduledMetronomeClicks.forEach(({ oscillator, gain }) => {
+      try {
+        gain.gain.cancelScheduledValues(now);
+        gain.gain.setValueAtTime(0, now);
+        oscillator.stop(now);
+      } catch (_error) {
+        // A click that has already ended no longer needs cancellation.
+      }
+    });
+    if (metronomeBeatCount) metronomeBeatCount.textContent = '—';
+    if (metronomeBeat) {
+      metronomeBeat.classList.remove('is-accent');
+      metronomeBeat.setAttribute('aria-label', 'Métronome arrêté');
+    }
+  };
+
+  const startMetronome = (startTime, bpm, firstBeatIndex = 0) => {
+    stopMetronome();
+    if (!audioContext || !metronomeEnabled) return;
+    recordingStartTime = startTime;
+    recordingBpm = bpm;
+    const beatDuration = 60 / recordingBpm;
+    nextMetronomeBeatIndex = firstBeatIndex;
+    nextMetronomeBeatTime = recordingStartTime + firstBeatIndex * beatDuration;
+    metronomeRunning = true;
+    runMetronomeScheduler();
+    updateMetronomeBeatDisplay();
+  };
+
+  const toggleMetronome = () => {
+    metronomeEnabled = !metronomeEnabled;
+    refreshMetronomeToggle();
+    if (!recording) return;
+    if (!metronomeEnabled) {
+      stopMetronome();
+      return;
+    }
+    const beatDuration = 60 / recordingBpm;
+    const elapsed = Math.max(0, audioContext.currentTime - recordingStartTime);
+    const nextBeatIndex = Math.max(0, Math.ceil(elapsed / beatDuration - 0.000001));
+    startMetronome(recordingStartTime, recordingBpm, nextBeatIndex);
+  };
+
   const schedulePad = (index, when, boundaries) => {
     if (!audioBuffer || !boundaries || !boundaries[index]) return;
     const [start, end] = boundaries[index];
@@ -174,10 +303,16 @@
       recordedEvents = [];
       recordingBoundaries = boundaries.map(boundary => [...boundary]);
       recordingDurationMs = 0;
+      recordingBpm = getBpm();
       recordingStartTime = audioContext.currentTime;
       recording = true;
+      if (metronomeEnabled) startMetronome(recordingStartTime, recordingBpm);
       if (clock) clock.textContent = '00:00.0';
-      if (sequencerStatus) sequencerStatus.textContent = 'Enregistrement en cours… joue les pads ou utilise le clavier.';
+      if (sequencerStatus) {
+        sequencerStatus.textContent = metronomeEnabled
+          ? `Enregistrement en cours à ${recordingBpm} BPM… joue les pads ou utilise le clavier.`
+          : 'Enregistrement en cours… joue les pads ou utilise le clavier.';
+      }
       updateSequencerButtons();
       updateClock();
     } catch (error) {
@@ -188,6 +323,7 @@
   function stopRecording() {
     if (!recording) return;
     recordingDurationMs = Math.max(1, Math.round((audioContext.currentTime - recordingStartTime) * 1000));
+    stopMetronome();
     recording = false;
     if (clockFrame !== null) cancelAnimationFrame(clockFrame);
     clockFrame = null;
@@ -282,6 +418,20 @@
   stopButton?.addEventListener('click', stopRecording);
   playSequenceButton?.addEventListener('click', playSequence);
   saveButton?.addEventListener('click', saveSequence);
+  metronomeToggle?.addEventListener('click', toggleMetronome);
+  bpmInput?.addEventListener('change', () => {
+    const value = Number(bpmInput.value);
+    if (!Number.isInteger(value) || value < 60 || value > 200) {
+      const fallback = bpmInput.value.trim() === '' || !Number.isFinite(value) ? 120 : Math.min(200, Math.max(60, Math.round(value)));
+      bpmInput.value = String(fallback);
+      showError('Le BPM doit être un nombre entier compris entre 60 et 200.');
+      return;
+    }
+    showError('');
+    if (recording && sequencerStatus) {
+      sequencerStatus.textContent = `Prise en cours à ${recordingBpm} BPM. Le nouveau tempo sera utilisé à la prochaine prise.`;
+    }
+  });
 
   document.addEventListener('keydown', event => {
     if (currentMode !== 'pads') return;
@@ -305,9 +455,11 @@
 
   window.addEventListener('pagehide', () => {
     if (recording) stopRecording();
+    stopMetronome();
     if (audioContext && audioContext.state !== 'closed') audioContext.close().catch(() => {});
   }, {once: true});
 
+  refreshMetronomeToggle();
   setMode('waveform');
   refreshPads();
 })();
