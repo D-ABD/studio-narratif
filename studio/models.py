@@ -180,6 +180,7 @@ class StudioBatch(models.Model):
         COMPLETED = "completed", "Terminé"
         PARTIAL = "partial", "Terminé avec erreurs"
         FAILED = "failed", "Échec"
+        CANCELLED = "cancelled", "Annulé"
 
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="studio_batches")
     voice = models.ForeignKey(Voice, null=True, blank=True, on_delete=models.SET_NULL, related_name="studio_batches")
@@ -210,6 +211,7 @@ class StudioBatchItem(models.Model):
         PROCESSING = "processing", "En cours"
         COMPLETED = "completed", "Terminé"
         FAILED = "failed", "Échec"
+        CANCELLED = "cancelled", "Annulé"
 
     batch = models.ForeignKey(StudioBatch, on_delete=models.CASCADE, related_name="items")
     position = models.PositiveSmallIntegerField()

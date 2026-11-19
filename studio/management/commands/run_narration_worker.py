@@ -50,7 +50,7 @@ class Command(BaseCommand):
                 try:
                     generate_studio_batch(task_id)
                 except Exception as exc:
-                    StudioBatch.objects.filter(pk=task_id).update(
+                    StudioBatch.objects.filter(pk=task_id, status=StudioBatch.Status.PROCESSING).update(
                         status=StudioBatch.Status.FAILED,
                         status_message="Le traitement du lot a échoué.",
                         error_message=str(exc)[:2000],
@@ -138,7 +138,15 @@ class Command(BaseCommand):
 
     def _recover_interrupted_studio_batches(self):
         now = timezone.now()
+        cancelled_items = StudioBatchItem.objects.filter(
+            batch__status=StudioBatch.Status.CANCELLED,
+            status__in=[StudioBatchItem.Status.PENDING, StudioBatchItem.Status.PROCESSING],
+        ).update(status=StudioBatchItem.Status.CANCELLED, updated_at=now)
+        StudioBatch.objects.filter(
+            status=StudioBatch.Status.CANCELLED, finished_at__isnull=True,
+        ).update(finished_at=now, queued_at=None, updated_at=now)
         reset_items = StudioBatchItem.objects.filter(
+            batch__status=StudioBatch.Status.PROCESSING,
             status=StudioBatchItem.Status.PROCESSING,
         ).update(status=StudioBatchItem.Status.PENDING, updated_at=now)
         recovered = StudioBatch.objects.filter(status=StudioBatch.Status.PROCESSING).update(
@@ -155,10 +163,10 @@ class Command(BaseCommand):
             status_message="Brouillon de lot repris · ajouté à la file.",
             updated_at=now,
         )
-        if recovered or activated_drafts or reset_items:
+        if recovered or activated_drafts or reset_items or cancelled_items:
             self.stdout.write(
                 f"{recovered} lot(s) interrompu(s) repris · {activated_drafts} brouillon(s) ajouté(s) à la file · "
-                f"{reset_items} narration(s) remise(s) en attente."
+                f"{reset_items} narration(s) remise(s) en attente · {cancelled_items} narration(s) annulée(s)."
             )
 
     @staticmethod

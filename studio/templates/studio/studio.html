@@ -26,11 +26,43 @@
   .studio-batch-card p { margin:4px 0 0; color:#8E99A9; font-size:10px; }
   .studio-batch-items { display:grid; gap:3px; margin-top:8px; }
   .studio-batch-items p { margin:0; }
+  .studio-batch-cancel { margin:0; }
+  .studio-batch-cancel button { min-height:34px; padding:6px 11px; border:1px solid #603337; border-radius:9px; color:#F0AAA3; background:#2A1B1B; font-size:11px; font-weight:700; cursor:pointer; }
+  .studio-batch-cancel button:hover { border-color:#9A4B4B; background:#3A2021; }
   .studio-status { padding:4px 8px; border:1px solid #5A4016; border-radius:99px; color:#FFC65D; background:#241D12; font-size:9px; font-weight:700; white-space:nowrap; }
   .studio-empty { padding:18px 12px; border:1px dashed #344050; border-radius:11px; color:#929BAA; background:#11161F; font-size:12px; }
   @media(max-width:680px) { .studio-top-fields { grid-template-columns:1fr; } .studio-text-row { grid-template-columns:1fr; } .studio-text-row > button { justify-self:start; } }
 </style>
 <div class="studio-page">
+  {% if active_studio_batches %}
+  <section class="card" data-active-studio-section>
+    <div class="section-title"><div><span class="step-number">◷</span><h2>Lots en cours</h2></div><span class="muted small">{{ active_studio_batches|length }} lot{{ active_studio_batches|length|pluralize:"s" }}</span></div>
+    <div class="studio-batch-list" data-active-studio-list>
+      {% for batch in active_studio_batches %}
+      <article class="studio-batch-card" data-studio-batch-card data-status-url="{% url 'studio_batch_status' batch.id %}" data-status="{{ batch.status }}">
+        <button id="active-studio-batch-summary-{{ batch.id }}" class="list-accordion-trigger studio-batch-summary" type="button" data-list-accordion-trigger aria-expanded="false" aria-controls="active-studio-batch-details-{{ batch.id }}">
+          <span><strong>{% if batch.name_prefix %}{{ batch.name_prefix }}{% else %}Lot #{{ batch.id }}{% endif %}</strong><small>{{ batch.total_items }} narration{{ batch.total_items|pluralize:"s" }} · {{ batch.created_at|date:"d/m/Y H:i" }} · {{ batch.voice.name|default:"Voix supprimée" }}</small><small data-batch-progress-label>Progression : {{ batch.progress_percent }} %</small></span>
+          <span class="studio-status" data-batch-status>{{ batch.get_status_display }}</span>
+          <span class="list-accordion-chevron" aria-hidden="true">▸</span>
+        </button>
+        <form class="studio-batch-cancel" method="post" action="{% url 'cancel_studio_batch' batch.id %}" data-confirm-studio-cancel>
+          {% csrf_token %}<button type="submit" aria-label="Annuler le lot">Annuler</button>
+        </form>
+        <div class="studio-batch-details" id="active-studio-batch-details-{{ batch.id }}" role="region" aria-labelledby="active-studio-batch-summary-{{ batch.id }}" hidden>
+          <progress value="{{ batch.progress_percent }}" max="100" data-batch-progress aria-label="Progression du lot"></progress>
+          <p data-batch-message>{{ batch.status_message|default:batch.get_status_display }}</p>
+          <div class="studio-batch-items" data-batch-items>
+            {% for item in batch.items.all %}
+            <p data-batch-item data-position="{{ forloop.counter }}"><span>{{ forloop.counter }}. {{ item.asset_name }}</span> · <span data-item-status>{{ item.get_status_display }}</span>{% if item.error_message %} · {{ item.error_message }}{% endif %}{% if item.audio_asset %} · <a class="text-link" data-item-audio-link href="{{ item.audio_asset.audio_file.url }}" download>WAV ↓</a>{% endif %}</p>
+            {% endfor %}
+          </div>
+        </div>
+      </article>
+      {% endfor %}
+    </div>
+  </section>
+  {% endif %}
+
   <section class="card">
     <div class="section-title"><div><span class="step-number">♫</span><h2>Préparer un lot de narrations</h2></div></div>
     <p class="studio-intro">Saisis jusqu’à {{ max_batch_items }} textes. Chaque narration sera générée séparément avec XTTS, alignée par WhisperX, puis ajoutée à ta bibliothèque audio.</p>
@@ -71,7 +103,7 @@
   </section>
 
   <section class="card">
-    <div class="section-title"><div><span class="step-number">▤</span><h2>Mes lots</h2></div><span class="muted small">{{ studio_page.paginator.count }} lot{{ studio_page.paginator.count|pluralize:"s" }}</span>
+    <div class="section-title"><div><span class="step-number">▤</span><h2>Historique des lots</h2></div><span class="muted small">{{ studio_page.paginator.count }} lot{{ studio_page.paginator.count|pluralize:"s" }}</span>
       <form class="list-page-size" method="get" action="{% url 'studio_home' %}"><label for="studioPageSize">Par page</label><select id="studioPageSize" name="per_page"><option value="5" {% if studio_per_page == 5 %}selected{% endif %}>5</option><option value="10" {% if studio_per_page == 10 %}selected{% endif %}>10</option><option value="20" {% if studio_per_page == 20 %}selected{% endif %}>20</option></select><button type="submit">Appliquer</button></form>
       <a class="button button-secondary button-small" href="">↻ Actualiser</a>
     </div>
@@ -160,7 +192,7 @@
 <script>
 (() => {
   const cards = [...document.querySelectorAll('[data-studio-batch-card]')];
-  const terminal = new Set(['completed', 'partial', 'failed']);
+  const terminal = new Set(['completed', 'partial', 'failed', 'cancelled']);
   const refresh = async card => {
     if (terminal.has(card.dataset.status)) return;
     try {
@@ -177,6 +209,16 @@
       if (message) message.textContent = batch.status_message;
       const badge = card.querySelector('[data-batch-status]');
       if (badge) badge.textContent = batch.status_label;
+      if (terminal.has(batch.status)) {
+        const cancelForm = card.querySelector('[data-confirm-studio-cancel]');
+        if (cancelForm) cancelForm.remove();
+        if (card.closest('[data-active-studio-list]')) {
+          card.remove();
+          const section = document.querySelector('[data-active-studio-section]');
+          if (section && !section.querySelector('[data-studio-batch-card]')) section.remove();
+          return;
+        }
+      }
       batch.items.forEach(item => {
         const row = card.querySelector(`[data-batch-item][data-position="${item.position}"]`);
         if (!row) return;

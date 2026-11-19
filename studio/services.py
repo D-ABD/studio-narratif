@@ -500,20 +500,43 @@ def generate_studio_batch(batch_id):
     try:
         with _PIPELINE_LOCK:
             batch = StudioBatch.objects.select_related("user", "voice").get(pk=batch_id)
+            if batch.status == StudioBatch.Status.CANCELLED:
+                batch.items.filter(status=StudioBatchItem.Status.PENDING).update(
+                    status=StudioBatchItem.Status.CANCELLED, updated_at=timezone.now(),
+                )
+                if batch.finished_at is None:
+                    batch.finished_at = timezone.now()
+                    batch.save(update_fields=["finished_at", "updated_at"])
+                return
             if batch.status != StudioBatch.Status.PROCESSING:
                 raise RuntimeError("Le lot n’est pas en cours de traitement.")
             voice = batch.voice
             if not voice or voice.user_id != batch.user_id or not voice.consent_confirmed:
                 raise RuntimeError("La voix du lot n’est plus disponible ou son autorisation n’est pas confirmée.")
             sample_digest = _voice_sample_digest(voice)
-            items = list(batch.items.filter(status=StudioBatchItem.Status.PENDING).order_by("position", "id"))
-            for item in items:
-                item.status = StudioBatchItem.Status.PROCESSING
-                item.error_message = ""
-                item.save(update_fields=["status", "error_message", "updated_at"])
-                batch.current_item = item.position + 1
-                batch.status_message = f"Synthèse XTTS · narration {item.position + 1}/{batch.total_items}"
-                batch.save(update_fields=["current_item", "status_message", "updated_at"])
+            item_ids = list(batch.items.filter(status=StudioBatchItem.Status.PENDING)
+                            .order_by("position", "id").values_list("id", flat=True))
+            for item_id in item_ids:
+                with transaction.atomic():
+                    batch = StudioBatch.objects.select_for_update().select_related("user", "voice").get(pk=batch_id)
+                    if batch.status == StudioBatch.Status.CANCELLED:
+                        batch.items.filter(status=StudioBatchItem.Status.PENDING).update(
+                            status=StudioBatchItem.Status.CANCELLED, updated_at=timezone.now(),
+                        )
+                        break
+                    if batch.status != StudioBatch.Status.PROCESSING:
+                        break
+                    item = batch.items.select_for_update().filter(
+                        pk=item_id, status=StudioBatchItem.Status.PENDING,
+                    ).first()
+                    if item is None:
+                        continue
+                    item.status = StudioBatchItem.Status.PROCESSING
+                    item.error_message = ""
+                    item.save(update_fields=["status", "error_message", "updated_at"])
+                    batch.current_item = item.position + 1
+                    batch.status_message = f"Synthèse XTTS · narration {item.position + 1}/{batch.total_items}"
+                    batch.save(update_fields=["current_item", "status_message", "updated_at"])
                 expected_key = cache_key_for(item.text, voice, sample_digest=sample_digest)
                 cache_audio, cache_metadata = _persistent_cache_paths(expected_key)
                 cached = _read_studio_audio_cache(cache_audio, cache_metadata)
@@ -577,23 +600,32 @@ def generate_studio_batch(batch_id):
                     batch.status_message = f"Échec de la narration {item.position + 1}/{batch.total_items} · poursuite du lot"
                     batch.save(update_fields=["progress_percent", "status_message", "updated_at"])
 
-            batch.refresh_from_db()
-            failed = batch.items.filter(status=StudioBatchItem.Status.FAILED).count()
-            batch.completed_items = batch.items.filter(status=StudioBatchItem.Status.COMPLETED).count()
-            if failed and batch.completed_items:
-                batch.status = StudioBatch.Status.PARTIAL
-                batch.status_message = f"Lot terminé · {batch.completed_items} réussite(s), {failed} échec(s)."
-            elif failed:
-                batch.status = StudioBatch.Status.FAILED
-                batch.status_message = f"Aucune narration n’a abouti · {failed} échec(s)."
-            else:
-                batch.status = StudioBatch.Status.COMPLETED
-                batch.status_message = "Toutes les narrations sont prêtes dans la bibliothèque audio."
-            batch.progress_percent = 100
-            batch.finished_at = timezone.now()
-            batch.save(update_fields=[
-                "status", "completed_items", "progress_percent", "status_message", "finished_at", "updated_at",
-            ])
+            with transaction.atomic():
+                batch = StudioBatch.objects.select_for_update().get(pk=batch_id)
+                failed = batch.items.filter(status=StudioBatchItem.Status.FAILED).count()
+                batch.completed_items = batch.items.filter(status=StudioBatchItem.Status.COMPLETED).count()
+                if batch.status == StudioBatch.Status.CANCELLED:
+                    batch.items.filter(status=StudioBatchItem.Status.PENDING).update(
+                        status=StudioBatchItem.Status.CANCELLED, updated_at=timezone.now(),
+                    )
+                    batch.status_message = (
+                        f"Lot annulé · {batch.completed_items} narration(s) conservée(s)."
+                    )
+                else:
+                    if failed and batch.completed_items:
+                        batch.status = StudioBatch.Status.PARTIAL
+                        batch.status_message = f"Lot terminé · {batch.completed_items} réussite(s), {failed} échec(s)."
+                    elif failed:
+                        batch.status = StudioBatch.Status.FAILED
+                        batch.status_message = f"Aucune narration n’a abouti · {failed} échec(s)."
+                    else:
+                        batch.status = StudioBatch.Status.COMPLETED
+                        batch.status_message = "Toutes les narrations sont prêtes dans la bibliothèque audio."
+                    batch.progress_percent = 100
+                batch.finished_at = timezone.now()
+                batch.save(update_fields=[
+                    "status", "completed_items", "progress_percent", "status_message", "finished_at", "updated_at",
+                ])
     finally:
         close_old_connections()
 

@@ -4,6 +4,11 @@
   // Capture les soumissions tôt, même si une autre initialisation de la page échoue.
   document.addEventListener('submit', event => {
     const form = event.target;
+    if (form instanceof HTMLFormElement && form.matches('[data-confirm-studio-cancel]')) {
+      const confirmation = 'Voulez-vous vraiment annuler ce lot de narration ? Les audios déjà générés seront conservés, mais les suivants ne seront pas traités.';
+      if (!window.confirm(confirmation)) event.preventDefault();
+      return;
+    }
     if (!(form instanceof HTMLFormElement) || !form.matches('#prepareForm, #audioOnlyForm, #assemblyRenderForm')) return;
 
     event.preventDefault();
