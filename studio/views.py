@@ -522,6 +522,8 @@ def delete_folder(request, folder_id):
     name = folder.name
     folder.delete()
     messages.success(request, f"Dossier « {name} » supprimé. Ses projets sont à la racine.")
+    if request.headers.get("x-requested-with") == "XMLHttpRequest":
+        return JsonResponse({"success": True, "redirect_url": reverse("project_list")})
     return _folder_action_response(request, message="Dossier supprimé.", folder_id=folder_id)
 
 

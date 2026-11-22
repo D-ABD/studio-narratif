@@ -40,7 +40,7 @@
     });
     let data = {};
     try { data = await response.json(); } catch (_) {}
-    if (!response.ok || !data.ok) throw new Error(data.error || data.message || 'La requête a échoué.');
+    if (!response.ok || !(data.ok || data.success)) throw new Error(data.error || data.message || 'La requête a échoué.');
     return data;
   };
 
@@ -92,8 +92,8 @@
       const folderName = deleteButton.dataset.folderName || '';
       if (!window.confirm(`Supprimer le dossier « ${folderName} » ? Les projets seront déplacés à la racine.`)) return;
       try {
-        await postFolderAction(deleteButton.dataset.folderDeleteUrl, {confirm: '1'});
-        window.location.reload();
+        const data = await postFolderAction(deleteButton.dataset.folderDeleteUrl, {confirm: '1'});
+        window.location.href = data.redirect_url;
       } catch (error) {
         window.alert(error.message);
       }

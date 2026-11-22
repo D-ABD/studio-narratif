@@ -804,7 +804,7 @@ class ListPaginationAndBatchDismissTests(MediaTestCase):
             f"/folders/{folder.pk}/delete/", {"confirm": "1"}, HTTP_X_REQUESTED_WITH="XMLHttpRequest",
         )
         self.assertEqual(delete.status_code, 200)
-        self.assertTrue(delete.json()["ok"])
+        self.assertEqual(delete.json(), {"success": True, "redirect_url": "/projects/"})
         project.refresh_from_db()
         self.assertIsNone(project.folder_id)
         self.assertTrue(NarrationProject.objects.filter(pk=project.pk).exists())
