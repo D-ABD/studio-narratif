@@ -22,7 +22,7 @@ from django.utils import timezone
 from PIL import Image
 
 from .models import (
-    AudioAsset, AudioSession, BackgroundTrack, NarrationProject, NarrationSegment, ProjectFolder,
+    AudioAsset, AudioSession, BackgroundTrack, MediaFolder, NarrationProject, NarrationSegment, ProjectFolder,
     StudioBatch, StudioBatchItem, Voice,
     default_animation_settings,
 )
@@ -312,6 +312,173 @@ class AudioAssetLibraryTests(MediaTestCase):
             response = self.client.post(url, {"confirm": "1"}) if url != "/audios/" else self.client.get(url)
             self.assertEqual(response.status_code, 302)
             self.assertIn("/login/", response.url)
+
+
+class MediaFolderLibraryTests(MediaTestCase):
+    def make_asset(self, name, *, user=None, folder=None):
+        asset = AudioAsset.objects.create(
+            user=user or self.user, folder=folder, name=name, duration=12.5,
+            source=AudioAsset.Source.UPLOAD,
+        )
+        asset.audio_file.save(f"{name}.mp3", ContentFile(b"audio bytes"), save=True)
+        return asset
+
+    def make_track(self, name, *, user=None, folder=None):
+        track = BackgroundTrack.objects.create(
+            user=user or self.user, folder=folder, name=name, duration=12.5,
+        )
+        track.audio_file.save(f"{name}.mp3", ContentFile(b"music bytes"), save=True)
+        return track
+
+    def test_media_folder_crud_is_owner_scoped_and_deletion_keeps_media_at_root(self):
+        create = self.client.post(
+            "/media-folders/create/", {"name": "  Production  "}, HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+        self.assertEqual(create.status_code, 200)
+        self.assertTrue(create.json()["ok"])
+        folder = MediaFolder.objects.get(user=self.user)
+        self.assertEqual(folder.name, "Production")
+
+        rename = self.client.post(
+            f"/media-folders/{folder.pk}/rename/", {"name": "  Archives  "},
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+        self.assertEqual(rename.status_code, 200)
+        folder.refresh_from_db()
+        self.assertEqual(folder.name, "Archives")
+
+        asset = self.make_asset("Voix classée", folder=folder)
+        track = self.make_track("Ambiance classée", folder=folder)
+        other_user = get_user_model().objects.create_user(username="media-folder-private", password="SafePass123!x")
+        foreign_folder = MediaFolder.objects.create(user=other_user, name="Privé")
+        self.assertEqual(
+            self.client.post(f"/media-folders/{foreign_folder.pk}/rename/", {"name": "Intrusion"}).status_code,
+            404,
+        )
+        self.assertEqual(
+            self.client.post(
+                f"/media-folders/{foreign_folder.pk}/delete/", {"confirm": "1"},
+                HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+            ).status_code,
+            404,
+        )
+
+        deleted = self.client.post(
+            f"/media-folders/{folder.pk}/delete/", {"confirm": "1", "next": "/musics/"},
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(deleted.json(), {"success": True, "redirect_url": "/musics/"})
+        asset.refresh_from_db()
+        track.refresh_from_db()
+        self.assertIsNone(asset.folder_id)
+        self.assertIsNone(track.folder_id)
+        self.assertTrue(AudioAsset.objects.filter(pk=asset.pk).exists())
+        self.assertTrue(BackgroundTrack.objects.filter(pk=track.pk).exists())
+        self.assertFalse(MediaFolder.objects.filter(pk=folder.pk).exists())
+
+    def test_audio_and_music_moves_validate_ownership_and_allow_root(self):
+        folder = MediaFolder.objects.create(user=self.user, name="À classer")
+        asset = self.make_asset("Audio à déplacer")
+        track = self.make_track("Musique à déplacer")
+
+        moved_audio = self.client.post(
+            f"/audios/{asset.pk}/move/", {"folder_id": str(folder.pk)},
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+        moved_music = self.client.post(
+            f"/musics/{track.pk}/move/", {"folder_id": str(folder.pk)},
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+        self.assertEqual(moved_audio.status_code, 200)
+        self.assertEqual(moved_music.status_code, 200)
+        asset.refresh_from_db()
+        track.refresh_from_db()
+        self.assertEqual(asset.folder_id, folder.pk)
+        self.assertEqual(track.folder_id, folder.pk)
+
+        for url, item in ((f"/audios/{asset.pk}/move/", asset), (f"/musics/{track.pk}/move/", track)):
+            rooted = self.client.post(url, {"folder_id": ""}, HTTP_X_REQUESTED_WITH="XMLHttpRequest")
+            self.assertEqual(rooted.status_code, 200)
+            item.refresh_from_db()
+            self.assertIsNone(item.folder_id)
+
+        other_user = get_user_model().objects.create_user(username="media-move-private", password="SafePass123!x")
+        foreign_folder = MediaFolder.objects.create(user=other_user, name="Privé")
+        foreign_asset = self.make_asset("Audio privé", user=other_user)
+        foreign_track = self.make_track("Musique privée", user=other_user)
+        self.assertEqual(
+            self.client.post(f"/audios/{asset.pk}/move/", {"folder_id": str(foreign_folder.pk)}).status_code, 404,
+        )
+        self.assertEqual(
+            self.client.post(f"/musics/{track.pk}/move/", {"folder_id": str(foreign_folder.pk)}).status_code, 404,
+        )
+        self.assertEqual(self.client.post(f"/audios/{foreign_asset.pk}/move/", {"folder_id": ""}).status_code, 404)
+        self.assertEqual(self.client.post(f"/musics/{foreign_track.pk}/move/", {"folder_id": ""}).status_code, 404)
+        self.assertEqual(self.client.post(f"/audios/{asset.pk}/move/", {"folder_id": "bad"}).status_code, 400)
+        self.assertEqual(self.client.post(f"/musics/{track.pk}/move/", {"folder_id": "bad"}).status_code, 400)
+
+    def test_audio_and_music_folder_filters_preserve_root_all_and_pagination(self):
+        folder = MediaFolder.objects.create(user=self.user, name="Saison 1")
+        for index in range(6):
+            self.make_asset(f"Audio classé {index}", folder=folder)
+        self.make_asset("Audio racine")
+        self.make_track("Musique classée", folder=folder)
+        self.make_track("Musique racine")
+
+        audio_page = self.client.get(f"/audios/?folder={folder.pk}&per_page=5")
+        self.assertEqual(audio_page.status_code, 200)
+        self.assertEqual(audio_page.context["audio_page"].paginator.count, 6)
+        self.assertEqual(audio_page.context["pagination_params"], f"folder={folder.pk}&per_page=5")
+        self.assertContains(audio_page, f"href=\"?folder={folder.pk}&amp;per_page=5&amp;page=2\"")
+        self.assertContains(audio_page, "Audio classé 5")
+        self.assertNotContains(audio_page, "Audio racine")
+        self.assertEqual(self.client.get(f"/audios/?folder={folder.pk}&per_page=5&page=2").context[
+            "audio_page"].object_list.count(), 1)
+
+        root_audio = self.client.get("/audios/?folder=")
+        self.assertEqual(root_audio.context["audio_page"].paginator.count, 1)
+        self.assertContains(root_audio, "Audio racine")
+        self.assertNotContains(root_audio, "Audio classé 0")
+        self.assertEqual(self.client.get("/audios/").context["audio_page"].paginator.count, 7)
+
+        music_page = self.client.get(f"/musics/?folder={folder.pk}")
+        self.assertEqual(music_page.context["music_page"].paginator.count, 1)
+        self.assertContains(music_page, "Musique classée")
+        self.assertNotContains(music_page, "Musique racine")
+        root_music = self.client.get("/musics/?folder=")
+        self.assertEqual(root_music.context["music_page"].paginator.count, 1)
+        self.assertContains(root_music, "Musique racine")
+        self.assertEqual(self.client.get("/musics/").context["music_page"].paginator.count, 2)
+
+        other_user = get_user_model().objects.create_user(username="media-filter-private", password="SafePass123!x")
+        private_folder = MediaFolder.objects.create(user=other_user, name="Privé")
+        self.assertEqual(self.client.get(f"/audios/?folder={private_folder.pk}").status_code, 404)
+        self.assertEqual(self.client.get(f"/musics/?folder={private_folder.pk}").status_code, 404)
+        self.assertEqual(self.client.get("/audios/?folder=invalid").status_code, 404)
+        self.assertEqual(self.client.get("/musics/?folder=invalid").status_code, 404)
+
+    def test_sidebar_and_both_libraries_expose_media_folder_controls(self):
+        folder = MediaFolder.objects.create(user=self.user, name="Bibliothèque commune")
+        asset = self.make_asset("Audio visible", folder=folder)
+        track = self.make_track("Musique visible", folder=folder)
+
+        audio_page = self.client.get("/audios/")
+        self.assertEqual(audio_page.status_code, 200)
+        self.assertContains(audio_page, "Dossiers médias")
+        self.assertContains(audio_page, f'href="/audios/?folder={folder.pk}"')
+        self.assertContains(audio_page, f'href="/musics/?folder={folder.pk}"')
+        self.assertContains(audio_page, 'data-create-folder-url="/media-folders/create/"')
+        self.assertContains(audio_page, f'data-move-url="/audios/{asset.pk}/move/"')
+        self.assertContains(audio_page, "Bibliothèque commune")
+        self.assertEqual(audio_page.context["sidebar_media_folders"][0].audio_count, 1)
+        self.assertEqual(audio_page.context["sidebar_media_folders"][0].music_count, 1)
+
+        music_page = self.client.get("/musics/")
+        self.assertEqual(music_page.status_code, 200)
+        self.assertContains(music_page, f'data-move-url="/musics/{track.pk}/move/"')
+        self.assertContains(music_page, 'data-folder-create')
+        self.assertContains(music_page, f'data-folder-delete-url="/media-folders/{folder.pk}/delete/"')
 
 
 class StudioBatchGenerationTests(MediaTestCase):

@@ -14,9 +14,14 @@
   .music-library-item audio { width:100%; }
   .music-library-summary { min-width:0; }
   .music-library-item > .music-library-summary, .music-library-details { grid-column:1 / -1; }
+  .music-library-item > .media-folder-move { grid-column:1 / -1; }
   .music-library-summary > span:first-child { min-width:0; display:grid; gap:3px; text-align:left; }
   .music-library-details { display:flex; align-items:center; gap:12px; padding:10px 0 0; border-top:1px solid #293241; }
   .music-library-details audio { flex:1 1 auto; min-width:0; }
+  .media-folder-actions { display:flex; align-items:center; gap:8px; }
+  .media-folder-actions a { color:#FFC65D; font-size:10px; }
+  .media-folder-move { display:inline-flex; align-items:center; gap:5px; color:#AAB3C1; font-size:10px; white-space:nowrap; }
+  .media-folder-move select { min-height:31px; max-width:190px; padding:4px 7px; border:1px solid #303A49; border-radius:8px; color:#E1E5EB; background:#111720; }
   @media(max-width:620px) { .music-library-item { grid-template-columns:1fr; } }
 </style>
 <div class="music-library-page">
@@ -32,8 +37,9 @@
   </form>
 </section>
 <section class="card">
-  <div class="section-title"><div><span class="step-number">♫</span><h2>Mes musiques</h2></div><span class="muted small">{{ music_page.paginator.count }} piste{{ music_page.paginator.count|pluralize:"s" }}</span>
-    <form class="list-page-size" method="get" action="{% url 'musics' %}"><label for="musicPageSize">Par page</label><select id="musicPageSize" name="per_page"><option value="5" {% if music_per_page == 5 %}selected{% endif %}>5</option><option value="10" {% if music_per_page == 10 %}selected{% endif %}>10</option><option value="20" {% if music_per_page == 20 %}selected{% endif %}>20</option></select><button type="submit">Appliquer</button></form>
+  <div class="section-title"><div><span class="step-number">♫</span><h2>{% if selected_media_folder %}{{ selected_media_folder.name }}{% else %}Mes musiques{% endif %}</h2></div><span class="muted small">{{ music_page.paginator.count }} piste{{ music_page.paginator.count|pluralize:"s" }}</span>
+    <div class="media-folder-actions"><a href="?folder=" title="Afficher les musiques à la racine">Racine</a><button class="button button-secondary button-small" type="button" data-folder-create data-create-folder-url="{% url 'create_media_folder' %}">＋ Nouveau dossier</button></div>
+    <form class="list-page-size" method="get" action="{% url 'musics' %}">{% if media_folder_filter_active %}<input type="hidden" name="folder" value="{{ media_folder_filter }}">{% endif %}<label for="musicPageSize">Par page</label><select id="musicPageSize" name="per_page"><option value="5" {% if music_per_page == 5 %}selected{% endif %}>5</option><option value="10" {% if music_per_page == 10 %}selected{% endif %}>10</option><option value="20" {% if music_per_page == 20 %}selected{% endif %}>20</option></select><button type="submit">Appliquer</button></form>
     <a class="button button-secondary button-small" href="">↻ Actualiser</a>
   </div>
   <div class="music-library-list">
@@ -43,6 +49,12 @@
         <span><strong>{{ track.name }}</strong><span class="muted small">{{ track.duration|floatformat:1 }} s</span></span>
         <span class="list-accordion-chevron" aria-hidden="true">▸</span>
       </button>
+      <label class="media-folder-move"><span aria-hidden="true">▱</span><span class="sr-only">Déplacer « {{ track.name }} »</span>
+        <select data-media-folder-move data-move-url="{% url 'move_music' track.id %}" data-current-folder="{{ track.folder_id|default_if_none:'' }}" aria-label="Déplacer « {{ track.name }} »">
+          <option value="" {% if not track.folder_id %}selected{% endif %}>Racine</option>
+          {% for folder in media_folders %}<option value="{{ folder.id }}" {% if track.folder_id == folder.id %}selected{% endif %}>{{ folder.name }}</option>{% endfor %}
+        </select>
+      </label>
       <div class="music-library-details" id="music-details-{{ track.id }}" role="region" aria-label="Aperçu et actions pour {{ track.name }}" hidden>
         <audio controls preload="none" src="{{ track.audio_file.url }}" aria-label="Aperçu de {{ track.name }}"></audio>
         <form method="post" action="{% url 'delete_music' track.id %}" onsubmit="return confirm('Supprimer cette musique ? Les projets associés perdront leur sélection.');">
@@ -51,7 +63,7 @@
         </form>
       </div>
     </article>
-    {% empty %}<p class="muted">Votre bibliothèque musicale est vide.</p>{% endfor %}
+    {% empty %}<p class="muted">{% if selected_media_folder %}Aucune musique dans ce dossier.{% else %}Votre bibliothèque musicale est vide.{% endif %}</p>{% endfor %}
   </div>
   {% if music_page.has_other_pages %}
   <nav class="pagination-controls" aria-label="Pagination de la bibliothèque musicale">

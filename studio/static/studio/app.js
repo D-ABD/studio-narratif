@@ -90,9 +90,12 @@
     const deleteButton = target.closest('[data-folder-delete]');
     if (deleteButton) {
       const folderName = deleteButton.dataset.folderName || '';
-      if (!window.confirm(`Supprimer le dossier « ${folderName} » ? Les projets seront déplacés à la racine.`)) return;
+      const effect = deleteButton.dataset.folderDeleteEffect || 'Les projets seront déplacés à la racine.';
+      if (!window.confirm(`Supprimer le dossier « ${folderName} » ? ${effect}`)) return;
       try {
-        const data = await postFolderAction(deleteButton.dataset.folderDeleteUrl, {confirm: '1'});
+        const data = await postFolderAction(deleteButton.dataset.folderDeleteUrl, {
+          confirm: '1', next: deleteButton.dataset.folderReturnUrl || '',
+        });
         window.location.href = data.redirect_url;
       } catch (error) {
         window.alert(error.message);
@@ -108,7 +111,7 @@
 
   document.addEventListener('change', async event => {
     const select = event.target instanceof HTMLSelectElement ? event.target : null;
-    if (!select?.matches('[data-project-folder-move]')) return;
+    if (!select?.matches('[data-project-folder-move], [data-media-folder-move]')) return;
     select.disabled = true;
     try {
       await postFolderAction(select.dataset.moveUrl, {folder_id: select.value});

@@ -26,6 +26,11 @@
 .sidebar-collapsed .premium-folder-menu-toggle{position:absolute;right:0;top:3px;z-index:2;opacity:0}
 .sidebar-collapsed .premium-folder-row:hover .premium-folder-menu-toggle,.sidebar-collapsed .premium-folder-row:focus-within .premium-folder-menu-toggle{opacity:1}
 @media(max-width:967.98px){.premium-folder-title{display:flex;padding:12px 10px 6px}.premium-folder-tree{max-height:28vh}.premium-folder-menu-toggle{opacity:1;pointer-events:auto}.sidebar-collapsed .premium-folder-label{display:inline}.sidebar-collapsed .premium-folder-link{justify-content:flex-start;padding:0 8px}.sidebar-collapsed .premium-folder-title span:first-child{display:inline}}
+.premium-media-folder-links{display:flex;align-items:center;gap:3px;margin-left:auto}
+.premium-media-folder-links a{display:inline-flex;align-items:center;gap:3px;padding:4px 5px;border-radius:6px;color:#AEB8C7;font-size:10px}
+.premium-media-folder-links a:hover{background:#202936;color:#FFC65D}
+.premium-media-folder-links small{font-size:9px;color:#8590A0}
+.sidebar-collapsed .premium-media-folder-links{display:none}
 /* Persistent narration queue */
 .status-tag.queued{color:#b8d2e0;border-color:#3f5b69;background:#223541}
 .project-dot.queued{background:#87b9d2}

@@ -23,6 +23,11 @@
   .audio-rename-form { display:flex; align-items:center; gap:6px; margin-top:8px; }
   .audio-rename-form input { width:180px; min-height:34px; padding:6px 8px; border:1px solid #303A49; border-radius:8px; color:#E7EAF0; background:#10141C; }
   .audio-empty { padding:18px 12px; border:1px dashed #344050; border-radius:11px; color:#929BAA; background:#11161F; font-size:12px; }
+  .media-folder-actions { display:flex; align-items:center; gap:8px; }
+  .media-folder-actions a { color:#FFC65D; font-size:10px; }
+  .media-folder-create { white-space:nowrap; }
+  .media-folder-move { display:inline-flex; align-items:center; gap:5px; color:#AAB3C1; font-size:10px; }
+  .media-folder-move select { min-height:31px; max-width:190px; padding:4px 7px; border:1px solid #303A49; border-radius:8px; color:#E1E5EB; background:#111720; }
   @media(max-width:620px) { .audio-upload-form { max-width:none; } }
 </style>
 <div class="audio-library-page">
@@ -38,8 +43,9 @@
   </section>
 
   <section class="card">
-    <div class="section-title"><div><span class="step-number">♫</span><h2>Mes audios</h2></div><span class="muted small">{{ audio_page.paginator.count }} fichier{{ audio_page.paginator.count|pluralize:"s" }}</span>
-      <form class="list-page-size" method="get" action="{% url 'audios' %}"><label for="audioPageSize">Par page</label><select id="audioPageSize" name="per_page"><option value="5" {% if audio_per_page == 5 %}selected{% endif %}>5</option><option value="10" {% if audio_per_page == 10 %}selected{% endif %}>10</option><option value="20" {% if audio_per_page == 20 %}selected{% endif %}>20</option></select><button type="submit">Appliquer</button></form>
+    <div class="section-title"><div><span class="step-number">♫</span><h2>{% if selected_media_folder %}{{ selected_media_folder.name }}{% else %}Mes audios{% endif %}</h2></div><span class="muted small">{{ audio_page.paginator.count }} fichier{{ audio_page.paginator.count|pluralize:"s" }}</span>
+      <div class="media-folder-actions"><a href="?folder=" title="Afficher les audios à la racine">Racine</a><button class="button button-secondary button-small media-folder-create" type="button" data-folder-create data-create-folder-url="{% url 'create_media_folder' %}">＋ Nouveau dossier</button></div>
+      <form class="list-page-size" method="get" action="{% url 'audios' %}">{% if media_folder_filter_active %}<input type="hidden" name="folder" value="{{ media_folder_filter }}">{% endif %}<label for="audioPageSize">Par page</label><select id="audioPageSize" name="per_page"><option value="5" {% if audio_per_page == 5 %}selected{% endif %}>5</option><option value="10" {% if audio_per_page == 10 %}selected{% endif %}>10</option><option value="20" {% if audio_per_page == 20 %}selected{% endif %}>20</option></select><button type="submit">Appliquer</button></form>
       <a class="button button-secondary button-small" href="">↻ Actualiser</a>
     </div>
     {% if audio_assets %}
@@ -55,6 +61,12 @@
             <td>{{ asset.created_at|date:"d/m/Y H:i" }}</td>
             <td>
               <div class="audio-row-actions"><button class="button button-secondary button-small" type="button" data-list-accordion-trigger aria-expanded="false" aria-controls="audio-details-{{ asset.id }}">Aperçu et actions</button></div>
+              <label class="media-folder-move"><span aria-hidden="true">▱</span><span class="sr-only">Déplacer « {{ asset.name }} »</span>
+                <select data-media-folder-move data-move-url="{% url 'move_audio_asset' asset.id %}" data-current-folder="{{ asset.folder_id|default_if_none:'' }}" aria-label="Déplacer « {{ asset.name }} »">
+                  <option value="" {% if not asset.folder_id %}selected{% endif %}>Racine</option>
+                  {% for folder in media_folders %}<option value="{{ folder.id }}" {% if asset.folder_id == folder.id %}selected{% endif %}>{{ folder.name }}</option>{% endfor %}
+                </select>
+              </label>
             </td>
           </tr>
           <tr>
@@ -82,7 +94,7 @@
       </table>
     </div>
     {% else %}
-    <p class="audio-empty">Aucun audio pour l'instant. Uploade ton premier fichier.</p>
+    <p class="audio-empty">{% if selected_media_folder %}Aucun audio dans ce dossier.{% else %}Aucun audio pour l'instant. Uploade ton premier fichier.{% endif %}</p>
     {% endif %}
     {% if audio_page.has_other_pages %}
     <nav class="pagination-controls" aria-label="Pagination de la bibliothèque audio">

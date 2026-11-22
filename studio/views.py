@@ -29,7 +29,7 @@ from PIL import Image, UnidentifiedImageError
 
 from .models import (
     ANIMATION_EFFECTS, ANIMATION_LEVEL_CHOICES, AudioAsset, AudioSession, BackgroundTrack, NarrationProject,
-    NarrationSegment, ProjectFolder, StudioBatch, StudioBatchItem, Voice,
+    MediaFolder, NarrationSegment, ProjectFolder, StudioBatch, StudioBatchItem, Voice,
     default_animation_settings, legacy_animation_settings,
 )
 from .services import _voice_sample_digest, cache_key_for, hash_file, normalize_voice_sample, srt_text
@@ -401,6 +401,28 @@ def _pagination_params(request, *, preserve=(), default=20):
     return urlencode(params)
 
 
+def _filter_media_folder(request, queryset):
+    folder_active = "folder" in request.GET
+    folder_value = request.GET.get("folder") if folder_active else None
+    selected_folder = None
+    if folder_active:
+        if folder_value == "":
+            queryset = queryset.filter(folder__isnull=True)
+        else:
+            try:
+                folder_id = int(folder_value)
+            except (TypeError, ValueError):
+                raise Http404
+            selected_folder = get_object_or_404(MediaFolder, pk=folder_id, user=request.user)
+            queryset = queryset.filter(folder=selected_folder)
+    return queryset, {
+        "media_folder_filter_active": folder_active,
+        "media_folder_filter": folder_value,
+        "selected_media_folder": selected_folder,
+        "media_folders": MediaFolder.objects.filter(user=request.user).order_by("name", "id"),
+    }
+
+
 def _page_or_redirect(request, queryset, per_page):
     page = _get_page(queryset, request.GET.get("page"), per_page)
     requested_page = request.GET.get("page")
@@ -550,21 +572,130 @@ def move_project(request, project_id):
     return redirect(_safe_return_url(request, reverse("project_list")))
 
 
+def _media_folder_action_response(request, *, message, status=200, folder_id=None):
+    if request.headers.get("x-requested-with") == "XMLHttpRequest":
+        payload = {"ok": status < 400, "message": message, "folder_id": folder_id}
+        if status >= 400:
+            payload["error"] = message
+        return JsonResponse(payload, status=status)
+    if status >= 400:
+        return HttpResponseBadRequest(message)
+    return redirect(_safe_return_url(request, reverse("audios")))
+
+
+@login_required
+@require_POST
+def create_media_folder(request):
+    name = (request.POST.get("name") or "").strip()
+    if not name:
+        return _media_folder_action_response(request, message="Le nom du dossier est obligatoire.", status=400)
+    if len(name) > 120:
+        return _media_folder_action_response(
+            request, message="Le nom du dossier ne peut pas dépasser 120 caractères.", status=400,
+        )
+    folder = MediaFolder.objects.create(user=request.user, name=name)
+    messages.success(request, f"Dossier média « {folder.name} » créé.")
+    return _media_folder_action_response(request, message="Dossier média créé.", folder_id=folder.pk)
+
+
+@login_required
+@require_POST
+def rename_media_folder(request, folder_id):
+    folder = get_object_or_404(MediaFolder, pk=folder_id, user=request.user)
+    name = (request.POST.get("name") or "").strip()
+    if not name:
+        return _media_folder_action_response(request, message="Le nom du dossier est obligatoire.", status=400)
+    if len(name) > 120:
+        return _media_folder_action_response(
+            request, message="Le nom du dossier ne peut pas dépasser 120 caractères.", status=400,
+        )
+    if folder.name != name:
+        folder.name = name
+        folder.save(update_fields=["name"])
+        messages.success(request, f"Dossier média renommé : « {folder.name} ».")
+    return _media_folder_action_response(request, message="Dossier média renommé.", folder_id=folder.pk)
+
+
+@login_required
+@require_POST
+def delete_media_folder(request, folder_id):
+    folder = get_object_or_404(MediaFolder, pk=folder_id, user=request.user)
+    if request.POST.get("confirm") != "1":
+        return _media_folder_action_response(request, message="Confirmation manquante.", status=400)
+    name = folder.name
+    folder.delete()
+    messages.success(request, f"Dossier média « {name} » supprimé. Ses médias sont à la racine.")
+    redirect_url = _safe_return_url(request, reverse("audios"))
+    if request.headers.get("x-requested-with") == "XMLHttpRequest":
+        return JsonResponse({"success": True, "redirect_url": redirect_url})
+    return redirect(redirect_url)
+
+
+def _media_move_target(request):
+    raw_folder_id = request.POST.get("folder_id", "")
+    if not raw_folder_id:
+        return None
+    try:
+        folder_id = int(raw_folder_id)
+    except (TypeError, ValueError):
+        return JsonResponse({"ok": False, "error": "Dossier média invalide."}, status=400)
+    return get_object_or_404(MediaFolder, pk=folder_id, user=request.user)
+
+
+@login_required
+@require_POST
+def move_audio_asset(request, asset_id):
+    asset = get_object_or_404(AudioAsset, pk=asset_id, user=request.user)
+    folder = _media_move_target(request)
+    if isinstance(folder, JsonResponse):
+        return folder
+    if asset.folder_id != (folder.pk if folder else None):
+        asset.folder = folder
+        asset.save(update_fields=["folder", "updated_at"])
+        messages.success(request, f"Audio « {asset.name} » déplacé.")
+    response = {"ok": True, "folder_id": folder.pk if folder else None}
+    if request.headers.get("x-requested-with") == "XMLHttpRequest":
+        return JsonResponse(response)
+    return redirect(_safe_return_url(request, reverse("audios")))
+
+
+@login_required
+@require_POST
+def move_music(request, track_id):
+    track = get_object_or_404(BackgroundTrack, pk=track_id, user=request.user)
+    folder = _media_move_target(request)
+    if isinstance(folder, JsonResponse):
+        return folder
+    if track.folder_id != (folder.pk if folder else None):
+        track.folder = folder
+        track.save(update_fields=["folder", "updated_at"])
+        messages.success(request, f"Musique « {track.name} » déplacée.")
+    response = {"ok": True, "folder_id": folder.pk if folder else None}
+    if request.headers.get("x-requested-with") == "XMLHttpRequest":
+        return JsonResponse(response)
+    return redirect(_safe_return_url(request, reverse("musics")))
+
+
 @login_required
 def musics(request):
     per_page = get_per_page(request)
+    tracks, folder_context = _filter_media_folder(
+        request, BackgroundTrack.objects.filter(user=request.user),
+    )
     music_page, page_response = _page_or_redirect(
-        request, BackgroundTrack.objects.filter(user=request.user), per_page,
+        request, tracks, per_page,
     )
     if page_response:
         return page_response
-    return render(request, "studio/musics.html", {
+    context = {
         "background_tracks": music_page.object_list,
         "music_page": music_page,
         "music_per_page": per_page,
-        "pagination_params": _pagination_params(request),
+        "pagination_params": _pagination_params(request, preserve=("folder",)),
         "projects": NarrationProject.objects.filter(user=request.user)[:30],
-    })
+    }
+    context.update(folder_context)
+    return render(request, "studio/musics.html", context)
 
 
 def _audio_studio_signature(operations):
@@ -1091,31 +1222,42 @@ def studio_batch_status(request, batch_id):
 @login_required
 def audios(request):
     per_page = get_per_page(request)
+    assets, folder_context = _filter_media_folder(
+        request, AudioAsset.objects.filter(user=request.user).order_by("-created_at", "-id"),
+    )
     audio_page, page_response = _page_or_redirect(
-        request, AudioAsset.objects.filter(user=request.user).order_by("-created_at", "-id"), per_page,
+        request, assets, per_page,
     )
     if page_response:
         return page_response
-    return _audio_library_response(request, audio_page=audio_page)
+    return _audio_library_response(request, audio_page=audio_page, folder_context=folder_context)
 
 
-def _audio_library_response(request, *, status=200, audio_page=None):
+def _audio_library_response(request, *, status=200, audio_page=None, folder_context=None):
+    if folder_context is None:
+        assets, folder_context = _filter_media_folder(
+            request, AudioAsset.objects.filter(user=request.user).order_by("-created_at", "-id"),
+        )
+    else:
+        assets = None
     if audio_page is None:
         audio_page = _get_page(
-            AudioAsset.objects.filter(user=request.user).order_by("-created_at", "-id"),
+            assets,
             request.GET.get("page"), get_per_page(request),
         )
     audio_assets = audio_page.object_list
     for asset in audio_assets:
         minutes, seconds = divmod(max(0, round(asset.duration)), 60)
         asset.duration_mmss = f"{minutes:02d}:{seconds:02d}"
-    return render(request, "studio/audios.html", {
+    context = {
         "audio_assets": audio_assets,
         "audio_page": audio_page,
         "audio_per_page": audio_page.paginator.per_page,
-        "pagination_params": _pagination_params(request),
+        "pagination_params": _pagination_params(request, preserve=("folder",)),
         "projects": NarrationProject.objects.filter(user=request.user)[:30],
-    }, status=status)
+    }
+    context.update(folder_context)
+    return render(request, "studio/audios.html", context, status=status)
 
 
 def _unlink_audio_asset_file(path):

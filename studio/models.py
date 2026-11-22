@@ -95,8 +95,23 @@ def audio_session_upload_to(instance, filename):
     return f"audio-sessions/user_{instance.user_id}/{uuid.uuid4().hex}{extension}"
 
 
+class MediaFolder(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="media_folders")
+    name = models.CharField("nom", max_length=120)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["name", "id"]
+
+    def __str__(self):
+        return self.name
+
+
 class BackgroundTrack(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="background_tracks")
+    folder = models.ForeignKey(
+        MediaFolder, null=True, blank=True, on_delete=models.SET_NULL, related_name="background_tracks",
+    )
     name = models.CharField("nom", max_length=120)
     audio_file = models.FileField("fichier audio", upload_to=background_track_upload_to)
     duration = models.FloatField("durée en secondes", validators=[MinValueValidator(0)])
@@ -116,6 +131,9 @@ class AudioAsset(models.Model):
         XTTS = "xtts", "Généré par XTTS"
 
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="audio_assets")
+    folder = models.ForeignKey(
+        MediaFolder, null=True, blank=True, on_delete=models.SET_NULL, related_name="audio_assets",
+    )
     name = models.CharField("nom", max_length=160)
     audio_file = models.FileField("fichier audio", upload_to=audio_asset_upload_to)
     duration = models.FloatField("durée en secondes", validators=[MinValueValidator(0)])

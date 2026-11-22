@@ -494,6 +494,29 @@
       <span class="premium-project-empty">Aucun dossier. Clique sur + pour en créer un.</span>
       {% endfor %}
     </nav>
+    <div class="premium-section-title premium-folder-title"><span>DOSSIERS MÉDIAS</span></div>
+    <nav class="premium-folder-tree" aria-label="Dossiers médias">
+      {% for folder in sidebar_media_folders %}
+      <div class="premium-folder-row" data-sidebar-folder>
+        {% if request.resolver_match.url_name == 'musics' %}
+        <a class="premium-folder-link{% if selected_media_folder and selected_media_folder.id == folder.id %} selected{% endif %}" href="{% url 'musics' %}?folder={{ folder.id }}" title="{{ folder.name }}">
+        {% else %}
+        <a class="premium-folder-link{% if selected_media_folder and selected_media_folder.id == folder.id %} selected{% endif %}" href="{% url 'audios' %}?folder={{ folder.id }}" title="{{ folder.name }}">
+        {% endif %}
+          <span class="premium-folder-icon" aria-hidden="true">▰</span><span class="premium-folder-label">{{ folder.name }}</span>
+        </a>
+        <div class="premium-media-folder-links">
+          <a href="{% url 'audios' %}?folder={{ folder.id }}" aria-label="Audios dans {{ folder.name }}" title="Audios · {{ folder.audio_count }}">◖<small>{{ folder.audio_count }}</small></a>
+          <a href="{% url 'musics' %}?folder={{ folder.id }}" aria-label="Musiques dans {{ folder.name }}" title="Musiques · {{ folder.music_count }}">♪<small>{{ folder.music_count }}</small></a>
+        </div>
+        <button class="premium-folder-menu-toggle" type="button" data-folder-menu-toggle aria-label="Actions pour le dossier média {{ folder.name }}" aria-expanded="false">⋯</button>
+        <div class="premium-folder-dropdown" data-folder-dropdown hidden>
+          <button type="button" data-folder-rename data-folder-name="{{ folder.name }}" data-folder-rename-url="{% url 'rename_media_folder' folder.id %}">Renommer</button>
+          <button type="button" class="danger" data-folder-delete data-folder-name="{{ folder.name }}" data-folder-delete-effect="Ses audios et musiques seront déplacés à la racine." data-folder-return-url="{% if request.resolver_match.url_name == 'musics' %}{% url 'musics' %}{% elif request.resolver_match.url_name == 'audios' %}{% url 'audios' %}{% else %}{% url 'audios' %}{% endif %}" data-folder-delete-url="{% url 'delete_media_folder' folder.id %}">Supprimer</button>
+        </div>
+      </div>
+      {% empty %}<span class="premium-project-empty">Aucun dossier média pour le moment.</span>{% endfor %}
+    </nav>
     <div class="premium-sidebar-bottom">
       <span class="premium-online-dot" aria-hidden="true"></span>
       <span class="premium-user-name" title="{{ request.user.get_username }}">{{ request.user.get_username }}</span>
@@ -548,6 +571,6 @@
   });
 })();
 </script>
-  <script src="{% static 'studio/app.js' %}?v=26" defer></script>
+  <script src="{% static 'studio/app.js' %}?v=27" defer></script>
 </body>
 </html>
