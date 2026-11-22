@@ -575,7 +575,1012 @@ class StudioBatchGenerationTests(MediaTestCase):
         batch.refresh_from_db()
         item.refresh_from_db()
         self.assertEqual(batch.status, StudioBatch.Status.CANCELLED)
-        s…14322 tokens truncated…us.READY, project.error_message)
+        self.assertIsNotNone(batch.finished_at)
+        self.assertEqual(item.status, StudioBatchItem.Status.CANCELLED)
+        self.assertIsNone(Command._claim_next_task())
+
+    def test_studio_page_lists_all_active_batches_outside_paginated_history(self):
+        pending = self.make_batch(["En attente."], status=StudioBatch.Status.PENDING)
+        processing = self.make_batch(["En cours."], name_prefix="Actif", status=StudioBatch.Status.PROCESSING)
+        finished = self.make_batch(["Terminé."], name_prefix="Historique", status=StudioBatch.Status.COMPLETED)
+
+        response = self.client.get("/studio/?per_page=5")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(set(response.context["active_studio_batches"].values_list("pk", flat=True)), {
+            pending.pk, processing.pk,
+        })
+        self.assertEqual(list(response.context["studio_batches"]), [finished])
+        self.assertContains(response, "Lots en cours")
+        self.assertContains(response, 'data-confirm-studio-cancel')
+        self.assertContains(response, "Historique des lots")
+
+    def test_studio_page_hides_active_section_when_no_batch_is_pending_or_processing(self):
+        self.make_batch(["Terminé."], status=StudioBatch.Status.COMPLETED)
+
+        response = self.client.get("/studio/")
+
+        self.assertNotContains(response, "Lots en cours")
+        self.assertNotContains(response, '<form class="studio-batch-cancel"')
+
+
+class ListPaginationAndBatchDismissTests(MediaTestCase):
+    def make_audio_asset(self, name):
+        asset = AudioAsset.objects.create(user=self.user, name=name, duration=12.0)
+        asset.audio_file.save(f"{name}.wav", ContentFile(b"audio bytes"), save=True)
+        return asset
+
+    def make_music(self, name):
+        track = BackgroundTrack.objects.create(user=self.user, name=name, duration=12.0)
+        track.audio_file.save(f"{name}.mp3", ContentFile(b"music bytes"), save=True)
+        return track
+
+    def test_pagination_controls_are_hidden_when_lists_fit_on_one_page(self):
+        self.make_audio_asset("Audio unique")
+        self.make_music("Musique unique")
+        voice = self.make_voice()
+        StudioBatch.objects.create(user=self.user, voice=voice, name_prefix="Lot unique")
+
+        audio_response = self.client.get("/audios/")
+        music_response = self.client.get("/musics/")
+        studio_response = self.client.get("/studio/")
+
+        self.assertNotContains(audio_response, 'aria-label="Pagination de la bibliothèque audio"')
+        self.assertNotContains(music_response, 'aria-label="Pagination de la bibliothèque musicale"')
+        self.assertNotContains(studio_response, 'aria-label="Pagination des lots Studio"')
+
+    def test_audio_library_paginates_by_twenty_and_redirects_invalid_pages(self):
+        for index in range(21):
+            self.make_audio_asset(f"Audio {index:02d}")
+
+        page_two = self.client.get("/audios/?page=2")
+        self.assertEqual(page_two.status_code, 200)
+        self.assertEqual(page_two.context["audio_page"].number, 2)
+        self.assertEqual(len(page_two.context["audio_assets"]), 1)
+        self.assertContains(page_two, "Audio 00")
+        self.assertContains(page_two, "Page 2 / 2")
+        self.assertContains(page_two, 'href="">↻ Actualiser</a>')
+
+        self.assertRedirects(self.client.get("/audios/?page=999"), "/audios/?page=2", fetch_redirect_response=False)
+        self.assertRedirects(self.client.get("/audios/?page=0"), "/audios/?page=1", fetch_redirect_response=False)
+        self.assertRedirects(self.client.get("/audios/?page=invalid"), "/audios/?page=1", fetch_redirect_response=False)
+
+    def test_music_library_paginates_by_twenty_and_redirects_invalid_pages(self):
+        for index in range(21):
+            self.make_music(f"Musique {index:02d}")
+
+        page_two = self.client.get("/musics/?page=2")
+        self.assertEqual(page_two.status_code, 200)
+        self.assertEqual(page_two.context["music_page"].number, 2)
+        self.assertEqual(len(page_two.context["background_tracks"]), 1)
+        self.assertContains(page_two, "Musique 20")
+        self.assertContains(page_two, "Page 2 / 2")
+        self.assertContains(page_two, 'href="">↻ Actualiser</a>')
+
+        self.assertRedirects(self.client.get("/musics/?page=999"), "/musics/?page=2", fetch_redirect_response=False)
+        self.assertRedirects(self.client.get("/musics/?page=0"), "/musics/?page=1", fetch_redirect_response=False)
+        self.assertRedirects(self.client.get("/musics/?page=invalid"), "/musics/?page=1", fetch_redirect_response=False)
+
+    def test_studio_batches_and_projects_have_independent_pagination(self):
+        voice = self.make_voice()
+        for index in range(11):
+            batch = StudioBatch.objects.create(
+                user=self.user, voice=voice, name_prefix=f"Lot {index:02d}",
+                status=StudioBatch.Status.COMPLETED, total_items=1,
+                finished_at=timezone.now() + timedelta(seconds=index),
+            )
+            StudioBatch.objects.filter(pk=batch.pk).update(
+                created_at=timezone.now() + timedelta(seconds=index),
+            )
+        for index in range(21):
+            project = NarrationProject.objects.create(user=self.user, title=f"Projet {index:02d}")
+            NarrationProject.objects.filter(pk=project.pk).update(
+                updated_at=timezone.now() + timedelta(seconds=index),
+            )
+
+        studio_page = self.client.get("/studio/?per_page=10&page=2")
+        self.assertEqual(studio_page.status_code, 200)
+        self.assertEqual(studio_page.context["studio_page"].number, 2)
+        self.assertEqual(len(studio_page.context["studio_batches"]), 1)
+        self.assertEqual(studio_page.context["studio_batches"][0].name_prefix, "Lot 00")
+        self.assertContains(studio_page, 'href="">↻ Actualiser</a>')
+        self.assertRedirects(self.client.get("/studio/?per_page=10&page=999"), "/studio/?per_page=10&page=2", fetch_redirect_response=False)
+
+        projects_page = self.client.get("/projects/?page=2")
+        self.assertEqual(projects_page.status_code, 200)
+        self.assertEqual(projects_page.context["project_page"].number, 2)
+        self.assertEqual(len(projects_page.context["project_page"].object_list), 1)
+        self.assertEqual(projects_page.context["project_total"], 21)
+        self.assertContains(projects_page, "Projet 00")
+        self.assertRedirects(self.client.get("/projects/?page=999"), "/projects/?page=2", fetch_redirect_response=False)
+        self.assertRedirects(self.client.get("/projects/?page=invalid"), "/projects/?page=1", fetch_redirect_response=False)
+
+    def test_sidebar_shows_project_folder_tree_and_project_counts(self):
+        for index in range(17):
+            project = NarrationProject.objects.create(user=self.user, title=f"Projet sidebar {index:02d}")
+            NarrationProject.objects.filter(pk=project.pk).update(
+                updated_at=timezone.now() + timedelta(seconds=index),
+            )
+        folder = ProjectFolder.objects.create(user=self.user, name="Vidéos")
+        folder_project = NarrationProject.objects.create(user=self.user, title="Projet classé", folder=folder)
+
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Tous les projets")
+        self.assertContains(response, "DOSSIERS")
+        self.assertContains(response, "Vidéos")
+        self.assertContains(response, f'href="/projects/?folder={folder.pk}"')
+        self.assertContains(response, 'data-folder-create')
+        self.assertContains(response, 'data-sidebar-folder')
+        self.assertContains(response, 'title="Projets à la racine"')
+        self.assertEqual(len(response.context["sidebar_projects"]), 15)
+        self.assertEqual(response.context["sidebar_project_count"], 18)
+        self.assertEqual(response.context["sidebar_root_project_count"], 17)
+        self.assertEqual(response.context["sidebar_folders"][0].project_count, 1)
+        self.assertEqual(folder_project.folder_id, folder.pk)
+
+    def test_sidebar_project_link_is_named_tous_les_projets(self):
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Tous les projets")
+        self.assertNotContains(response, "Mes narrations")
+        self.assertContains(response, 'href="/projects/"')
+
+    def test_all_projects_page_is_scoped_to_the_logged_in_user(self):
+        own_project = NarrationProject.objects.create(user=self.user, title="Projet à moi")
+        other_user = get_user_model().objects.create_user(username="projects-private", password="SafePass123!x")
+        NarrationProject.objects.create(user=other_user, title="Projet privé")
+
+        response = self.client.get("/projects/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, own_project.title)
+        self.assertNotContains(response, "Projet privé")
+        self.assertEqual(response.context["project_total"], 1)
+
+    def test_project_list_filters_folder_and_root_and_preserves_filter_pagination(self):
+        folder = ProjectFolder.objects.create(user=self.user, name="Épisodes")
+        for index in range(6):
+            NarrationProject.objects.create(user=self.user, title=f"Classé {index}", folder=folder)
+        for index in range(2):
+            NarrationProject.objects.create(user=self.user, title=f"Racine {index}")
+
+        page = self.client.get(f"/projects/?folder={folder.pk}&per_page=5")
+        self.assertEqual(page.status_code, 200)
+        self.assertEqual(page.context["project_total"], 6)
+        self.assertEqual(page.context["project_page"].paginator.per_page, 5)
+        self.assertEqual(page.context["pagination_params"], f"folder={folder.pk}&per_page=5")
+        self.assertContains(page, f"href=\"?folder={folder.pk}&amp;per_page=5&amp;page=2\"")
+        self.assertContains(page, "Classé 5")
+        self.assertNotContains(page, "Racine 0")
+
+        root_page = self.client.get("/projects/?folder=")
+        self.assertEqual(root_page.context["project_total"], 2)
+        self.assertContains(root_page, "Racine 0")
+        self.assertNotContains(root_page, "Classé 0")
+
+        all_page = self.client.get("/projects/")
+        self.assertEqual(all_page.context["project_total"], 8)
+
+        other_user = get_user_model().objects.create_user(username="folder-filter-private", password="SafePass123!x")
+        foreign_folder = ProjectFolder.objects.create(user=other_user, name="Privé")
+        self.assertEqual(self.client.get(f"/projects/?folder={foreign_folder.pk}").status_code, 404)
+        self.assertEqual(self.client.get("/projects/?folder=invalid").status_code, 404)
+
+    def test_folder_create_rename_and_delete_are_scoped_and_keep_projects(self):
+        create = self.client.post(
+            "/folders/create/", {"name": "  Brouillons  "}, HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+        self.assertEqual(create.status_code, 200)
+        self.assertTrue(create.json()["ok"])
+        folder = ProjectFolder.objects.get(user=self.user)
+        self.assertEqual(folder.name, "Brouillons")
+
+        rename = self.client.post(
+            f"/folders/{folder.pk}/rename/", {"name": "  À publier  "},
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+        self.assertEqual(rename.status_code, 200)
+        folder.refresh_from_db()
+        self.assertEqual(folder.name, "À publier")
+
+        project = NarrationProject.objects.create(user=self.user, title="À conserver", folder=folder)
+        other_user = get_user_model().objects.create_user(username="folder-action-private", password="SafePass123!x")
+        foreign_folder = ProjectFolder.objects.create(user=other_user, name="Privé")
+        self.assertEqual(
+            self.client.post(f"/folders/{foreign_folder.pk}/rename/", {"name": "Intrusion"}).status_code, 404,
+        )
+        self.assertEqual(
+            self.client.post(
+                f"/folders/{foreign_folder.pk}/delete/", {"confirm": "1"},
+                HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+            ).status_code,
+            404,
+        )
+
+        delete = self.client.post(
+            f"/folders/{folder.pk}/delete/", {"confirm": "1"}, HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+        self.assertEqual(delete.status_code, 200)
+        self.assertTrue(delete.json()["ok"])
+        project.refresh_from_db()
+        self.assertIsNone(project.folder_id)
+        self.assertTrue(NarrationProject.objects.filter(pk=project.pk).exists())
+        self.assertFalse(ProjectFolder.objects.filter(pk=folder.pk).exists())
+
+    def test_move_project_validates_folder_and_project_ownership(self):
+        project = NarrationProject.objects.create(user=self.user, title="À ranger")
+        folder = ProjectFolder.objects.create(user=self.user, name="Exports")
+        moved = self.client.post(
+            f"/projects/{project.pk}/move/", {"folder_id": str(folder.pk)},
+            HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+        self.assertEqual(moved.status_code, 200)
+        self.assertTrue(moved.json()["ok"])
+        project.refresh_from_db()
+        self.assertEqual(project.folder_id, folder.pk)
+
+        to_root = self.client.post(
+            f"/projects/{project.pk}/move/", {"folder_id": ""}, HTTP_X_REQUESTED_WITH="XMLHttpRequest",
+        )
+        self.assertEqual(to_root.status_code, 200)
+        project.refresh_from_db()
+        self.assertIsNone(project.folder_id)
+
+        other_user = get_user_model().objects.create_user(username="move-private", password="SafePass123!x")
+        foreign_folder = ProjectFolder.objects.create(user=other_user, name="Privé")
+        foreign_project = NarrationProject.objects.create(user=other_user, title="Projet privé")
+        self.assertEqual(
+            self.client.post(f"/projects/{project.pk}/move/", {"folder_id": str(foreign_folder.pk)}).status_code,
+            404,
+        )
+        self.assertEqual(self.client.post(f"/projects/{project.pk}/move/", {"folder_id": "abc"}).status_code, 400)
+        self.assertEqual(
+            self.client.post(f"/projects/{foreign_project.pk}/move/", {"folder_id": ""}).status_code, 404,
+        )
+
+    def test_queue_dismiss_removes_only_own_terminal_batches_and_preserves_assets_and_projects(self):
+        terminal_statuses = [
+            StudioBatch.Status.COMPLETED,
+            StudioBatch.Status.PARTIAL,
+            StudioBatch.Status.FAILED,
+        ]
+        terminal_batches = [
+            StudioBatch.objects.create(
+                user=self.user, name_prefix=f"Terminé {index}", status=status,
+                total_items=1, finished_at=timezone.now(),
+            )
+            for index, status in enumerate(terminal_statuses)
+        ]
+        generated_asset = AudioAsset.objects.create(
+            user=self.user, name="Audio conservé", duration=8.0, source=AudioAsset.Source.XTTS,
+        )
+        StudioBatchItem.objects.create(
+            batch=terminal_batches[0], position=0, text="Narration terminée", asset_name="Audio conservé",
+            status=StudioBatchItem.Status.COMPLETED, audio_asset=generated_asset,
+        )
+        pending_batch = StudioBatch.objects.create(
+            user=self.user, name_prefix="En attente", status=StudioBatch.Status.PENDING,
+        )
+        processing_batch = StudioBatch.objects.create(
+            user=self.user, name_prefix="En cours", status=StudioBatch.Status.PROCESSING,
+        )
+        other_user = get_user_model().objects.create_user(username="dismiss-private", password="SafePass123!x")
+        foreign_batch = StudioBatch.objects.create(
+            user=other_user, name_prefix="Lot privé", status=StudioBatch.Status.COMPLETED,
+        )
+        ready_project = NarrationProject.objects.create(
+            user=self.user, title="Projet prêt", status=NarrationProject.Status.READY,
+        )
+        error_project = NarrationProject.objects.create(
+            user=self.user, title="Projet en erreur", status=NarrationProject.Status.ERROR,
+        )
+
+        queue_page = self.client.get("/queue/")
+        self.assertContains(queue_page, "HISTORIQUE DES LOTS STUDIO TERMINÉS (3)")
+        self.assertContains(queue_page, "Effacer les tâches terminées")
+        self.assertContains(queue_page, "confirm('Effacer les 3 lots Studio terminés ?")
+
+        response = self.client.post("/queue/dismiss-completed/")
+
+        self.assertRedirects(response, "/queue/", fetch_redirect_response=False)
+        self.assertFalse(StudioBatch.objects.filter(pk__in=[batch.pk for batch in terminal_batches]).exists())
+        self.assertTrue(StudioBatch.objects.filter(pk=pending_batch.pk).exists())
+        self.assertTrue(StudioBatch.objects.filter(pk=processing_batch.pk).exists())
+        self.assertTrue(StudioBatch.objects.filter(pk=foreign_batch.pk).exists())
+        self.assertTrue(AudioAsset.objects.filter(pk=generated_asset.pk).exists())
+        self.assertTrue(NarrationProject.objects.filter(pk__in=[ready_project.pk, error_project.pk]).exists())
+
+    def test_per_page_choices_and_invalid_values_across_paginated_lists(self):
+        for index in range(21):
+            NarrationProject.objects.create(user=self.user, title=f"Page project {index:02d}")
+            self.make_audio_asset(f"Page audio {index:02d}")
+            self.make_music(f"Page music {index:02d}")
+        voice = self.make_voice("Batch page voice")
+        for index in range(21):
+            StudioBatch.objects.create(user=self.user, voice=voice, name_prefix=f"Page batch {index:02d}")
+
+        pages = [
+            ("/", "project_page", "projects", 10),
+            ("/projects/", "project_page", "projects", 20),
+            ("/audios/", "audio_page", "audio_assets", 20),
+            ("/musics/", "music_page", "background_tracks", 20),
+            ("/studio/", "studio_page", "studio_batches", 20),
+        ]
+        for path, page_key, items_key, default in pages:
+            for per_page in (5, 10, 20):
+                with self.subTest(path=path, per_page=per_page):
+                    response = self.client.get(path, {"per_page": str(per_page)})
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.context[page_key].paginator.per_page, per_page)
+                    self.assertEqual(len(response.context[items_key]), per_page)
+            for invalid in ("abc", "100", "-1"):
+                with self.subTest(path=path, invalid=invalid):
+                    response = self.client.get(path, {"per_page": invalid})
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.context[page_key].paginator.per_page, default)
+
+    def test_per_page_is_preserved_in_each_pagination_link(self):
+        for index in range(6):
+            NarrationProject.objects.create(user=self.user, title=f"Page link project {index}")
+            self.make_audio_asset(f"Page link audio {index}")
+            self.make_music(f"Page link music {index}")
+        voice = self.make_voice("Page link voice")
+        for index in range(6):
+            StudioBatch.objects.create(user=self.user, voice=voice, name_prefix=f"Page link batch {index}")
+
+        for path, page_label in (
+            ("/", "Pagination des projets de l’accueil"),
+            ("/projects/", "Pagination des projets"),
+            ("/audios/", "Pagination de la bibliothèque audio"),
+            ("/musics/", "Pagination de la bibliothèque musicale"),
+            ("/studio/", "Pagination des lots Studio"),
+        ):
+            with self.subTest(path=path):
+                response = self.client.get(path, {"per_page": "5"})
+                self.assertContains(response, f'aria-label="{page_label}"')
+                page_link = 'href="?per_page=5&amp;page=2#projects"' if path == "/" else 'href="?per_page=5&amp;page=2"'
+                self.assertContains(response, page_link)
+
+    def test_all_list_accordions_render_collapsed_regions(self):
+        project = NarrationProject.objects.create(user=self.user, title="Projet accordéon")
+        self.make_audio_asset("Audio accordéon")
+        self.make_music("Musique accordéon")
+        voice = self.make_voice("Voix accordéon")
+        batch = StudioBatch.objects.create(
+            user=self.user, voice=voice, name_prefix="Lot accordéon", status=StudioBatch.Status.COMPLETED,
+            total_items=1, finished_at=timezone.now(),
+        )
+        StudioBatchItem.objects.create(
+            batch=batch, position=0, text="Texte", asset_name="Narration accordéon",
+            status=StudioBatchItem.Status.FAILED, error_message="Erreur de test",
+        )
+        NarrationProject.objects.filter(pk=project.pk).update(status=NarrationProject.Status.QUEUED)
+
+        for path in ("/", "/projects/", "/audios/", "/musics/", "/studio/", "/queue/"):
+            with self.subTest(path=path):
+                response = self.client.get(path)
+                self.assertEqual(response.status_code, 200)
+                self.assertContains(response, 'data-list-accordion-trigger aria-expanded="false"')
+                self.assertContains(response, 'role="region"')
+                self.assertContains(response, "aria-controls=")
+
+    def test_queue_polling_reuses_rows_and_carries_current_page_parameters(self):
+        NarrationProject.objects.create(
+            user=self.user, title="Projet de file", status=NarrationProject.Status.QUEUED,
+        )
+        response = self.client.get("/queue/?per_page=5&page=2")
+        self.assertEqual(response.status_code, 200)
+        content = response.content.decode()
+        self.assertContains(response, 'data-job-id=')
+        self.assertIn("['per_page', 'page']", content)
+        self.assertIn("new URLSearchParams(window.location.search)", content)
+        self.assertIn("const existingRows = new Map()", content)
+        self.assertIn("container.insertBefore(row", content)
+        self.assertNotIn("processingList.replaceChildren", content)
+        self.assertNotIn("waitingList.replaceChildren", content)
+
+
+class RemoveImportedAudioMigrationTests(TestCase):
+    def test_migration_clears_external_audio_state_and_resets_projects_to_xtts(self):
+        from importlib import import_module
+
+        migration = import_module("studio.migrations.0018_remove_imported_audio_mode")
+        manager = Mock()
+        apps = Mock()
+        apps.get_model.return_value.objects = manager
+        schema_editor = Mock()
+        schema_editor.connection.alias = "default"
+
+        migration.reset_projects_to_xtts(apps, schema_editor)
+
+        manager.using.return_value.all.return_value.update.assert_called_once_with(
+            imported_audio=None,
+            imported_audio_cache_key="",
+            imported_audio_alignment={},
+            audio_warning="",
+            audio_source="xtts",
+        )
+
+class ProjectViewTests(MediaTestCase):
+    @patch("studio.services.hash_file", wraps=services.hash_file)
+    def test_project_detail_hashes_voice_sample_once_for_multiple_segments(self, hash_sample):
+        voice = self.make_voice()
+        project = NarrationProject.objects.create(user=self.user, title="Projet", voice=voice)
+        NarrationSegment.objects.create(project=project, position=0, text="Premier segment.")
+        NarrationSegment.objects.create(project=project, position=1, text="Deuxième segment.")
+
+        response = self.client.get(f"/projects/{project.pk}/")
+
+        self.assertEqual(response.status_code, 200)
+        hash_sample.assert_called_once_with(voice.sample.path)
+        self.assertContains(response, 'id="prepareForm"')
+        self.assertNotContains(response, 'id="assemblyRenderForm"')
+        self.assertNotContains(response, 'id="assemblyAudioPreview"')
+
+    def test_changing_project_voice_is_persisted_and_invalidates_complete_exports(self):
+        project = NarrationProject.objects.create(user=self.user, title="Voix différente")
+        voice = self.make_voice("Voix B", Voice.Category.WOMAN)
+        project.full_audio.save("old.wav", ContentFile(b"old audio"), save=True)
+        project.subtitles.save("old.srt", ContentFile(b"old subtitles"), save=True)
+        project.status = NarrationProject.Status.READY
+        project.save(update_fields=["status"])
+
+        response = self.client.post(f"/projects/{project.pk}/voice/", {"voice_id": voice.pk})
+        self.assertEqual(response.status_code, 302)
+        project.refresh_from_db()
+        self.assertEqual(project.voice_id, voice.pk)
+        self.assertEqual(project.status, NarrationProject.Status.DRAFT)
+        self.assertFalse(project.full_audio)
+        self.assertFalse(project.subtitles)
+
+    def test_changing_background_music_invalidates_only_the_video_export(self):
+        track = BackgroundTrack(user=self.user, name="Fond doux", duration=30.0)
+        track.audio_file.save("music.mp3", ContentFile(b"music bytes"), save=True)
+        project = NarrationProject.objects.create(
+            user=self.user, title="Cache audio conservé", status=NarrationProject.Status.READY,
+        )
+        project.full_audio.save("full.wav", ContentFile(b"voice cache"), save=True)
+        project.subtitles.save("captions.srt", ContentFile(b"subtitle cache"), save=True)
+        project.video_file.save("old.mp4", ContentFile(b"old video"), save=True)
+        segment = NarrationSegment.objects.create(
+            project=project, position=0, text="Bonjour.", subtitle_data=[{"start": 0, "end": 1}],
+            cache_key="voice-cache-key",
+        )
+        segment.audio.save("segment.wav", ContentFile(b"segment audio"), save=True)
+        audio_name = segment.audio.name
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(f"/projects/{project.pk}/music/", {
+                "background_track_id": track.pk, "music_volume": "35",
+            })
+
+        self.assertEqual(response.status_code, 302)
+        project.refresh_from_db()
+        segment.refresh_from_db()
+        self.assertEqual(project.background_track_id, track.pk)
+        self.assertEqual(project.music_volume, 35)
+        self.assertFalse(project.video_file)
+        self.assertTrue(project.full_audio)
+        self.assertTrue(project.subtitles)
+        self.assertEqual(segment.audio.name, audio_name)
+        self.assertEqual(segment.cache_key, "voice-cache-key")
+
+    def test_background_music_selection_rejects_other_users_tracks_and_bad_volume(self):
+        other_user = get_user_model().objects.create_user(username="music-owner", password="SafePass123!x")
+        track = BackgroundTrack(user=other_user, name="Privée", duration=12.0)
+        track.audio_file.save("private.ogg", ContentFile(b"private audio"), save=True)
+        project = NarrationProject.objects.create(user=self.user, title="Mon projet")
+
+        self.assertEqual(self.client.post(f"/projects/{project.pk}/music/", {
+            "background_track_id": track.pk, "music_volume": "20",
+        }).status_code, 404)
+        self.assertEqual(self.client.post(f"/projects/{project.pk}/music/", {
+            "background_track_id": "", "music_volume": "101",
+        }).status_code, 400)
+
+    def test_assembly_mode_and_audio_changes_preserve_xtts_cache(self):
+        asset = AudioAsset.objects.create(
+            user=self.user, name="Narration", duration=1.0, source=AudioAsset.Source.XTTS,
+            timings={"version": 1, "words": [{"word": "bonjour", "start": 0.0, "end": 0.8}],
+                     "segments": [], "scene_boundaries": [{"scene_index": 0, "start": 0.0, "end": 1.0}]},
+        )
+        asset.audio_file.save("narration.wav", ContentFile(b"narration audio"), save=True)
+        project = NarrationProject.objects.create(
+            user=self.user, title="Assemblage", mode=NarrationProject.Mode.ASSEMBLY, audio_asset=asset,
+        )
+        project.video_file.save("render.mp4", ContentFile(b"video"), save=True)
+        segment = NarrationSegment.objects.create(
+            project=project, position=0, text="Texte XTTS conservé", cache_key="stable-cache-key",
+            subtitle_data=[{"start": 0.0, "end": 0.8, "text": "Texte XTTS conservé"}],
+        )
+        segment.audio.save("scene.wav", ContentFile(b"xtts cache"), save=True)
+        segment_audio_name = segment.audio.name
+        segment_cache_key = segment.cache_key
+
+        other_user = get_user_model().objects.create_user(username="assembly-private-audio", password="SafePass123!x")
+        private_asset = AudioAsset.objects.create(
+            user=other_user, name="Privé", duration=1.0, source=AudioAsset.Source.XTTS,
+            timings=asset.timings,
+        )
+        private_asset.audio_file.save("private.wav", ContentFile(b"private audio"), save=True)
+        self.assertEqual(self.client.post(f"/projects/{project.pk}/assembly/audio/", {
+            "audio_asset_id": private_asset.pk,
+        }).status_code, 404)
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(f"/projects/{project.pk}/mode/", {"mode": NarrationProject.Mode.SCENES})
+        self.assertEqual(response.status_code, 302)
+        project.refresh_from_db()
+        segment.refresh_from_db()
+        self.assertEqual(project.mode, NarrationProject.Mode.SCENES)
+        self.assertEqual(project.audio_asset_id, asset.pk)
+        self.assertFalse(project.video_file)
+        self.assertEqual(segment.audio.name, segment_audio_name)
+        self.assertEqual(segment.cache_key, segment_cache_key)
+
+        replacement = AudioAsset.objects.create(
+            user=self.user, name="Autre narration", duration=1.0, source=AudioAsset.Source.XTTS,
+            timings=asset.timings,
+        )
+        replacement.audio_file.save("replacement.wav", ContentFile(b"replacement audio"), save=True)
+        project.video_file.save("again.mp4", ContentFile(b"video"), save=True)
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(f"/projects/{project.pk}/assembly/audio/", {
+                "audio_asset_id": replacement.pk,
+            })
+        self.assertEqual(response.status_code, 302)
+        project.refresh_from_db()
+        segment.refresh_from_db()
+        self.assertEqual(project.audio_asset_id, replacement.pk)
+        self.assertFalse(project.video_file)
+        self.assertEqual(segment.audio.name, segment_audio_name)
+        self.assertEqual(segment.cache_key, segment_cache_key)
+
+        project.mode = NarrationProject.Mode.ASSEMBLY
+        project.save(update_fields=["mode"])
+        project.video_file.save("render-again.mp4", ContentFile(b"video"), save=True)
+        track = BackgroundTrack.objects.create(user=self.user, name="Ambiance", duration=10.0)
+        track.audio_file.save("music.mp3", ContentFile(b"music"), save=True)
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(f"/projects/{project.pk}/music/", {
+                "background_track_id": track.pk, "music_volume": "25",
+            })
+        self.assertEqual(response.status_code, 302)
+        project.refresh_from_db()
+        segment.refresh_from_db()
+        asset.refresh_from_db()
+        self.assertEqual(project.audio_asset_id, replacement.pk)
+        replacement.refresh_from_db()
+        self.assertTrue(replacement.audio_file)
+        self.assertTrue(replacement.timings["words"])
+        self.assertFalse(project.video_file)
+        self.assertEqual(segment.audio.name, segment_audio_name)
+        self.assertEqual(segment.cache_key, segment_cache_key)
+
+    def test_assembly_audio_selector_hides_slots_beyond_boundaries(self):
+        asset = AudioAsset.objects.create(
+            user=self.user, name="Narration visible", duration=1.0, source=AudioAsset.Source.XTTS,
+            timings={"version": 1, "words": [{"word": "bonjour", "start": 0.0, "end": 0.8}],
+                     "segments": [], "scene_boundaries": [{"scene_index": 0, "start": 0.0, "end": 1.0}]},
+        )
+        project = NarrationProject.objects.create(
+            user=self.user, title="Assemblage mono", mode=NarrationProject.Mode.ASSEMBLY, audio_asset=asset,
+        )
+        NarrationSegment.objects.create(project=project, position=0)
+        NarrationSegment.objects.create(project=project, position=1, text="Scène conservée hors rendu")
+
+        response = self.client.get(f"/projects/{project.pk}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Visuel de la boundary 0")
+        self.assertNotContains(response, "Visuel de la boundary 1")
+        self.assertContains(response, "Narration visible")
+        self.assertNotContains(response, "Scène conservée hors rendu")
+
+    def test_assembly_audio_preview_is_present_for_the_selected_asset(self):
+        asset = AudioAsset.objects.create(
+            user=self.user, name="Narration écoutable", duration=4.0, source=AudioAsset.Source.XTTS,
+            timings={"version": 1, "words": [{"word": "bonjour", "start": 0.0, "end": 1.0}]},
+        )
+        asset.audio_file.save("preview.wav", ContentFile(b"audio bytes"), save=True)
+        project = NarrationProject.objects.create(
+            user=self.user, title="Aperçu", mode=NarrationProject.Mode.ASSEMBLY, audio_asset=asset,
+        )
+
+        response = self.client.get(f"/projects/{project.pk}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'id="assemblyAudioPreview"')
+        self.assertContains(response, 'id="assemblyAudioPreviewMessage"')
+        self.assertContains(response, 'data-audio-url="%s"' % asset.audio_file.url)
+        self.assertContains(response, "Sélectionne un audio")
+
+    def test_assembly_audio_preview_does_not_expose_another_users_audio_url(self):
+        own_asset = AudioAsset.objects.create(
+            user=self.user, name="Ma narration", duration=4.0, source=AudioAsset.Source.XTTS,
+            timings={"version": 1, "words": [{"word": "bonjour", "start": 0.0, "end": 1.0}]},
+        )
+        own_asset.audio_file.save("own.wav", ContentFile(b"own audio"), save=True)
+        other_user = get_user_model().objects.create_user(username="preview-private-owner", password="SafePass123!x")
+        private_asset = AudioAsset.objects.create(
+            user=other_user, name="Narration privée", duration=4.0, source=AudioAsset.Source.XTTS,
+            timings={"version": 1, "words": [{"word": "secret", "start": 0.0, "end": 1.0}]},
+        )
+        private_asset.audio_file.save("private.wav", ContentFile(b"private audio"), save=True)
+        project = NarrationProject.objects.create(
+            user=self.user, title="Aperçu isolé", mode=NarrationProject.Mode.ASSEMBLY, audio_asset=own_asset,
+        )
+
+        response = self.client.get(f"/projects/{project.pk}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, own_asset.audio_file.url)
+        self.assertNotContains(response, private_asset.audio_file.url)
+        self.assertNotContains(response, "Narration privée")
+
+    def test_assembly_audio_without_timings_is_not_offered_and_is_not_cleared(self):
+        asset = AudioAsset.objects.create(
+            user=self.user, name="Audio sans timings", duration=4.0, source=AudioAsset.Source.XTTS,
+        )
+        asset.audio_file.save("without-timings.wav", ContentFile(b"audio bytes"), save=True)
+        project = NarrationProject.objects.create(
+            user=self.user, title="Audio ancien", mode=NarrationProject.Mode.ASSEMBLY, audio_asset=asset,
+        )
+
+        response = self.client.get(f"/projects/{project.pk}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, "Audio sans timings")
+        self.assertContains(response, "n’a pas de timings exploitables")
+        self.assertNotContains(response, 'data-audio-url="%s"' % asset.audio_file.url)
+        project.refresh_from_db()
+        self.assertEqual(project.audio_asset_id, asset.pk)
+
+    def test_assembly_music_preview_is_present_for_the_selected_track(self):
+        track = BackgroundTrack(user=self.user, name="Musique sélectionnée", duration=12.0)
+        track.audio_file.save("selected.mp3", ContentFile(b"music bytes"), save=True)
+        project = NarrationProject.objects.create(
+            user=self.user, title="Aperçu musique", mode=NarrationProject.Mode.ASSEMBLY,
+            background_track=track,
+        )
+
+        response = self.client.get(f"/projects/{project.pk}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'id="assemblyMusicPreview"')
+        self.assertContains(response, 'id="assemblyMusicPreviewMessage"')
+        self.assertContains(response, 'data-music-url="%s"' % track.audio_file.url)
+        self.assertContains(response, "Sélectionne une musique")
+        self.assertContains(response, f'value="{track.pk}" data-music-url="{track.audio_file.url}" selected')
+
+    def test_assembly_music_preview_does_not_expose_another_users_track_url(self):
+        own_track = BackgroundTrack(user=self.user, name="Ma musique", duration=12.0)
+        own_track.audio_file.save("own-music.mp3", ContentFile(b"own music"), save=True)
+        other_user = get_user_model().objects.create_user(username="assembly-music-private", password="SafePass123!x")
+        private_track = BackgroundTrack(user=other_user, name="Musique privée", duration=12.0)
+        private_track.audio_file.save("private-music.mp3", ContentFile(b"private music"), save=True)
+        project = NarrationProject.objects.create(
+            user=self.user, title="Musique isolée", mode=NarrationProject.Mode.ASSEMBLY,
+            background_track=own_track,
+        )
+
+        response = self.client.get(f"/projects/{project.pk}/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, own_track.audio_file.url)
+        self.assertNotContains(response, private_track.audio_file.url)
+        self.assertNotContains(response, "Musique privée")
+
+    def test_assembly_render_route_hides_cross_user_audio_and_validates_inputs_before_queueing(self):
+        project = NarrationProject.objects.create(user=self.user, title="Assemblage", mode=NarrationProject.Mode.ASSEMBLY)
+        response = self.client.post(f"/projects/{project.pk}/assembly/render/")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Sélectionne un audio dans la bibliothèque.")
+
+        asset = AudioAsset.objects.create(
+            user=self.user, name="Sans timings", duration=1.0, source=AudioAsset.Source.XTTS,
+        )
+        asset.audio_file.save("without-timings.wav", ContentFile(b"audio"), save=True)
+        project.audio_asset = asset
+        project.save(update_fields=["audio_asset"])
+        response = self.client.post(f"/projects/{project.pk}/assembly/render/")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Cet audio n'a pas de timings utilisables.")
+
+        asset.timings = {"version": 1, "words": [], "segments": [], "scene_boundaries": []}
+        asset.save(update_fields=["timings"])
+        response = self.client.post(f"/projects/{project.pk}/assembly/render/")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Impossible de générer les sous-titres (words manquants).")
+
+        asset.timings = {
+            "version": 1, "words": [{"word": "bonjour", "start": "incorrect", "end": 0.8}],
+            "segments": [], "scene_boundaries": [{"scene_index": 0, "start": 0.0, "end": 1.0}],
+        }
+        asset.save(update_fields=["timings"])
+        response = self.client.post(f"/projects/{project.pk}/assembly/render/")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Cet audio n'a pas de timings utilisables.")
+
+        asset.timings = {
+            "version": 1, "words": [{"word": "bonjour", "start": 0.0, "end": 0.8}],
+            "segments": [], "scene_boundaries": [],
+        }
+        asset.save(update_fields=["timings"])
+        response = self.client.post(f"/projects/{project.pk}/assembly/render/")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"], "Impossible de générer la séquence (boundaries manquantes).")
+
+        asset.timings = {
+            "version": 1, "words": [{"word": "bonjour", "start": 0.0, "end": 0.8}],
+            "segments": [], "scene_boundaries": [{"scene_index": 0, "start": 0.0, "end": 1.0}],
+        }
+        asset.save(update_fields=["timings"])
+        response = self.client.post(f"/projects/{project.pk}/assembly/render/")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Il manque 1 visuel pour les 1 scènes.", response.json()["error"])
+
+        visual = NarrationSegment.objects.create(project=project, position=0)
+        visual.image.save("image.png", ContentFile(ProjectAssemblyRenderTests.png_bytes()), save=True)
+        visual.video_clip.save("clip.mp4", ContentFile(b"embedded video"), save=True)
+        response = self.client.post(f"/projects/{project.pk}/assembly/render/")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("contient une image et une vidéo", response.json()["error"])
+
+        other_user = get_user_model().objects.create_user(username="assembly-audio-owner", password="SafePass123!x")
+        foreign_asset = AudioAsset.objects.create(
+            user=other_user, name="Privé", duration=1.0, source=AudioAsset.Source.XTTS,
+            timings=asset.timings,
+        )
+        foreign_asset.audio_file.save("private.wav", ContentFile(b"audio"), save=True)
+        project.audio_asset = foreign_asset
+        project.save(update_fields=["audio_asset"])
+        response = self.client.post(f"/projects/{project.pk}/assembly/render/")
+        self.assertEqual(response.status_code, 404)
+
+    def test_valid_assembly_request_queues_the_dedicated_job(self):
+        asset = AudioAsset.objects.create(
+            user=self.user, name="Narration", duration=1.0, source=AudioAsset.Source.XTTS,
+            timings={
+                "version": 1, "words": [{"word": "bonjour", "start": 0.0, "end": 0.8}],
+                "segments": [], "scene_boundaries": [{"scene_index": 0, "start": 0.0, "end": 1.0}],
+            },
+        )
+        asset.audio_file.save("narration.wav", ContentFile(b"audio"), save=True)
+        project = NarrationProject.objects.create(
+            user=self.user, title="Assemblage prêt", mode=NarrationProject.Mode.ASSEMBLY, audio_asset=asset,
+        )
+        visual = NarrationSegment.objects.create(project=project, position=0)
+        visual.image.save("visual.png", ContentFile(ProjectAssemblyRenderTests.png_bytes()), save=True)
+
+        response = self.client.post(f"/projects/{project.pk}/assembly/render/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["ok"])
+        project.refresh_from_db()
+        self.assertEqual(project.status, NarrationProject.Status.QUEUED)
+        self.assertEqual(project.job_type, NarrationProject.JobType.AUDIO_ASSEMBLY)
+        self.assertEqual(project.total_segments, 1)
+
+    @patch("studio.views._probe_clip", return_value={"duration": 1.0, "has_audio": True})
+    def test_assembly_visual_upload_replaces_and_cleans_the_opposite_media(self, _probe):
+        project = NarrationProject.objects.create(
+            user=self.user, title="Remplacement visuel", mode=NarrationProject.Mode.ASSEMBLY,
+        )
+
+        first_image = SimpleUploadedFile("first.png", ProjectAssemblyRenderTests.png_bytes(), content_type="image/png")
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(f"/projects/{project.pk}/assembly/visual/", {
+                "position": "0", "visual_type": "image", "visual_file": first_image,
+            })
+        self.assertEqual(response.status_code, 302)
+        segment = project.segments.get(position=0)
+        image_name = segment.image.name
+        self.assertTrue(segment.image)
+        self.assertFalse(segment.video_clip)
+
+        video_upload = SimpleUploadedFile("clip.mp4", b"mock video with embedded audio", content_type="video/mp4")
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(f"/projects/{project.pk}/assembly/visual/", {
+                "position": "0", "visual_type": "video", "visual_file": video_upload,
+            })
+        self.assertEqual(response.status_code, 302)
+        segment.refresh_from_db()
+        video_name = segment.video_clip.name
+        self.assertFalse(segment.image)
+        self.assertTrue(segment.video_clip)
+        self.assertFalse(segment.image.storage.exists(image_name))
+
+        second_video = SimpleUploadedFile("second.mov", b"mock mov with embedded audio", content_type="video/quicktime")
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(f"/projects/{project.pk}/assembly/visual/", {
+                "position": "1", "visual_type": "video", "visual_file": second_video,
+            })
+        self.assertEqual(response.status_code, 302)
+        second = project.segments.get(position=1)
+        second_video_name = second.video_clip.name
+
+        replacement_image = SimpleUploadedFile(
+            "replacement.jpg", ProjectAssemblyRenderTests.png_bytes(), content_type="image/jpeg",
+        )
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(f"/projects/{project.pk}/assembly/visual/", {
+                "position": "1", "visual_type": "image", "visual_file": replacement_image,
+            })
+        self.assertEqual(response.status_code, 302)
+        second.refresh_from_db()
+        self.assertTrue(second.image)
+        self.assertFalse(second.video_clip)
+        self.assertFalse(second.video_clip.storage.exists(second_video_name))
+        self.assertTrue(segment.video_clip.storage.exists(video_name))
+
+    def test_assembly_visual_upload_rejects_submitting_both_files(self):
+        project = NarrationProject.objects.create(
+            user=self.user, title="Upload invalide", mode=NarrationProject.Mode.ASSEMBLY,
+        )
+        response = self.client.post(f"/projects/{project.pk}/assembly/visual/", {
+            "position": "0", "visual_type": "image", "visual_file": SimpleUploadedFile("image.png", b"x"),
+            "image": SimpleUploadedFile("another.png", b"x"),
+            "video": SimpleUploadedFile("clip.mp4", b"x"),
+        })
+        self.assertEqual(response.status_code, 400)
+        self.assertContains(response, "Choisis une image ou une vidéo, pas les deux.", status_code=400)
+
+    def test_worker_dispatches_dedicated_assembly_job_without_xtts(self):
+        from .management.commands.run_narration_worker import Command
+
+        project = NarrationProject.objects.create(
+            user=self.user, title="Assemblage worker", mode=NarrationProject.Mode.ASSEMBLY,
+            status=NarrationProject.Status.QUEUED, queued_at=timezone.now(),
+            job_type=NarrationProject.JobType.AUDIO_ASSEMBLY,
+        )
+        with override_settings(MEDIA_ROOT=Path(self.media_dir.name)):
+            with patch("studio.management.commands.run_narration_worker.render_project_assembly") as render:
+                with patch("studio.management.commands.run_narration_worker.prepare_project") as prepare:
+                    Command().handle(once=True, poll_seconds=0.25)
+        prepare.assert_not_called()
+        render.assert_called_once_with(project.pk)
+
+    def test_worker_rejects_assembly_mode_with_the_wrong_job_type(self):
+        from .management.commands.run_narration_worker import Command
+
+        project = NarrationProject.objects.create(
+            user=self.user, title="Mauvais type", mode=NarrationProject.Mode.ASSEMBLY,
+            status=NarrationProject.Status.QUEUED, queued_at=timezone.now(),
+            job_type=NarrationProject.JobType.AUDIO,
+        )
+        with override_settings(MEDIA_ROOT=Path(self.media_dir.name)):
+            with patch("studio.management.commands.run_narration_worker.render_project_assembly") as render:
+                with patch("studio.management.commands.run_narration_worker.prepare_project") as prepare:
+                    Command().handle(once=True, poll_seconds=0.25)
+        prepare.assert_not_called()
+        render.assert_not_called()
+        project.refresh_from_db()
+        self.assertEqual(project.status, NarrationProject.Status.ERROR)
+
+
+class ProjectAssemblyRenderTests(MediaTestCase):
+    @staticmethod
+    def png_bytes(color=(100, 80, 160)):
+        buffer = BytesIO()
+        Image.new("RGB", (100, 80), color).save(buffer, format="PNG")
+        return buffer.getvalue()
+
+    def make_assembly_project(self, with_music=False):
+        asset = AudioAsset.objects.create(
+            user=self.user, name="Narration de test", duration=1.0, source=AudioAsset.Source.XTTS,
+            timings={
+                "version": 1,
+                "words": [
+                    {"word": "bonjour", "start": 0.0, "end": 0.4},
+                    {"word": "studio", "start": 0.45, "end": 0.9},
+                ],
+                "segments": [{"text": "Bonjour studio", "start": 0.0, "end": 0.9}],
+                "scene_boundaries": [{"scene_index": 0, "start": 0.0, "end": 1.0}],
+            },
+        )
+        asset.audio_file.save("narration.wav", ContentFile(b"mock narration"), save=True)
+        project = NarrationProject.objects.create(
+            user=self.user, title="Rendu assemblage", mode=NarrationProject.Mode.ASSEMBLY,
+            audio_asset=asset, subtitles_enabled=True,
+        )
+        visual = NarrationSegment.objects.create(project=project, position=0)
+        visual.image.save("visual.png", ContentFile(self.png_bytes()), save=True)
+        ignored = NarrationSegment.objects.create(project=project, position=1)
+        ignored.image.save("ignored.png", ContentFile(self.png_bytes((180, 80, 20))), save=True)
+        if with_music:
+            track = BackgroundTrack.objects.create(user=self.user, name="Musique", duration=8.0)
+            track.audio_file.save("music.mp3", ContentFile(b"mock music"), save=True)
+            project.background_track = track
+            project.music_volume = 25
+            project.save(update_fields=["background_track", "music_volume"])
+        return project, visual, ignored
+
+    @staticmethod
+    def wav_bytes(duration, frequency=440):
+        sample_rate = 8000
+        frames = b"".join(
+            struct.pack("<h", int(12000 * math.sin(2 * math.pi * frequency * index / sample_rate)))
+            for index in range(round(sample_rate * duration))
+        )
+        buffer = BytesIO()
+        with wave.open(buffer, "wb") as stream:
+            stream.setnchannels(1)
+            stream.setsampwidth(2)
+            stream.setframerate(sample_rate)
+            stream.writeframes(frames)
+        return buffer.getvalue()
+
+    def make_video_assembly_project(self, source_duration, boundary_duration):
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg or not shutil.which("ffprobe"):
+            self.skipTest("ffmpeg et ffprobe sont nécessaires au test d’intégration vidéo.")
+        with tempfile.TemporaryDirectory(prefix="assembly-source-video-") as folder:
+            source = Path(folder) / "source-with-audio.mp4"
+            try:
+                subprocess.run([
+                    ffmpeg, "-y", "-v", "error", "-f", "lavfi", "-i",
+                    f"testsrc2=size=128x128:rate=24:duration={source_duration:.3f}",
+                    "-f", "lavfi", "-i", f"sine=frequency=880:sample_rate=8000:duration={source_duration:.3f}",
+                    "-shortest", "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                    "-c:a", "aac", "-ar", "8000", str(source),
+                ], capture_output=True, text=True, check=True, timeout=30)
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+                self.skipTest(f"ffmpeg ne peut pas préparer un clip MP4 avec audio : {exc}")
+            source_bytes = source.read_bytes()
+
+        words_end = min(0.4, boundary_duration - 0.05)
+        asset = AudioAsset.objects.create(
+            user=self.user, name="Voix importée du Studio", duration=boundary_duration,
+            source=AudioAsset.Source.XTTS,
+            timings={
+                "version": 1,
+                "words": [{"word": "voix", "start": 0.0, "end": words_end}],
+                "segments": [{"text": "Voix", "start": 0.0, "end": words_end}],
+                "scene_boundaries": [{
+                    "scene_index": 0, "start": 0.0, "end": boundary_duration,
+                }],
+            },
+        )
+        asset.audio_file.save("voice.wav", ContentFile(self.wav_bytes(boundary_duration)), save=True)
+        project = NarrationProject.objects.create(
+            user=self.user, title="Vidéo en assemblage", mode=NarrationProject.Mode.ASSEMBLY,
+            audio_asset=asset, subtitles_enabled=False,
+        )
+        scene = NarrationSegment.objects.create(project=project, position=0)
+        scene.video_clip.save("source.mp4", ContentFile(source_bytes), save=True)
+        return project, asset
+
+    def test_assembly_video_pads_short_clip_trims_long_clip_and_discards_embedded_audio(self):
+        from . import video_services
+
+        real_run_ffmpeg = video_services._run_ffmpeg
+        for source_duration, boundary_duration, expect_padding in (
+            (0.20, 0.50, True),
+            (0.80, 0.50, False),
+        ):
+            with self.subTest(source_duration=source_duration):
+                project, asset = self.make_video_assembly_project(source_duration, boundary_duration)
+                commands = []
+                intermediate_metadata = []
+
+                def run_and_inspect(command, cwd, operation, cancel_check=None):
+                    result = real_run_ffmpeg(command, cwd, operation, cancel_check=cancel_check)
+                    commands.append(list(command))
+                    if operation.startswith("rendu silencieux du visuel"):
+                        intermediate_metadata.append(video_services._probe_clip(command[-1]))
+                    return result
+
+                with patch("studio.video_services._dimensions", return_value=(128, 128)):
+                    with patch("studio.video_services._video_encoder", return_value="libx264"):
+                        with patch("studio.video_services._run_ffmpeg", side_effect=run_and_inspect):
+                            video_services.render_project_assembly(project.pk)
+
+                project.refresh_from_db()
+                self.assertEqual(project.status, NarrationProject.Status.READY, project.error_message)
                 self.assertEqual(len(intermediate_metadata), 1)
                 self.assertFalse(intermediate_metadata[0]["has_audio"])
                 self.assertEqual(len(commands), 3)
