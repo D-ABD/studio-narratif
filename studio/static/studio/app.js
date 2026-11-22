@@ -1,6 +1,62 @@
 (() => {
   let submitJobHandler = null;
 
+  const sidebarBody = document.body;
+  const sidebarToggle = document.getElementById('sidebarToggle');
+  const sidebarCollapseKey = 'petit-studio-sidebar-collapsed';
+  const updateSidebarToggle = () => {
+    if (!sidebarToggle) return;
+    const expanded = !sidebarBody.classList.contains('sidebar-collapsed');
+    sidebarToggle.setAttribute('aria-expanded', String(expanded));
+    sidebarToggle.setAttribute('aria-label', expanded ? 'Réduire la barre latérale' : 'Déployer la barre latérale');
+    sidebarToggle.title = expanded ? 'Réduire la barre latérale' : 'Déployer la barre latérale';
+    sidebarToggle.innerHTML = expanded
+      ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 5-7 7 7 7M21 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>'
+      : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m10 5 7 7-7 7M3 5l7 7-7 7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  };
+  try {
+    if (localStorage.getItem(sidebarCollapseKey) === 'true') sidebarBody.classList.add('sidebar-collapsed');
+  } catch (_) {}
+  updateSidebarToggle();
+  sidebarToggle?.addEventListener('click', () => {
+    sidebarBody.classList.toggle('sidebar-collapsed');
+    try { localStorage.setItem(sidebarCollapseKey, String(sidebarBody.classList.contains('sidebar-collapsed'))); } catch (_) {}
+    updateSidebarToggle();
+    document.querySelectorAll('[data-sidebar-accordion]').forEach(trigger => {
+      trigger.disabled = sidebarBody.classList.contains('sidebar-collapsed');
+    });
+  });
+
+  const sidebarSectionsKey = 'petit-studio-sidebar-sections';
+  const sidebarSectionDefaults = {
+    creation: true,
+    libraries: true,
+    organization: true,
+    'project-folders': false,
+    'media-folders': false,
+  };
+  let savedSidebarSections = {};
+  try { savedSidebarSections = JSON.parse(localStorage.getItem(sidebarSectionsKey) || '{}') || {}; } catch (_) {}
+  document.querySelectorAll('[data-sidebar-accordion]').forEach(trigger => {
+    const key = trigger.dataset.sidebarKey;
+    const panel = document.getElementById(trigger.getAttribute('aria-controls'));
+    if (!key || !panel) return;
+    const expanded = Object.prototype.hasOwnProperty.call(savedSidebarSections, key)
+      ? Boolean(savedSidebarSections[key])
+      : sidebarSectionDefaults[key];
+    trigger.setAttribute('aria-expanded', String(expanded));
+    panel.hidden = !expanded;
+    trigger.disabled = sidebarBody.classList.contains('sidebar-collapsed');
+    trigger.addEventListener('click', () => {
+      if (sidebarBody.classList.contains('sidebar-collapsed')) return;
+      const nextExpanded = trigger.getAttribute('aria-expanded') !== 'true';
+      trigger.setAttribute('aria-expanded', String(nextExpanded));
+      panel.hidden = !nextExpanded;
+      savedSidebarSections[key] = nextExpanded;
+      try { localStorage.setItem(sidebarSectionsKey, JSON.stringify(savedSidebarSections)); } catch (_) {}
+    });
+  });
+
   // Capture les soumissions tôt, même si une autre initialisation de la page échoue.
   document.addEventListener('submit', event => {
     const form = event.target;

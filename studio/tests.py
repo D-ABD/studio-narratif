@@ -895,6 +895,28 @@ class ListPaginationAndBatchDismissTests(MediaTestCase):
         self.assertNotContains(response, "Mes narrations")
         self.assertContains(response, 'href="/projects/"')
 
+    def test_sidebar_sections_and_navigation_links_are_present(self):
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        for section in ("Création", "Bibliothèques", "Organisation"):
+            with self.subTest(section=section):
+                self.assertContains(response, f'aria-label="{section}"')
+                self.assertContains(response, f'title="{section}"')
+        self.assertContains(response, 'aria-expanded="true" title="Création"')
+        self.assertContains(response, 'aria-expanded="true" title="Bibliothèques"')
+        self.assertContains(response, 'aria-expanded="true" title="Organisation"')
+        self.assertContains(response, 'aria-expanded="false" title="Dossiers"')
+        self.assertContains(response, 'aria-expanded="false" title="Dossiers médias"')
+
+        self.assertContains(response, 'action="/projects/create/"')
+        for href in (
+            '/studio/', '/audio-studio/', '/#voices',
+            '/musics/', '/audios/', '/projects/', '/queue/',
+        ):
+            with self.subTest(href=href):
+                self.assertContains(response, f'href="{href}"')
+
     def test_all_projects_page_is_scoped_to_the_logged_in_user(self):
         own_project = NarrationProject.objects.create(user=self.user, title="Projet à moi")
         other_user = get_user_model().objects.create_user(username="projects-private", password="SafePass123!x")

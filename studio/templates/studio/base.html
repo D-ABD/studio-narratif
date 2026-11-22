@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0B0E14">
   <title>{% block title %}Petit Studio{% endblock %}</title>
-  <link rel="stylesheet" href="{% static 'studio/app.css' %}?v=11">
+  <link rel="stylesheet" href="{% static 'studio/app.css' %}?v=12">
   <style>
     :root {
       color-scheme: dark;
@@ -64,7 +64,7 @@
       align-items: center;
       gap: 12px;
       padding: 0 7px;
-      margin-bottom: 35px;
+      margin-bottom: 14px;
       white-space: nowrap;
     }
     .premium-brand-mark {
@@ -113,7 +113,30 @@
       white-space: nowrap;
       transition: opacity .18s;
     }
-    .premium-nav { display: grid; gap: 5px; margin-bottom: 30px; }
+    .premium-sidebar-content { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding-right: 3px; }
+    .premium-sidebar-group { margin: 0 0 6px; }
+    .premium-section-toggle { width: 100%; min-height: 34px; display: flex; align-items: center; gap: 9px; padding: 4px 9px; border: 0; border-radius: 8px; color: #8993A3; background: transparent; text-align: left; font-size: 10px; font-weight: 750; letter-spacing: .8px; cursor: pointer; }
+    .premium-section-toggle:hover { color: #E5E9EF; background: #171D27; }
+    .premium-section-icon { width: 17px; flex: 0 0 17px; color: #F4B95F; font-size: 14px; text-align: center; }
+    .premium-section-chevron { margin-left: auto; color: #788394; font-size: 12px; transition: transform .16s ease; }
+    .premium-section-toggle[aria-expanded="true"] .premium-section-chevron { transform: rotate(90deg); }
+    .premium-section-panel[hidden] { display: none !important; }
+    .premium-section-panel { padding: 1px 0 4px; }
+    .premium-nav { display: grid; gap: 3px; margin: 0; }
+    .premium-nav .premium-nav-link { min-height: 35px; }
+    .premium-nested-section { margin-top: 5px; }
+    .premium-nested-toggle { min-height: 30px; padding-left: 10px; font-size: 9px; letter-spacing: .65px; }
+    .premium-nested-toggle .premium-section-icon { font-size: 12px; }
+    .premium-folder-heading { display: flex; align-items: center; gap: 4px; }
+    .premium-folder-heading .premium-section-toggle { flex: 1; min-width: 0; }
+    .premium-folder-heading .premium-folder-create { flex: 0 0 25px; width: 25px; height: 25px; }
+    .premium-folder-tree { max-height: 150px; overflow-y: auto; }
+    .premium-recent-projects { margin-top: 8px; padding-top: 6px; border-top: 1px solid #252C38; }
+    .premium-recent-title { padding: 3px 9px 5px; color: #758092; font-size: 9px; font-weight: 750; letter-spacing: .8px; }
+    .premium-recent-list { display: grid; gap: 2px; }
+    .premium-recent-link { min-height: 30px; }
+    .premium-view-all { display: block; padding: 5px 9px; color: #F4B95F; font-size: 10px; }
+    .premium-view-all:hover { color: #FFD178; }
     .premium-create-form { margin: 0; }
     .premium-create-button { width: 100%; border-color: #3A321F; color: #FFD178; background: #201A11; text-align: left; cursor: pointer; }
     .premium-create-button:hover { border-color: #805514; background: #2A2113; }
@@ -300,6 +323,14 @@
     .sidebar-collapsed .premium-icon { width: 100%; flex-basis: 100%; }
     .sidebar-collapsed .premium-project-menu-toggle { position: absolute; right: -5px; top: 3px; z-index: 2; width: 23px; height: 27px; background: #171D27; }
     .sidebar-collapsed .premium-folder-title { display: flex; justify-content: center; padding: 8px 0; opacity: 1; }
+    .sidebar-collapsed .premium-section-toggle { justify-content: center; min-height: 37px; padding: 4px 0; pointer-events: none; }
+    .sidebar-collapsed .premium-section-toggle .premium-section-label,
+    .sidebar-collapsed .premium-section-toggle .premium-section-chevron,
+    .sidebar-collapsed .premium-section-toggle .premium-folder-create { display: none; }
+    .sidebar-collapsed .premium-section-icon { width: 100%; flex-basis: 100%; font-size: 16px; }
+    .sidebar-collapsed .premium-section-panel { display: none !important; }
+    .sidebar-collapsed .premium-sidebar-content { overflow: hidden; }
+    .sidebar-collapsed .premium-recent-projects { display: none; }
     .sidebar-collapsed .premium-sidebar-bottom { justify-content: center; padding-right: 0; padding-left: 0; }
     .premium-editor { max-width: 1500px; margin: 0 auto; }
     .editor-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin: 0 0 18px; }
@@ -449,33 +480,51 @@
     <div class="premium-brand-row">
       <a class="premium-brand-mark" href="{% url 'home' %}" aria-label="Petit Studio">✦</a>
       <a class="premium-wordmark" href="{% url 'home' %}">Petit Studio<small>STUDIO NARRATIF</small></a>
-      <button class="premium-toggle" id="sidebarToggle" type="button" aria-label="Rabattre la barre latérale" aria-expanded="true" title="Rabattre / déployer la barre latérale">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5h10M8 12h10M8 19h10M4 5v14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      <button class="premium-toggle" id="sidebarToggle" type="button" aria-label="Réduire la barre latérale" aria-expanded="true" title="Réduire la barre latérale">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 5-7 7 7 7M21 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </button>
     </div>
-    <div class="premium-section-title">ESPACE DE TRAVAIL</div>
-    <nav class="premium-nav">
-      <a class="premium-nav-link{% if request.resolver_match.url_name == 'home' %} active{% endif %}" href="{% url 'home' %}#voices"><span class="premium-icon" aria-hidden="true">♫</span><span class="premium-link-label">Bibliothèque de voix</span></a>
-      <a class="premium-nav-link{% if request.resolver_match.url_name == 'musics' %} active{% endif %}" href="{% url 'musics' %}"><span class="premium-icon" aria-hidden="true">♪</span><span class="premium-link-label">Bibliothèque musicale</span></a>
-      <a class="premium-nav-link{% if request.resolver_match.url_name == 'audios' %} active{% endif %}" href="{% url 'audios' %}"><span class="premium-icon" aria-hidden="true">◖</span><span class="premium-link-label">Audios</span></a>
-      <a class="premium-nav-link{% if request.resolver_match.url_name == 'audio_studio' or request.resolver_match.url_name == 'audio_studio_edit' %} active{% endif %}" href="{% url 'audio_studio' %}"><span class="premium-icon" aria-hidden="true">♫</span><span class="premium-link-label">Studio audio</span></a>
-      <a class="premium-nav-link{% if request.resolver_match.url_name == 'studio_home' %} active{% endif %}" href="{% url 'studio_home' %}"><span class="premium-icon" aria-hidden="true">♫</span><span class="premium-link-label">Studio</span></a>
-      <a class="premium-nav-link{% if request.resolver_match.url_name == 'project_list' and not folder_filter_active %} active{% endif %}" href="{% url 'project_list' %}"><span class="premium-icon" aria-hidden="true">▤</span><span class="premium-link-label">Tous les projets</span></a>
-      <a class="premium-nav-link{% if request.resolver_match.url_name == 'queue_view' %} active{% endif %}" href="{% url 'queue_view' %}">
-        <span class="premium-icon" aria-hidden="true">☷</span><span class="premium-link-label">File d'attente</span>
-        <span class="premium-queue-count" id="queueCountBadge" aria-label="{{ queue_count }} projet(s) en attente">{{ queue_count }}</span>
-      </a>
-      <form method="post" action="{% url 'create_project' %}" class="premium-create-form">
-        {% csrf_token %}
-        <input type="hidden" name="title" value="Nouvelle narration">
-        <button class="premium-nav-link premium-create-button" type="submit"><span class="premium-icon" aria-hidden="true">＋</span><span class="premium-link-label">Nouvelle narration</span></button>
-      </form>
-    </nav>
-    <div class="premium-section-title premium-folder-title">
-      <span>DOSSIERS</span>
-      <button class="premium-folder-create" type="button" data-folder-create data-create-folder-url="{% url 'create_folder' %}" aria-label="Créer un dossier" title="Nouveau dossier">＋</button>
-    </div>
-    <nav class="premium-folder-tree" aria-label="Dossiers de projets">
+    <div class="premium-sidebar-content">
+      <section class="premium-sidebar-group" aria-label="Création">
+        <button class="premium-section-toggle" type="button" data-sidebar-accordion data-sidebar-key="creation" aria-label="Création" aria-controls="sidebarCreation" aria-expanded="true" title="Création">
+          <span class="premium-section-icon" aria-hidden="true">✦</span><span class="premium-section-label">Création</span><span class="premium-section-chevron" aria-hidden="true">›</span>
+        </button>
+        <nav class="premium-section-panel premium-nav" id="sidebarCreation" aria-label="Création">
+          <form method="post" action="{% url 'create_project' %}" class="premium-create-form">
+            {% csrf_token %}<input type="hidden" name="title" value="Nouvelle narration">
+            <button class="premium-nav-link premium-create-button" type="submit" title="Nouvelle narration"><span class="premium-icon" aria-hidden="true">＋</span><span class="premium-link-label">Nouvelle narration</span></button>
+          </form>
+          <a class="premium-nav-link{% if request.resolver_match.url_name == 'studio_home' %} active{% endif %}" href="{% url 'studio_home' %}" title="Studio"><span class="premium-icon" aria-hidden="true">♫</span><span class="premium-link-label">Studio</span></a>
+          <a class="premium-nav-link{% if request.resolver_match.url_name == 'audio_studio' or request.resolver_match.url_name == 'audio_studio_edit' %} active{% endif %}" href="{% url 'audio_studio' %}" title="Studio audio"><span class="premium-icon" aria-hidden="true">◉</span><span class="premium-link-label">Studio audio</span></a>
+        </nav>
+      </section>
+      <section class="premium-sidebar-group" aria-label="Bibliothèques">
+        <button class="premium-section-toggle" type="button" data-sidebar-accordion data-sidebar-key="libraries" aria-label="Bibliothèques" aria-controls="sidebarLibraries" aria-expanded="true" title="Bibliothèques">
+          <span class="premium-section-icon" aria-hidden="true">▤</span><span class="premium-section-label">Bibliothèques</span><span class="premium-section-chevron" aria-hidden="true">›</span>
+        </button>
+        <nav class="premium-section-panel premium-nav" id="sidebarLibraries" aria-label="Bibliothèques">
+          <a class="premium-nav-link{% if request.resolver_match.url_name == 'home' %} active{% endif %}" href="{% url 'home' %}#voices" title="Voix"><span class="premium-icon" aria-hidden="true">♫</span><span class="premium-link-label">Voix</span></a>
+          <a class="premium-nav-link{% if request.resolver_match.url_name == 'musics' %} active{% endif %}" href="{% url 'musics' %}" title="Musiques"><span class="premium-icon" aria-hidden="true">♪</span><span class="premium-link-label">Musiques</span></a>
+          <a class="premium-nav-link{% if request.resolver_match.url_name == 'audios' %} active{% endif %}" href="{% url 'audios' %}" title="Audios"><span class="premium-icon" aria-hidden="true">◖</span><span class="premium-link-label">Audios</span></a>
+        </nav>
+      </section>
+      <section class="premium-sidebar-group" aria-label="Organisation">
+        <button class="premium-section-toggle" type="button" data-sidebar-accordion data-sidebar-key="organization" aria-label="Organisation" aria-controls="sidebarOrganization" aria-expanded="true" title="Organisation">
+          <span class="premium-section-icon" aria-hidden="true">⌂</span><span class="premium-section-label">Organisation</span><span class="premium-section-chevron" aria-hidden="true">›</span>
+        </button>
+        <div class="premium-section-panel" id="sidebarOrganization">
+          <nav class="premium-nav" aria-label="Organisation">
+            <a class="premium-nav-link{% if request.resolver_match.url_name == 'project_list' and not folder_filter_active %} active{% endif %}" href="{% url 'project_list' %}" title="Tous les projets"><span class="premium-icon" aria-hidden="true">▤</span><span class="premium-link-label">Tous les projets</span></a>
+            <a class="premium-nav-link{% if request.resolver_match.url_name == 'queue_view' %} active{% endif %}" href="{% url 'queue_view' %}" title="File d'attente"><span class="premium-icon" aria-hidden="true">☷</span><span class="premium-link-label">File d'attente</span><span class="premium-queue-count" id="queueCountBadge" aria-label="{{ queue_count }} projet(s) en attente">{{ queue_count }}</span></a>
+          </nav>
+          <section class="premium-nested-section" aria-label="DOSSIERS de projets">
+            <div class="premium-folder-heading">
+              <button class="premium-section-toggle premium-nested-toggle" type="button" data-sidebar-accordion data-sidebar-key="project-folders" aria-label="Dossiers" aria-controls="sidebarProjectFolders" aria-expanded="false" title="Dossiers">
+                <span class="premium-section-icon" aria-hidden="true">▰</span><span class="premium-section-label">Dossiers</span><span class="premium-section-chevron" aria-hidden="true">›</span>
+              </button>
+              <button class="premium-folder-create" type="button" data-folder-create data-create-folder-url="{% url 'create_folder' %}" aria-label="Créer un dossier" title="Nouveau dossier">＋</button>
+            </div>
+            <nav class="premium-section-panel premium-folder-tree" id="sidebarProjectFolders" aria-label="Dossiers de projets" hidden>
       <a class="premium-folder-link{% if folder_filter_active and folder_filter == '' %} selected{% endif %}" href="{% url 'project_list' %}?folder=" title="Projets à la racine">
         <span class="premium-folder-icon" aria-hidden="true">⌂</span><span class="premium-folder-label">Racine</span><span class="premium-folder-count">{{ sidebar_root_project_count }}</span>
       </a>
@@ -493,9 +542,13 @@
       {% empty %}
       <span class="premium-project-empty">Aucun dossier. Clique sur + pour en créer un.</span>
       {% endfor %}
-    </nav>
-    <div class="premium-section-title premium-folder-title"><span>DOSSIERS MÉDIAS</span></div>
-    <nav class="premium-folder-tree" aria-label="Dossiers médias">
+            </nav>
+          </section>
+          <section class="premium-nested-section" aria-label="Dossiers médias">
+            <button class="premium-section-toggle premium-nested-toggle" type="button" data-sidebar-accordion data-sidebar-key="media-folders" aria-label="Dossiers médias" aria-controls="sidebarMediaFolders" aria-expanded="false" title="Dossiers médias">
+              <span class="premium-section-icon" aria-hidden="true">▣</span><span class="premium-section-label">Dossiers médias</span><span class="premium-section-chevron" aria-hidden="true">›</span>
+            </button>
+            <nav class="premium-section-panel premium-folder-tree" id="sidebarMediaFolders" aria-label="Dossiers médias" hidden>
       {% for folder in sidebar_media_folders %}
       <div class="premium-folder-row" data-sidebar-folder>
         {% if request.resolver_match.url_name == 'musics' %}
@@ -516,7 +569,26 @@
         </div>
       </div>
       {% empty %}<span class="premium-project-empty">Aucun dossier média pour le moment.</span>{% endfor %}
-    </nav>
+            </nav>
+          </section>
+        </div>
+      </section>
+      <section class="premium-recent-projects" aria-label="Projets récents">
+        <div class="premium-recent-title">PROJETS RÉCENTS</div>
+        <nav class="premium-recent-list" aria-label="Projets récents">
+          {% if request.resolver_match.url_name == 'project_list' %}
+          {% for project in project_page.object_list|slice:":5" %}
+          <a class="premium-nav-link premium-recent-link" href="{% url 'project_detail' project.id %}" title="{{ project.title }}"><span class="premium-icon" aria-hidden="true">◦</span><span class="premium-link-label">{{ project.title }}</span></a>
+          {% empty %}<span class="premium-project-empty">Aucun projet récent dans cette vue.</span>{% endfor %}
+          {% else %}
+          {% for project in sidebar_projects|slice:":5" %}
+          <a class="premium-nav-link premium-recent-link" href="{% url 'project_detail' project.id %}" title="{{ project.title }}"><span class="premium-icon" aria-hidden="true">◦</span><span class="premium-link-label">{{ project.title }}</span></a>
+          {% empty %}<span class="premium-project-empty">Aucun projet récent.</span>{% endfor %}
+          {% endif %}
+          <a class="premium-view-all" href="{% url 'project_list' %}">Voir tous les projets</a>
+        </nav>
+      </section>
+    </div>
     <div class="premium-sidebar-bottom">
       <span class="premium-online-dot" aria-hidden="true"></span>
       <span class="premium-user-name" title="{{ request.user.get_username }}">{{ request.user.get_username }}</span>
@@ -549,28 +621,6 @@
     </div>
   </form>
 </dialog>
-<script>
-(() => {
-  const body = document.body;
-  const button = document.getElementById('sidebarToggle');
-  const storageKey = 'petit-studio-sidebar-collapsed';
-  let collapsed = false;
-  try { collapsed = localStorage.getItem(storageKey) === 'true'; } catch (_) {}
-  if (collapsed) body.classList.add('sidebar-collapsed');
-  const updateButton = () => {
-    if (!button) return;
-    const expanded = !body.classList.contains('sidebar-collapsed');
-    button.setAttribute('aria-expanded', String(expanded));
-    button.setAttribute('aria-label', expanded ? 'Rabattre la barre latérale' : 'Déployer la barre latérale');
-  };
-  updateButton();
-  button?.addEventListener('click', () => {
-    body.classList.toggle('sidebar-collapsed');
-    try { localStorage.setItem(storageKey, String(body.classList.contains('sidebar-collapsed'))); } catch (_) {}
-    updateButton();
-  });
-})();
-</script>
-  <script src="{% static 'studio/app.js' %}?v=27" defer></script>
+  <script src="{% static 'studio/app.js' %}?v=28" defer></script>
 </body>
 </html>
