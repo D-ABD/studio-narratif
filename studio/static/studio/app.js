@@ -28,6 +28,98 @@
   try {
   const csrfToken = () => document.querySelector('[name=csrfmiddlewaretoken]')?.value || '';
   const wordCount = value => (value.trim() ? value.trim().split(/\s+/).length : 0);
+  const postFolderAction = async (url, values) => {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
+        'X-CSRFToken': csrfToken(),
+        'X-Requested-With': 'XMLHttpRequest',
+      },
+      body: new URLSearchParams(values),
+    });
+    let data = {};
+    try { data = await response.json(); } catch (_) {}
+    if (!response.ok || !data.ok) throw new Error(data.error || data.message || 'La requête a échoué.');
+    return data;
+  };
+
+  document.addEventListener('click', async event => {
+    const target = event.target instanceof Element ? event.target : null;
+    if (!target) return;
+
+    const createButton = target.closest('[data-folder-create]');
+    if (createButton) {
+      const name = window.prompt('Nom du nouveau dossier :');
+      if (name === null) return;
+      try {
+        await postFolderAction(createButton.dataset.createFolderUrl, {name: name.trim()});
+        window.location.reload();
+      } catch (error) {
+        window.alert(error.message);
+      }
+      return;
+    }
+
+    const menuToggle = target.closest('[data-folder-menu-toggle]');
+    if (menuToggle) {
+      const row = menuToggle.closest('[data-sidebar-folder]');
+      const menu = row?.querySelector('[data-folder-dropdown]');
+      if (!row || !menu) return;
+      const shouldOpen = menu.hidden;
+      document.querySelectorAll('[data-folder-dropdown]').forEach(item => { item.hidden = true; });
+      document.querySelectorAll('[data-folder-menu-toggle]').forEach(item => item.setAttribute('aria-expanded', 'false'));
+      menu.hidden = !shouldOpen;
+      menuToggle.setAttribute('aria-expanded', String(shouldOpen));
+      return;
+    }
+
+    const renameButton = target.closest('[data-folder-rename]');
+    if (renameButton) {
+      const name = window.prompt('Nouveau nom du dossier :', renameButton.dataset.folderName || '');
+      if (name === null) return;
+      try {
+        await postFolderAction(renameButton.dataset.folderRenameUrl, {name: name.trim()});
+        window.location.reload();
+      } catch (error) {
+        window.alert(error.message);
+      }
+      return;
+    }
+
+    const deleteButton = target.closest('[data-folder-delete]');
+    if (deleteButton) {
+      const folderName = deleteButton.dataset.folderName || '';
+      if (!window.confirm(`Supprimer le dossier « ${folderName} » ? Les projets seront déplacés à la racine.`)) return;
+      try {
+        await postFolderAction(deleteButton.dataset.folderDeleteUrl, {confirm: '1'});
+        window.location.reload();
+      } catch (error) {
+        window.alert(error.message);
+      }
+      return;
+    }
+
+    if (!target.closest('[data-sidebar-folder]')) {
+      document.querySelectorAll('[data-folder-dropdown]').forEach(item => { item.hidden = true; });
+      document.querySelectorAll('[data-folder-menu-toggle]').forEach(item => item.setAttribute('aria-expanded', 'false'));
+    }
+  });
+
+  document.addEventListener('change', async event => {
+    const select = event.target instanceof HTMLSelectElement ? event.target : null;
+    if (!select?.matches('[data-project-folder-move]')) return;
+    select.disabled = true;
+    try {
+      await postFolderAction(select.dataset.moveUrl, {folder_id: select.value});
+      window.location.reload();
+    } catch (error) {
+      select.value = select.dataset.currentFolder || '';
+      window.alert(error.message);
+    } finally {
+      select.disabled = false;
+    }
+  });
 
   document.addEventListener('click', event => {
     const target = event.target instanceof Element ? event.target : null;

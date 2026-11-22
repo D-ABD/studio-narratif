@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0B0E14">
   <title>{% block title %}Petit Studio{% endblock %}</title>
-  <link rel="stylesheet" href="{% static 'studio/app.css' %}?v=10">
+  <link rel="stylesheet" href="{% static 'studio/app.css' %}?v=11">
   <style>
     :root {
       color-scheme: dark;
@@ -281,7 +281,7 @@
     .sidebar-collapsed .sidebar.premium-sidebar { width: 80px; padding-right: 10px; padding-left: 10px; }
     .sidebar-collapsed .premium-brand-row { justify-content: center; padding: 0; }
     .sidebar-collapsed .premium-wordmark,
-    .sidebar-collapsed .premium-section-title,
+    .sidebar-collapsed .premium-section-title:not(.premium-folder-title),
     .sidebar-collapsed .premium-link-label,
     .sidebar-collapsed .premium-sidebar-bottom > span:not(.premium-online-dot) {
       display: none;
@@ -299,6 +299,7 @@
     .sidebar-collapsed .premium-project-link { justify-content: center; padding: 0; }
     .sidebar-collapsed .premium-icon { width: 100%; flex-basis: 100%; }
     .sidebar-collapsed .premium-project-menu-toggle { position: absolute; right: -5px; top: 3px; z-index: 2; width: 23px; height: 27px; background: #171D27; }
+    .sidebar-collapsed .premium-folder-title { display: flex; justify-content: center; padding: 8px 0; opacity: 1; }
     .sidebar-collapsed .premium-sidebar-bottom { justify-content: center; padding-right: 0; padding-left: 0; }
     .premium-editor { max-width: 1500px; margin: 0 auto; }
     .editor-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin: 0 0 18px; }
@@ -410,7 +411,8 @@
       .premium-brand-row { margin: 0; }
       .premium-nav { display: flex; flex-wrap: wrap; gap: 5px; margin: 10px 0 0; }
       .premium-nav-link { min-height: 36px; }
-      .premium-section-title:not(.premium-projects-title), .premium-sidebar-bottom { display: none; }
+      .premium-section-title:not(.premium-projects-title):not(.premium-folder-title), .premium-sidebar-bottom { display: none; }
+      .premium-folder-title { display: flex; padding: 12px 10px 6px; }
       .premium-projects-title { display: flex; padding: 12px 10px 6px; }
       .premium-projects { display: grid; max-height: 28vh; overflow-y: auto; }
       .premium-project-menu-toggle { opacity: 1; pointer-events: auto; }
@@ -458,7 +460,7 @@
       <a class="premium-nav-link{% if request.resolver_match.url_name == 'audios' %} active{% endif %}" href="{% url 'audios' %}"><span class="premium-icon" aria-hidden="true">◖</span><span class="premium-link-label">Audios</span></a>
       <a class="premium-nav-link{% if request.resolver_match.url_name == 'audio_studio' or request.resolver_match.url_name == 'audio_studio_edit' %} active{% endif %}" href="{% url 'audio_studio' %}"><span class="premium-icon" aria-hidden="true">♫</span><span class="premium-link-label">Studio audio</span></a>
       <a class="premium-nav-link{% if request.resolver_match.url_name == 'studio_home' %} active{% endif %}" href="{% url 'studio_home' %}"><span class="premium-icon" aria-hidden="true">♫</span><span class="premium-link-label">Studio</span></a>
-      <a class="premium-nav-link" href="{% url 'home' %}#projects"><span class="premium-icon" aria-hidden="true">▤</span><span class="premium-link-label">Mes projets</span></a>
+      <a class="premium-nav-link{% if request.resolver_match.url_name == 'project_list' and not folder_filter_active %} active{% endif %}" href="{% url 'project_list' %}"><span class="premium-icon" aria-hidden="true">▤</span><span class="premium-link-label">Tous les projets</span></a>
       <a class="premium-nav-link{% if request.resolver_match.url_name == 'queue_view' %} active{% endif %}" href="{% url 'queue_view' %}">
         <span class="premium-icon" aria-hidden="true">☷</span><span class="premium-link-label">File d'attente</span>
         <span class="premium-queue-count" id="queueCountBadge" aria-label="{{ queue_count }} projet(s) en attente">{{ queue_count }}</span>
@@ -469,36 +471,29 @@
         <button class="premium-nav-link premium-create-button" type="submit"><span class="premium-icon" aria-hidden="true">＋</span><span class="premium-link-label">Nouvelle narration</span></button>
       </form>
     </nav>
-    <div class="premium-section-title premium-projects-title">PROJETS RÉCENTS<a class="premium-refresh-link" href="" aria-label="Actualiser la page">↻</a></div>
-    {% with current_project=project %}
-    <nav class="premium-projects" aria-label="Projets récents">
-      {% for project in sidebar_projects %}
-      <div class="premium-project-row" data-sidebar-project data-project-id="{{ project.id }}">
-        <a class="premium-project-link{% if current_project and current_project.id == project.id %} selected{% endif %}" href="{% url 'project_detail' project.id %}">
-          <span class="premium-icon" aria-hidden="true">◈</span><span class="premium-link-label" data-project-title>{{ project.title }}</span>
+    <div class="premium-section-title premium-folder-title">
+      <span>DOSSIERS</span>
+      <button class="premium-folder-create" type="button" data-folder-create data-create-folder-url="{% url 'create_folder' %}" aria-label="Créer un dossier" title="Nouveau dossier">＋</button>
+    </div>
+    <nav class="premium-folder-tree" aria-label="Dossiers de projets">
+      <a class="premium-folder-link{% if folder_filter_active and folder_filter == '' %} selected{% endif %}" href="{% url 'project_list' %}?folder=" title="Projets à la racine">
+        <span class="premium-folder-icon" aria-hidden="true">⌂</span><span class="premium-folder-label">Racine</span><span class="premium-folder-count">{{ sidebar_root_project_count }}</span>
+      </a>
+      {% for folder in sidebar_folders %}
+      <div class="premium-folder-row" data-sidebar-folder>
+        <a class="premium-folder-link{% if selected_folder and selected_folder.id == folder.id %} selected{% endif %}" href="{% url 'project_list' %}?folder={{ folder.id }}" title="{{ folder.name }}">
+          <span class="premium-folder-icon" aria-hidden="true">▰</span><span class="premium-folder-label">{{ folder.name }}</span><span class="premium-folder-count">{{ folder.project_count }}</span>
         </a>
-        <button class="premium-project-menu-toggle" type="button" data-project-menu-toggle aria-label="Actions pour {{ project.title }}" aria-expanded="false" aria-controls="project-menu-{{ project.id }}">⋯</button>
-        <div class="premium-project-dropdown" id="project-menu-{{ project.id }}" data-project-dropdown hidden>
-          <button type="button" data-project-rename-start>Renommer</button>
-          <button type="button" class="danger" data-project-delete-start data-delete-url="{% url 'delete_project' project.id %}" data-project-title="{{ project.title }}" data-return-url="{{ request.get_full_path }}">Supprimer</button>
+        <button class="premium-folder-menu-toggle" type="button" data-folder-menu-toggle aria-label="Actions pour le dossier {{ folder.name }}" aria-expanded="false">⋯</button>
+        <div class="premium-folder-dropdown" data-folder-dropdown hidden>
+          <button type="button" data-folder-rename data-folder-name="{{ folder.name }}" data-folder-rename-url="{% url 'rename_folder' folder.id %}">Renommer</button>
+          <button type="button" class="danger" data-folder-delete data-folder-name="{{ folder.name }}" data-folder-delete-url="{% url 'delete_folder' folder.id %}">Supprimer</button>
         </div>
-        <form class="premium-project-rename-form" method="post" action="{% url 'rename_project' project.id %}" data-project-rename-form hidden>
-          {% csrf_token %}
-          <input type="hidden" name="next" value="{{ request.get_full_path }}">
-          <label class="sr-only" for="sidebar-project-title-{{ project.id }}">Nouveau nom de {{ project.title }}</label>
-          <input id="sidebar-project-title-{{ project.id }}" name="title" value="{{ project.title }}" maxlength="120" required data-project-rename-input>
-          <button class="premium-project-rename-action save" type="submit" aria-label="Enregistrer le nom">✓</button>
-          <button class="premium-project-rename-action" type="button" data-project-rename-cancel aria-label="Annuler le renommage">✕</button>
-        </form>
       </div>
       {% empty %}
-      <span class="premium-project-empty">Aucun projet pour le moment.</span>
+      <span class="premium-project-empty">Aucun dossier. Clique sur + pour en créer un.</span>
       {% endfor %}
     </nav>
-    {% if sidebar_project_count > 15 %}
-    <a class="premium-project-empty" href="{% url 'project_list' %}">Voir tous les projets ({{ sidebar_project_count }}) →</a>
-    {% endif %}
-    {% endwith %}
     <div class="premium-sidebar-bottom">
       <span class="premium-online-dot" aria-hidden="true"></span>
       <span class="premium-user-name" title="{{ request.user.get_username }}">{{ request.user.get_username }}</span>
@@ -553,6 +548,6 @@
   });
 })();
 </script>
-  <script src="{% static 'studio/app.js' %}?v=24" defer></script>
+  <script src="{% static 'studio/app.js' %}?v=25" defer></script>
 </body>
 </html>

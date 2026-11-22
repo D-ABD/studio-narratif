@@ -29,7 +29,7 @@ from PIL import Image, UnidentifiedImageError
 
 from .models import (
     ANIMATION_EFFECTS, ANIMATION_LEVEL_CHOICES, AudioAsset, AudioSession, BackgroundTrack, NarrationProject,
-    NarrationSegment, StudioBatch, StudioBatchItem, Voice,
+    NarrationSegment, ProjectFolder, StudioBatch, StudioBatchItem, Voice,
     default_animation_settings, legacy_animation_settings,
 )
 from .services import _voice_sample_digest, cache_key_for, hash_file, normalize_voice_sample, srt_text
@@ -396,7 +396,7 @@ def get_per_page(request, default=20):
 
 
 def _pagination_params(request, *, preserve=(), default=20):
-    params = {key: request.GET.get(key) for key in preserve if request.GET.get(key)}
+    params = {key: request.GET.get(key) for key in preserve if key in request.GET}
     params["per_page"] = str(get_per_page(request, default=default))
     return urlencode(params)
 
@@ -444,6 +444,19 @@ def project_list(request):
     projects = NarrationProject.objects.filter(user=request.user).annotate(
         segment_count=Count("segments"),
     ).order_by("-updated_at", "-id")
+    folder_filter_active = "folder" in request.GET
+    folder_filter = request.GET.get("folder") if folder_filter_active else None
+    selected_folder = None
+    if folder_filter_active:
+        if folder_filter == "":
+            projects = projects.filter(folder__isnull=True)
+        else:
+            try:
+                folder_id = int(folder_filter)
+            except (TypeError, ValueError):
+                raise Http404
+            selected_folder = get_object_or_404(ProjectFolder, pk=folder_id, user=request.user)
+            projects = projects.filter(folder=selected_folder)
     per_page = get_per_page(request)
     project_page, page_response = _page_or_redirect(request, projects, per_page)
     if page_response:
@@ -453,8 +466,86 @@ def project_list(request):
         "project_total": project_page.paginator.count,
         "projects": project_page.object_list,
         "project_per_page": per_page,
-        "pagination_params": _pagination_params(request),
+        "pagination_params": _pagination_params(request, preserve=("folder",)),
+        "folder_filter_active": folder_filter_active,
+        "folder_filter": folder_filter,
+        "selected_folder": selected_folder,
+        "project_folders": ProjectFolder.objects.filter(user=request.user).order_by("name", "id"),
     })
+
+
+def _folder_action_response(request, *, message, status=200, folder_id=None):
+    if request.headers.get("x-requested-with") == "XMLHttpRequest":
+        return JsonResponse({"ok": status < 400, "message": message, "folder_id": folder_id}, status=status)
+    if status >= 400:
+        return HttpResponseBadRequest(message)
+    return redirect("project_list")
+
+
+@login_required
+@require_POST
+def create_folder(request):
+    name = (request.POST.get("name") or "").strip()
+    if not name:
+        return _folder_action_response(request, message="Le nom du dossier est obligatoire.", status=400)
+    if len(name) > 120:
+        return _folder_action_response(request, message="Le nom du dossier ne peut pas dépasser 120 caractères.", status=400)
+    folder = ProjectFolder.objects.create(user=request.user, name=name)
+    messages.success(request, f"Dossier « {folder.name} » créé.")
+    return _folder_action_response(
+        request, message="Dossier créé.", folder_id=folder.pk,
+    )
+
+
+@login_required
+@require_POST
+def rename_folder(request, folder_id):
+    folder = get_object_or_404(ProjectFolder, pk=folder_id, user=request.user)
+    name = (request.POST.get("name") or "").strip()
+    if not name:
+        return _folder_action_response(request, message="Le nom du dossier est obligatoire.", status=400)
+    if len(name) > 120:
+        return _folder_action_response(request, message="Le nom du dossier ne peut pas dépasser 120 caractères.", status=400)
+    if folder.name != name:
+        folder.name = name
+        folder.save(update_fields=["name"])
+        messages.success(request, f"Dossier renommé : « {folder.name} ».")
+    return _folder_action_response(request, message="Dossier renommé.", folder_id=folder.pk)
+
+
+@login_required
+@require_POST
+def delete_folder(request, folder_id):
+    folder = get_object_or_404(ProjectFolder, pk=folder_id, user=request.user)
+    if request.POST.get("confirm") != "1":
+        return _folder_action_response(request, message="Confirmation manquante.", status=400)
+    name = folder.name
+    folder.delete()
+    messages.success(request, f"Dossier « {name} » supprimé. Ses projets sont à la racine.")
+    return _folder_action_response(request, message="Dossier supprimé.", folder_id=folder_id)
+
+
+@login_required
+@require_POST
+def move_project(request, project_id):
+    project = get_object_or_404(NarrationProject, pk=project_id, user=request.user)
+    raw_folder_id = request.POST.get("folder_id", "")
+    folder = None
+    if raw_folder_id:
+        try:
+            folder_id = int(raw_folder_id)
+        except (TypeError, ValueError):
+            return JsonResponse({"ok": False, "error": "Dossier invalide."}, status=400)
+        folder = get_object_or_404(ProjectFolder, pk=folder_id, user=request.user)
+
+    if project.folder_id != (folder.pk if folder else None):
+        project.folder = folder
+        project.save(update_fields=["folder", "updated_at"])
+        messages.success(request, "Projet déplacé.")
+    response = {"ok": True, "folder_id": folder.pk if folder else None}
+    if request.headers.get("x-requested-with") == "XMLHttpRequest":
+        return JsonResponse(response)
+    return redirect(_safe_return_url(request, reverse("project_list")))
 
 
 @login_required
@@ -2047,6 +2138,7 @@ def duplicate_project(request, project_id):
 
         duplicate = NarrationProject.objects.create(
             user=request.user,
+            folder=source.folder,
             title=_duplicate_project_title(request.user, source.title),
             mode=source.mode,
             voice=source.voice,

@@ -5,6 +5,7 @@
 <style>
   .projects-page { display:grid; gap:11px; max-width:1100px; margin:0 auto; }
   .projects-page-intro { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px; color:#929BAA; font-size:11px; }
+  .projects-folder-heading { flex:1 1 100%; color:#E3E7ED; font-size:13px; font-weight:700; }
   .projects-page-list { display:grid; gap:9px; }
   .projects-page-item { display:grid; gap:10px; padding:14px; border:1px solid #293241; border-radius:12px; background:#151A22; }
   .projects-page-summary { min-height:36px; }
@@ -15,12 +16,16 @@
   .projects-page-item h2 { margin:0; color:#E3E7ED; font-size:13px; }
   .projects-page-item p { margin:4px 0 0; color:#929BAA; font-size:10px; }
   .projects-page-status { flex:0 0 auto; padding:4px 8px; border:1px solid #394454; border-radius:99px; color:#C8D0DA; font-size:9px; }
+  .project-folder-move { display:inline-flex; align-items:center; gap:7px; color:#AAB3C1; font-size:11px; }
+  .project-folder-move select { min-height:32px; max-width:220px; padding:4px 8px; border:1px solid #303A49; border-radius:8px; color:#E1E5EB; background:#111720; }
   @media(max-width:560px) { .projects-page-panel { align-items:flex-start; flex-direction:column; } }
 </style>
 <section class="projects-page">
   <div class="projects-page-intro">
+    {% if selected_folder %}<span class="projects-folder-heading">▰ {{ selected_folder.name }}</span>{% elif folder_filter_active %}<span class="projects-folder-heading">⌂ Racine</span>{% else %}<span class="projects-folder-heading">Tous les projets</span>{% endif %}
     <span>{{ project_total }} projet{{ project_total|pluralize:"s" }}</span>
     <form class="list-page-size" method="get" action="{% url 'project_list' %}">
+      {% if folder_filter_active %}<input type="hidden" name="folder" value="{{ folder_filter }}">{% endif %}
       <label for="projectPageSize">Par page</label>
       <select id="projectPageSize" name="per_page">
         <option value="5" {% if project_per_page == 5 %}selected{% endif %}>5</option>
@@ -40,6 +45,13 @@
         <span class="projects-page-summary-meta">{{ project.get_mode_display }} · {{ project.updated_at|date:"d/m/Y" }}</span>
         <span class="list-accordion-chevron" aria-hidden="true">▸</span>
       </button>
+      <label class="project-folder-move">
+        <span aria-hidden="true">▱</span><span class="sr-only">Déplacer « {{ project.title }} »</span>
+        <select data-project-folder-move data-move-url="{% url 'move_project' project.id %}" data-current-folder="{{ project.folder_id|default_if_none:'' }}" aria-label="Déplacer « {{ project.title }} »">
+          <option value="" {% if not project.folder_id %}selected{% endif %}>Racine</option>
+          {% for folder in project_folders %}<option value="{{ folder.id }}" {% if project.folder_id == folder.id %}selected{% endif %}>{{ folder.name }}</option>{% endfor %}
+        </select>
+      </label>
       <div class="projects-page-panel" id="project-details-{{ project.id }}" role="region" aria-labelledby="project-summary-{{ project.id }}" hidden>
         <p>{{ project.updated_at|date:"d/m/Y à H:i" }} · {{ project.segment_count }} segment{{ project.segment_count|pluralize }}</p>
         <a href="{% url 'project_detail' project.id %}">Ouvrir l’éditeur →</a>

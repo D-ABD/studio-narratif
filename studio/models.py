@@ -235,8 +235,23 @@ class StudioBatchItem(models.Model):
         return f"{self.batch} · narration {self.position + 1}"
 
 
+class ProjectFolder(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="project_folders")
+    name = models.CharField("nom", max_length=120)
+    created_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        ordering = ["name", "id"]
+
+    def __str__(self):
+        return self.name
+
+
 class NarrationProject(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="narration_projects")
+    folder = models.ForeignKey(
+        ProjectFolder, null=True, blank=True, on_delete=models.SET_NULL, related_name="projects",
+    )
     class Status(models.TextChoices):
         DRAFT = "draft", "Brouillon"
         QUEUED = "queued", "En attente"
