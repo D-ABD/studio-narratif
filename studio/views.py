@@ -1772,6 +1772,7 @@ def project_detail(request, project_id):
         "categories": Voice.Category.choices,
         "video_formats": NarrationProject.VideoFormat.choices,
         "motions": NarrationSegment.Motion.choices,
+        "assembly_motions": NarrationSegment.AssemblyMotion.choices,
         "camera_profiles": NarrationSegment.CameraProfile.choices,
         "animation_levels": ANIMATION_LEVEL_CHOICES,
         "has_scenes": bool(segments and any(segment.image for segment in segments)),
@@ -1915,6 +1916,33 @@ def save_assembly_visual(request, project_id):
         _delete_storage_files(created_files)
         logger.exception("Échec de l’enregistrement d’un visuel d’assemblage pour le projet %s.", project.pk)
         messages.error(request, "Impossible d’enregistrer ce visuel.")
+    return redirect("project_detail", project_id=project.pk)
+
+
+@login_required
+@require_POST
+def save_assembly_motion(request, project_id, segment_id):
+    project = get_object_or_404(
+        NarrationProject, pk=project_id, user=request.user, mode=NarrationProject.Mode.ASSEMBLY,
+    )
+    segment = get_object_or_404(NarrationSegment, pk=segment_id, project=project)
+    if project.status in {NarrationProject.Status.QUEUED, NarrationProject.Status.PROCESSING}:
+        return HttpResponse("Attends la fin du traitement avant de modifier un effet.", status=409)
+    if not segment.image or not segment.image.name or (segment.video_clip and segment.video_clip.name):
+        return HttpResponseBadRequest("Les effets de mouvement sont disponibles uniquement pour une image fixe.")
+
+    assembly_motion = request.POST.get("assembly_motion", "")
+    if assembly_motion not in NarrationSegment.AssemblyMotion.values:
+        return HttpResponseBadRequest("Choisis un effet de mouvement valide.")
+
+    if segment.assembly_motion != assembly_motion:
+        segment.assembly_motion = assembly_motion
+        segment.save(update_fields=["assembly_motion", "updated_at"])
+        _invalidate_video(project)
+    if assembly_motion == NarrationSegment.AssemblyMotion.PARALLAX:
+        messages.warning(request, "Effet bientôt disponible : cette image sera rendue sans mouvement.")
+    else:
+        messages.success(request, "Effet de mouvement enregistré.")
     return redirect("project_detail", project_id=project.pk)
 
 
@@ -2393,6 +2421,7 @@ def duplicate_project(request, project_id):
                 position=segment.position,
                 image=segment.image.name if segment.image else "",
                 video_clip=segment.video_clip.name if segment.video_clip else "",
+                assembly_motion=segment.assembly_motion,
                 motion=segment.motion,
                 camera_profile=segment.camera_profile,
                 light_breathing=segment.light_breathing,

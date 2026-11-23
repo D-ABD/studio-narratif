@@ -177,6 +177,24 @@ def _movement_filters(motion, width, height, duration, camera_profile="linear", 
     return filters
 
 
+def _assembly_movement_filters(motion, width, height, duration):
+    """Return a Ken Burns filter chain for an assembly still, or None for no effect."""
+    if motion in {NarrationSegment.AssemblyMotion.ZOOM_IN, NarrationSegment.AssemblyMotion.ZOOM_OUT}:
+        return _movement_filters(motion, width, height, duration)
+    if motion in {NarrationSegment.AssemblyMotion.PAN_LEFT, NarrationSegment.AssemblyMotion.PAN_RIGHT}:
+        frames = max(1, round(max(0.1, duration) * 24))
+        progress = f"min(on/{frames},1)"
+        # x moves the crop window: decreasing x pans the camera left, increasing x right.
+        x_progress = f"(1-{progress})" if motion == NarrationSegment.AssemblyMotion.PAN_LEFT else progress
+        return [
+            f"scale={width}:{height}:force_original_aspect_ratio=increase",
+            f"crop={width}:{height}",
+            f"zoompan=z='1.08':x='(iw-iw/zoom)*{x_progress}':y='(ih-ih/zoom)/2':d=1:s={width}x{height}:fps=24",
+        ]
+    # Parallax is intentionally listed in the UI but remains a no-op in this release.
+    return None
+
+
 
 
 ANIMATION_LEVELS = {
@@ -643,7 +661,10 @@ def validate_assembly_project(project):
             if not image_path.is_file():
                 missing_positions.append(position)
                 continue
-            visuals.append({"kind": "image", "path": image_path, "duration": None})
+            visuals.append({
+                "kind": "image", "path": image_path, "duration": None,
+                "assembly_motion": segment.assembly_motion,
+            })
             continue
 
         video_path = Path(segment.video_clip.path)
@@ -1165,12 +1186,19 @@ def render_project_assembly(project_id):
                 clip_duration = boundary["end"] - boundary["start"]
                 visual_path = visual["path"]
                 silent_clip = folder / f"visual-{index:04}.mp4"
-                filters = _normalized_clip_filters(
-                    width,
-                    height,
-                    visual["duration"] if visual["kind"] == "video" else clip_duration,
-                    clip_duration,
-                )
+                filters = None
+                if visual["kind"] == "image":
+                    filters = _assembly_movement_filters(
+                        visual.get("assembly_motion", NarrationSegment.AssemblyMotion.NONE),
+                        width, height, clip_duration,
+                    )
+                if filters is None:
+                    filters = _normalized_clip_filters(
+                        width,
+                        height,
+                        visual["duration"] if visual["kind"] == "video" else clip_duration,
+                        clip_duration,
+                    )
                 command = [ffmpeg, "-y", "-v", "error"]
                 if visual["kind"] == "image":
                     command.extend([

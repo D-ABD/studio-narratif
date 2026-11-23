@@ -182,6 +182,20 @@
               </label>
               <button class="editor-button" type="submit">Enregistrer le visuel</button>
             </form>
+            {% if slot.segment.image and not slot.segment.video_clip %}
+            <form method="post" action="{% url 'save_assembly_motion' project.id slot.segment.id %}" class="scene-editor-fields assembly-motion-form" data-assembly-motion-form>
+              {% csrf_token %}
+              <label class="setting-label" for="assemblyMotion{{ slot.position }}">Mouvement de l’image
+                <select class="editor-select" id="assemblyMotion{{ slot.position }}" name="assembly_motion" data-assembly-motion {% if project.status == 'queued' or project.status == 'processing' %}disabled{% endif %}>
+                  {% for value,label in assembly_motions %}<option value="{{ value }}" {% if slot.segment.assembly_motion == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
+                </select>
+              </label>
+              <p class="editor-alert" data-assembly-parallax-warning {% if slot.segment.assembly_motion != 'parallax' %}hidden{% endif %}>Effet bientôt disponible. Cette image sera rendue sans mouvement.</p>
+              <button class="editor-button" type="submit" {% if project.status == 'queued' or project.status == 'processing' %}disabled{% endif %}>Enregistrer l’effet</button>
+            </form>
+            {% elif slot.segment.video_clip and not slot.segment.image %}
+            <p class="editor-muted">Les effets de mouvement s’appliquent uniquement aux images fixes.</p>
+            {% endif %}
           </article>
           {% endfor %}
         </div>

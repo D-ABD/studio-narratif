@@ -347,6 +347,14 @@ class NarrationSegment(models.Model):
         ZOOM_PAN = "zoom_pan", "Zoom diagonal doux"
         PARALLAX = "parallax", "Profondeur douce · parallaxe 2.5D"
 
+    class AssemblyMotion(models.TextChoices):
+        NONE = "none", "Aucun"
+        ZOOM_IN = "zoom_in", "Zoom avant"
+        ZOOM_OUT = "zoom_out", "Zoom arrière"
+        PAN_LEFT = "pan_left", "Panoramique gauche"
+        PAN_RIGHT = "pan_right", "Panoramique droit"
+        PARALLAX = "parallax", "Parallaxe"
+
     class CameraProfile(models.TextChoices):
         LINEAR = "linear", "Linéaire"
         ORGANIC = "organic", "Organique"
@@ -355,6 +363,9 @@ class NarrationSegment(models.Model):
     position = models.PositiveSmallIntegerField(default=0)
     image = models.ImageField(upload_to="scenes/", blank=True)
     video_clip = models.FileField(upload_to="scenes/videos/", blank=True)
+    assembly_motion = models.CharField(
+        max_length=12, choices=AssemblyMotion.choices, default=AssemblyMotion.NONE,
+    )
     motion = models.CharField(max_length=8, choices=Motion.choices, default=Motion.ZOOM_IN)
     camera_profile = models.CharField(
         max_length=8, choices=CameraProfile.choices, default=CameraProfile.LINEAR,

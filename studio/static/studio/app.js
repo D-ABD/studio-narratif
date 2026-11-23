@@ -560,8 +560,17 @@
         form.dataset.motionDirty = changed ? 'true' : 'false';
       });
     });
+
     syncAnimationSettings(form);
     form.addEventListener('submit', () => syncAnimationSettings(form));
+  });
+  document.querySelectorAll('[data-assembly-motion-form]').forEach(form => {
+    const select = form.querySelector('[data-assembly-motion]');
+    const warning = form.querySelector('[data-assembly-parallax-warning]');
+    if (!select || !warning) return;
+    const updateParallaxWarning = () => { warning.hidden = select.value !== 'parallax'; };
+    select.addEventListener('change', updateParallaxWarning);
+    updateParallaxWarning();
   });
   const videoOptionsForm = document.querySelector('#videoOptionsForm');
   videoOptionsForm?.querySelectorAll('select,input').forEach(input => {

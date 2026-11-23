@@ -1866,6 +1866,45 @@ class ProjectAssemblyRenderTests(MediaTestCase):
         scene.video_clip.save("source.mp4", ContentFile(source_bytes), save=True)
         return project, asset
 
+    def test_assembly_motion_is_saved_and_foreign_segments_return_404(self):
+        project, visual, _ignored = self.make_assembly_project()
+        editor = self.client.get(f"/projects/{project.pk}/")
+        self.assertContains(editor, 'name="assembly_motion"')
+        self.assertContains(editor, "Enregistrer l’effet")
+        self.assertContains(editor, "Panoramique gauche")
+
+        response = self.client.post(
+            f"/projects/{project.pk}/assembly/segments/{visual.pk}/motion/",
+            {"assembly_motion": NarrationSegment.AssemblyMotion.ZOOM_IN},
+        )
+        self.assertRedirects(response, f"/projects/{project.pk}/")
+        visual.refresh_from_db()
+        self.assertEqual(visual.assembly_motion, NarrationSegment.AssemblyMotion.ZOOM_IN)
+
+        other_user = get_user_model().objects.create_user(username="foreign-motion-owner", password="SafePass123!x")
+        foreign_project = NarrationProject.objects.create(
+            user=other_user, title="Privé", mode=NarrationProject.Mode.ASSEMBLY,
+        )
+        foreign_segment = NarrationSegment.objects.create(project=foreign_project, position=0)
+        foreign_segment.image.save("private.png", ContentFile(self.png_bytes()), save=True)
+        response = self.client.post(
+            f"/projects/{project.pk}/assembly/segments/{foreign_segment.pk}/motion/",
+            {"assembly_motion": NarrationSegment.AssemblyMotion.ZOOM_OUT},
+        )
+        self.assertEqual(response.status_code, 404)
+        foreign_segment.refresh_from_db()
+        self.assertEqual(foreign_segment.assembly_motion, NarrationSegment.AssemblyMotion.NONE)
+
+    def test_assembly_parallax_choice_is_saved_with_unavailable_warning(self):
+        project, visual, _ignored = self.make_assembly_project()
+        response = self.client.post(
+            f"/projects/{project.pk}/assembly/segments/{visual.pk}/motion/",
+            {"assembly_motion": NarrationSegment.AssemblyMotion.PARALLAX}, follow=True,
+        )
+        self.assertContains(response, "Effet bientôt disponible")
+        visual.refresh_from_db()
+        self.assertEqual(visual.assembly_motion, NarrationSegment.AssemblyMotion.PARALLAX)
+
     def test_assembly_video_pads_short_clip_trims_long_clip_and_discards_embedded_audio(self):
         from . import video_services
 
@@ -1900,6 +1939,7 @@ class ProjectAssemblyRenderTests(MediaTestCase):
                 self.assertIn("-an", intermediate)
                 self.assertEqual(intermediate[intermediate.index("-map") + 1], "0:v:0")
                 video_filters = intermediate[intermediate.index("-vf") + 1]
+                self.assertNotIn("zoompan=", video_filters)
                 self.assertIn("scale=128:128:force_original_aspect_ratio=increase", video_filters)
                 self.assertIn("crop=128:128", video_filters)
                 self.assertIn("fps=24,setsar=1", video_filters)
@@ -1942,6 +1982,7 @@ class ProjectAssemblyRenderTests(MediaTestCase):
         self.assertIn(visual.image.path, commands[0])
         self.assertNotIn(ignored.image.path, commands[0])
         self.assertIn("-an", commands[0])
+        self.assertNotIn("zoompan=", commands[0][commands[0].index("-vf") + 1])
         self.assertEqual(commands[1][commands[1].index("-c") + 1], "copy")
         self.assertIn(project.audio_asset.audio_file.path, commands[2])
         self.assertEqual(commands[2][commands[2].index("-c:v") + 1], "libx264")
@@ -1951,6 +1992,47 @@ class ProjectAssemblyRenderTests(MediaTestCase):
         self.assertIn("studio", subtitle_texts[0])
         self.assertIn("0:00:00.00", subtitle_texts[0])
         self.assertIn("\\c&H000B9EF5&", subtitle_texts[0])
+
+    @patch("studio.video_services._ffmpeg_path", return_value="ffmpeg")
+    @patch("studio.video_services._video_encoder", return_value="libx264")
+    @patch("studio.video_services._run_ffmpeg")
+    def test_assembly_applies_zoompan_to_a_still_for_its_boundary_duration(self, run_ffmpeg, _encoder, _ffmpeg):
+        from .video_services import render_project_assembly
+
+        project, visual, _ignored = self.make_assembly_project()
+        visual.assembly_motion = NarrationSegment.AssemblyMotion.ZOOM_IN
+        visual.save(update_fields=["assembly_motion", "updated_at"])
+
+        def create_output(command, *_args, **_kwargs):
+            Path(command[-1]).write_bytes(b"v" * 2048)
+
+        run_ffmpeg.side_effect = create_output
+        render_project_assembly(project.pk)
+
+        first_command = run_ffmpeg.call_args_list[0].args[0]
+        filters = first_command[first_command.index("-vf") + 1]
+        self.assertIn("zoompan=", filters)
+        self.assertEqual(first_command[first_command.index("-t") + 1], "1.000")
+
+    @patch("studio.video_services._ffmpeg_path", return_value="ffmpeg")
+    @patch("studio.video_services._video_encoder", return_value="libx264")
+    @patch("studio.video_services._run_ffmpeg")
+    def test_assembly_parallax_is_saved_but_renders_image_without_effect(self, run_ffmpeg, _encoder, _ffmpeg):
+        from .video_services import render_project_assembly
+
+        project, visual, _ignored = self.make_assembly_project()
+        visual.assembly_motion = NarrationSegment.AssemblyMotion.PARALLAX
+        visual.save(update_fields=["assembly_motion", "updated_at"])
+
+        def create_output(command, *_args, **_kwargs):
+            Path(command[-1]).write_bytes(b"v" * 2048)
+
+        run_ffmpeg.side_effect = create_output
+        render_project_assembly(project.pk)
+
+        first_command = run_ffmpeg.call_args_list[0].args[0]
+        filters = first_command[first_command.index("-vf") + 1]
+        self.assertNotIn("zoompan=", filters)
 
     @patch("studio.video_services._ffmpeg_path", return_value="ffmpeg")
     @patch("studio.video_services._video_encoder", return_value="libx264")
