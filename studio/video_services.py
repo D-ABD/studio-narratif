@@ -16,7 +16,9 @@ from django.core.files import File
 from django.db import close_old_connections
 from django.utils import timezone
 
-from .models import AudioAsset, NarrationProject, NarrationSegment
+from .models import (
+    AudioAsset, NarrationProject, NarrationSegment, default_assembly_animation_settings,
+)
 from .services import _ffmpeg_path, wav_duration
 from .job_control import (
     JobCancelled, cancellation_checker, check_job_cancellation, mark_job_cancelled,
@@ -195,6 +197,43 @@ def _assembly_movement_filters(motion, width, height, duration):
     return None
 
 
+def _assembly_animation_filters(animation_settings, width, height, duration):
+    effects = (animation_settings or {}).get("effects", {})
+    active_effects = (
+        config for name, config in effects.items()
+        if name != "parallax" and isinstance(config, dict)
+    )
+    if not any(config.get("enabled") for config in active_effects):
+        return None
+    return _animation_filter_chain(
+        animation_settings, width, height, duration, apply_color_grading=False,
+    )
+
+
+def _assembly_animation_settings_for_segment(segment):
+    settings = segment.assembly_animation_settings or default_assembly_animation_settings()
+    effects = settings.get("effects", {})
+    if any(config.get("enabled") for config in effects.values() if isinstance(config, dict)):
+        return settings
+
+    # Keep compatibility with integrations and older rows that only set assembly_motion.
+    motion = segment.assembly_motion
+    if motion == NarrationSegment.AssemblyMotion.NONE:
+        return settings
+    effects = settings["effects"]
+    if motion == NarrationSegment.AssemblyMotion.ZOOM_IN:
+        effects["zoom"].update(enabled=True, direction="in")
+    elif motion == NarrationSegment.AssemblyMotion.ZOOM_OUT:
+        effects["zoom"].update(enabled=True, direction="out")
+    elif motion == NarrationSegment.AssemblyMotion.PAN_LEFT:
+        effects["pan"].update(enabled=True, direction="horizontal_reverse")
+    elif motion == NarrationSegment.AssemblyMotion.PAN_RIGHT:
+        effects["pan"].update(enabled=True, direction="horizontal")
+    elif motion == NarrationSegment.AssemblyMotion.PARALLAX:
+        effects["parallax"]["enabled"] = True
+    return settings
+
+
 
 
 ANIMATION_LEVELS = {
@@ -239,10 +278,16 @@ def _camera_effect_filters(settings, width, height, duration):
         y_expr = "ih/2-(ih/zoom/2)"
         if pan_on:
             direction = pan.get("direction")
-            if direction in {"horizontal", "diagonal"}:
-                x_expr = f"(iw-iw/zoom)*{progress}"
-            if direction in {"vertical", "diagonal"}:
-                y_expr = f"(ih-ih/zoom)*{progress}"
+            if direction in {"horizontal", "diagonal", "diagonal_reverse"}:
+                x_progress = f"(1-{progress})" if direction in {"horizontal_reverse", "diagonal_reverse"} else progress
+                x_expr = f"(iw-iw/zoom)*{x_progress}"
+            elif direction == "horizontal_reverse":
+                x_expr = f"(iw-iw/zoom)*(1-{progress})"
+            if direction in {"vertical", "diagonal", "diagonal_reverse"}:
+                y_progress = f"(1-{progress})" if direction == "diagonal_reverse" else progress
+                y_expr = f"(ih-ih/zoom)*{y_progress}"
+            elif direction == "vertical_reverse":
+                y_expr = f"(ih-ih/zoom)*(1-{progress})"
         filters.append(
             f"zoompan=z='{zoom_expr}':x='{x_expr}':y='{y_expr}':d=1:s={width}x{height}:fps=24"
         )
@@ -291,10 +336,13 @@ def _light_effect_filters(settings):
     return filters
 
 
-def _animation_filter_chain(settings, width, height, duration, subtitle_file=None):
+def _animation_filter_chain(
+    settings, width, height, duration, subtitle_file=None, *, apply_color_grading=True,
+):
     filters = _camera_effect_filters(settings, width, height, duration)
     filters.extend(_light_effect_filters(settings))
-    filters.extend(_color_grading_filters())
+    if apply_color_grading:
+        filters.extend(_color_grading_filters())
     if subtitle_file:
         filters.append(_subtitle_filter(subtitle_file))
     return filters
@@ -664,6 +712,7 @@ def validate_assembly_project(project):
             visuals.append({
                 "kind": "image", "path": image_path, "duration": None,
                 "assembly_motion": segment.assembly_motion,
+                "assembly_animation_settings": _assembly_animation_settings_for_segment(segment),
             })
             continue
 
@@ -762,7 +811,7 @@ def _foreground_for_image(image_path):
         raise RuntimeError(f"Le détourage local du sujet a échoué : {exc}") from exc
 
 
-def _parallax_frames(image_path, width, height, duration):
+def _parallax_frames(image_path, width, height, duration, level="medium"):
     """Yield RGB frames with a crisp foreground drifting over a softly moving background."""
     from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 
@@ -781,13 +830,18 @@ def _parallax_frames(image_path, width, height, duration):
     background = ImageEnhance.Brightness(background).enhance(0.82)
     foreground = ImageOps.fit(foreground, layer_size, method=Image.Resampling.LANCZOS)
 
+    movement = {
+        "slow": (0.10, 0.45),
+        "medium": (0.18, 0.82),
+        "fast": (0.25, 0.95),
+    }.get(level, (0.18, 0.82))
     frames = max(1, round(max(0.1, duration) * 24))
     for index in range(frames):
         progress = index / max(1, frames - 1)
-        bg_x = extra_x + round(extra_x * 0.18 * progress)
-        bg_y = extra_y + round(extra_y * 0.18 * progress)
-        fg_x = extra_x + round(extra_x * 0.82 * progress)
-        fg_y = extra_y + round(extra_y * 0.82 * progress)
+        bg_x = extra_x + round(extra_x * movement[0] * progress)
+        bg_y = extra_y + round(extra_y * movement[0] * progress)
+        fg_x = extra_x + round(extra_x * movement[1] * progress)
+        fg_y = extra_y + round(extra_y * movement[1] * progress)
         bg_frame = background.crop((bg_x, bg_y, bg_x + width, bg_y + height))
         fg_frame = foreground.crop((fg_x, fg_y, fg_x + width, fg_y + height))
         bg_frame = bg_frame.convert("RGBA")
@@ -795,7 +849,10 @@ def _parallax_frames(image_path, width, height, duration):
         yield bg_frame.convert("RGB").tobytes()
 
 
-def _run_parallax_attempt(command, image_path, output_path, width, height, duration, folder, cancel_check=None):
+def _run_parallax_attempt(
+    command, image_path, output_path, width, height, duration, folder,
+    cancel_check=None, parallax_level="medium",
+):
     error_log = folder / f"{output_path.stem}-ffmpeg.log"
     try:
         with error_log.open("wb") as log_stream:
@@ -814,7 +871,7 @@ def _run_parallax_attempt(command, image_path, output_path, width, height, durat
             timeout_timer.start()
             write_error = None
             try:
-                for frame in _parallax_frames(image_path, width, height, duration):
+                for frame in _parallax_frames(image_path, width, height, duration, parallax_level):
                     if cancel_check and cancel_check():
                         raise JobCancelled("Traitement annulé à la demande de l’utilisateur.")
                     process.stdin.write(frame)
@@ -876,13 +933,21 @@ def _render_parallax_clip(
     ])
 
     try:
-        _run_parallax_attempt(command, image_path, output_path, width, height, duration, folder, cancel_check=cancel_check)
+        parallax_level = (animation_settings or {}).get("effects", {}).get("parallax", {}).get("level", "medium")
+        _run_parallax_attempt(
+            command, image_path, output_path, width, height, duration, folder,
+            cancel_check=cancel_check, parallax_level=parallax_level,
+        )
     except _FFmpegCommandError:
         fallback = _software_fallback_command(command)
         if fallback is None:
             raise
         _remove_partial_output(command, folder)
-        _run_parallax_attempt(fallback, image_path, output_path, width, height, duration, folder, cancel_check=cancel_check)
+        _run_parallax_attempt(
+            fallback, image_path, output_path, width, height, duration, folder,
+            cancel_check=cancel_check, parallax_level=parallax_level,
+        )
+
 
 def _ffprobe_path():
     ffmpeg = Path(_ffmpeg_path())
@@ -1188,9 +1253,12 @@ def render_project_assembly(project_id):
                 silent_clip = folder / f"visual-{index:04}.mp4"
                 filters = None
                 if visual["kind"] == "image":
-                    filters = _assembly_movement_filters(
-                        visual.get("assembly_motion", NarrationSegment.AssemblyMotion.NONE),
-                        width, height, clip_duration,
+                    animation_settings = (
+                        visual.get("assembly_animation_settings")
+                        or default_assembly_animation_settings()
+                    )
+                    filters = _assembly_animation_filters(
+                        animation_settings, width, height, clip_duration,
                     )
                 if filters is None:
                     filters = _normalized_clip_filters(

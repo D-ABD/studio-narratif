@@ -550,7 +550,7 @@
     if (hidden) hidden.value = JSON.stringify({version:1, camera_profile:profile, effects});
   };
   const controlValue = control => control.type === 'checkbox' ? String(control.checked) : control.value;
-  document.querySelectorAll('.segment-form').forEach(form => {
+  document.querySelectorAll('.segment-form, [data-assembly-animation-form]').forEach(form => {
     const controls = [...form.querySelectorAll(sceneSettingSelector)];
     controls.forEach(control => {
       control.dataset.initialValue = controlValue(control);
@@ -564,11 +564,11 @@
     syncAnimationSettings(form);
     form.addEventListener('submit', () => syncAnimationSettings(form));
   });
-  document.querySelectorAll('[data-assembly-motion-form]').forEach(form => {
-    const select = form.querySelector('[data-assembly-motion]');
+  document.querySelectorAll('[data-assembly-animation-form]').forEach(form => {
+    const select = form.querySelector('[data-effect-name="parallax"][data-effect-field="enabled"]');
     const warning = form.querySelector('[data-assembly-parallax-warning]');
     if (!select || !warning) return;
-    const updateParallaxWarning = () => { warning.hidden = select.value !== 'parallax'; };
+    const updateParallaxWarning = () => { warning.hidden = !select.checked; };
     select.addEventListener('change', updateParallaxWarning);
     updateParallaxWarning();
   });

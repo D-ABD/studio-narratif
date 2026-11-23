@@ -30,6 +30,14 @@ def default_animation_settings():
     }
 
 
+def default_assembly_animation_settings():
+    """Assembly keeps its historic still-image default while allowing a full effect stack."""
+    settings = default_animation_settings()
+    for effect in settings["effects"].values():
+        effect["enabled"] = False
+    return settings
+
+
 def legacy_animation_settings(motion, camera_profile="linear", light_breathing=False):
     """Translate the former single-motion fields into the multi-effect schema."""
     settings = default_animation_settings()
@@ -365,6 +373,9 @@ class NarrationSegment(models.Model):
     video_clip = models.FileField(upload_to="scenes/videos/", blank=True)
     assembly_motion = models.CharField(
         max_length=12, choices=AssemblyMotion.choices, default=AssemblyMotion.NONE,
+    )
+    assembly_animation_settings = models.JSONField(
+        default=default_assembly_animation_settings, blank=True,
     )
     motion = models.CharField(max_length=8, choices=Motion.choices, default=Motion.ZOOM_IN)
     camera_profile = models.CharField(

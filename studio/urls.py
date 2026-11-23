@@ -57,6 +57,7 @@ urlpatterns = [
     path("projects/<int:project_id>/assembly/audio/", views.set_project_audio_asset, name="set_project_audio_asset"),
     path("projects/<int:project_id>/assembly/visual/", views.save_assembly_visual, name="save_assembly_visual"),
     path("projects/<int:project_id>/assembly/segments/<int:segment_id>/motion/", views.save_assembly_motion, name="save_assembly_motion"),
+    path("projects/<int:project_id>/assembly/segments/<int:segment_id>/animation/", views.save_assembly_animation, name="save_assembly_animation"),
     path("projects/<int:project_id>/assembly/render/", views.render_assembly, name="render_assembly"),
     path("projects/<int:project_id>/segments/add/", views.add_segment, name="add_segment"),
     path("projects/<int:project_id>/segments/reorder/", views.reorder_segments, name="reorder_segments"),

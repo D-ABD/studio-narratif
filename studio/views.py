@@ -1,3 +1,6 @@
+Warning: truncated output (original token count: 31058)
+Total output lines: 2684
+
 import json
 import hashlib
 import logging
@@ -75,7 +78,9 @@ ALLOWED_VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm"}
 ANIMATION_EFFECT_DEFINITIONS = (
     {"key": "zoom", "label": "Zoom", "directions": (("in", "Avant"), ("out", "Arrière"))},
     {"key": "pan", "label": "Panoramique", "directions": (
-        ("horizontal", "Horizontal"), ("vertical", "Vertical"), ("diagonal", "Diagonal"),
+        ("horizontal", "Panoramique gauche → droite"), ("horizontal_reverse", "Panoramique droite → gauche"),
+        ("vertical", "Panoramique haut → bas"), ("vertical_reverse", "Panoramique bas → haut"),
+        ("diagonal", "Diagonale ↘"), ("diagonal_reverse", "Diagonale ↖"),
     )},
     {"key": "parallax", "label": "Parallaxe 2.5D", "directions": ()},
     {"key": "handheld", "label": "Caméra à main levée", "directions": ()},
@@ -112,7 +117,10 @@ def _validate_animation_settings_json(raw_value):
     }
     allowed_directions = {
         "zoom": {"in", "out"},
-        "pan": {"horizontal", "vertical", "diagonal"},
+        "pan": {
+            "horizontal", "horizontal_reverse", "vertical", "vertical_reverse",
+            "diagonal", "diagonal_reverse",
+        },
     }
     for key, required_fields in expected_fields.items():
         config = effects[key]
@@ -150,6 +158,43 @@ def _legacy_motion_from_animation(settings):
             else NarrationSegment.Motion.ZOOM_IN
         )
     return NarrationSegment.Motion.STILL
+
+
+def _assembly_motion_from_animation(settings):
+    effects = settings["effects"]
+    if effects["parallax"]["enabled"]:
+        return NarrationSegment.AssemblyMotion.PARALLAX
+    zoom = effects["zoom"]
+    pan = effects["pan"]
+    if zoom["enabled"]:
+        return (
+            NarrationSegment.AssemblyMotion.ZOOM_OUT
+            if zoom["direction"] == "out"
+            else NarrationSegment.AssemblyMotion.ZOOM_IN
+        )
+    if pan["enabled"]:
+        return (
+            NarrationSegment.AssemblyMotion.PAN_LEFT
+            if pan["direction"] in {"horizontal_reverse", "vertical_reverse", "diagonal_reverse"}
+            else NarrationSegment.AssemblyMotion.PAN_RIGHT
+        )
+    return NarrationSegment.AssemblyMotion.NONE
+
+
+def _animation_settings_for_assembly_motion(motion):
+    settings = default_assembly_animation_settings()
+    effects = settings["effects"]
+    if motion == NarrationSegment.AssemblyMotion.ZOOM_IN:
+        effects["zoom"].update(enabled=True, direction="in")
+    elif motion == NarrationSegment.AssemblyMotion.ZOOM_OUT:
+        effects["zoom"].update(enabled=True, direction="out")
+    elif motion == NarrationSegment.AssemblyMotion.PAN_LEFT:
+        effects["pan"].update(enabled=True, direction="horizontal_reverse")
+    elif motion == NarrationSegment.AssemblyMotion.PAN_RIGHT:
+        effects["pan"].update(enabled=True, direction="horizontal")
+    elif motion == NarrationSegment.AssemblyMotion.PARALLAX:
+        effects["parallax"]["enabled"] = True
+    return settings
 
 
 def _settings_for_legacy_post(request, segment):
@@ -1304,95 +1349,7 @@ def edit_audio_asset(request, asset_id):
     def reject(message, status=400):
         if request.headers.get("x-requested-with") == "XMLHttpRequest":
             return JsonResponse({"success": False, "message": message}, status=status)
-        return render(request, "studio/audio_asset_edit.html", _audio_text_edit_context(
-            request, asset, text=request.POST.get("text", ""), error=message,
-        ), status=status)
-
-    if not _audio_text_edit_context(request, asset)["can_regenerate"]:
-        return reject("Cet audio ne peut pas être régénéré : vérifie sa source et sa voix.", status=400)
-
-    new_text = (request.POST.get("text") or "").strip()
-    if not new_text:
-        return reject("Le texte ne peut pas être vide.")
-    if len(new_text) > MAX_STUDIO_TEXT_CHARS:
-        return reject(f"Le texte ne peut pas dépasser {MAX_STUDIO_TEXT_CHARS} caractères.")
-    if new_text == (asset.text or "").strip():
-        message = "Texte identique, aucune régénération nécessaire."
-        messages.info(request, message)
-        if request.headers.get("x-requested-with") == "XMLHttpRequest":
-            return JsonResponse({
-                "success": True, "unchanged": True, "message": message,
-                "redirect_url": reverse("edit_audio_asset", args=[asset.pk]),
-            })
-        return redirect("edit_audio_asset", asset_id=asset.pk)
-
-    try:
-        regenerate_audio_asset(asset, new_text)
-    except Exception:
-        logger.exception("Échec de régénération de l’audio %s pour l’utilisateur %s.", asset.pk, request.user.pk)
-        return reject("La régénération a échoué. L’ancien audio est conservé.", status=500)
-
-    message = "Audio régénéré avec succès."
-    messages.success(request, message)
-    if request.headers.get("x-requested-with") == "XMLHttpRequest":
-        return JsonResponse({"success": True, "message": message, "redirect_url": reverse("audios")})
-    return redirect("audios")
-
-
-def _unlink_audio_asset_file(path):
-    try:
-        Path(path).unlink()
-    except FileNotFoundError:
-        logger.warning("Le fichier audio %s était déjà absent lors de sa suppression.", path)
-    except OSError:
-        logger.warning("Impossible de supprimer le fichier audio %s après suppression en base.", path, exc_info=True)
-
-
-@login_required
-@require_POST
-def upload_audio_asset(request):
-    upload = request.FILES.get("audio_file")
-    if not upload or upload.size <= 0:
-        messages.error(request, "Sélectionne un fichier audio.")
-        return _audio_library_response(request, status=400)
-    if upload.size > MAX_AUDIO_ASSET_BYTES:
-        messages.error(request, "Le fichier audio dépasse la limite de 100 Mo.")
-        return _audio_library_response(request, status=400)
-    extension = Path(upload.name).suffix.lower()
-    if extension not in ALLOWED_AUDIO_ASSET_EXTENSIONS:
-        messages.error(request, "Formats acceptés : MP3, WAV, M4A et OGG.")
-        return _audio_library_response(request, status=400)
-
-    asset = None
-    created_file = None
-    try:
-        with tempfile.TemporaryDirectory(prefix="petit-studio-audio-asset-") as folder:
-            staged_path = Path(folder) / f"upload{extension}"
-            _stream_upload_to_path(upload, staged_path)
-            duration = _probe_music_duration(staged_path)
-            name = Path(upload.name).stem.strip()[:100] or "Audio importé"
-            asset = AudioAsset(
-                user=request.user,
-                name=name,
-                duration=duration,
-                source=AudioAsset.Source.UPLOAD,
-            )
-            with staged_path.open("rb") as stream:
-                asset.audio_file.save(Path(upload.name).name, File(stream), save=False)
-            if asset.audio_file.name:
-                created_file = (asset.audio_file.storage, asset.audio_file.name)
-            asset.save()
-        messages.success(request, f"L’audio « {asset.name} » a été ajouté à ta bibliothèque.")
-        return redirect("audios")
-    except (OSError, ValueError, subprocess.SubprocessError) as exc:
-        if created_file:
-            _delete_storage_files([created_file])
-        logger.info("Import audio refusé pour l’utilisateur %s : %s", request.user.pk, exc)
-        messages.error(request, str(exc) or "Impossible de lire ce fichier audio.")
-        return _audio_library_response(request, status=400)
-    except Exception:
-        if created_file:
-            _delete_storage_files([created_file])
+        return render(request, "s…1058 tokens truncated…)
         logger.exception("Échec de l’enregistrement d’un audio pour l’utilisateur %s.", request.user.pk)
         messages.error(request, "Impossible d’enregistrer cet audio.")
         return _audio_library_response(request, status=500)
@@ -1739,6 +1696,19 @@ def project_detail(request, project_id):
                 "level": config["level"],
                 "direction": config.get("direction", ""),
             })
+        assembly_animation = segment.assembly_animation_settings or default_assembly_animation_settings()
+        segment.assembly_animation_settings_json = json.dumps(
+            assembly_animation, ensure_ascii=False, separators=(",", ":"),
+        )
+        segment.assembly_animation_controls = []
+        for definition in ANIMATION_EFFECT_DEFINITIONS:
+            config = assembly_animation["effects"][definition["key"]]
+            segment.assembly_animation_controls.append({
+                **definition,
+                "enabled": config["enabled"],
+                "level": config["level"],
+                "direction": config.get("direction", ""),
+            })
     assembly_audio_assets = list(
         AudioAsset.objects.filter(
             user=request.user,
@@ -1935,14 +1905,46 @@ def save_assembly_motion(request, project_id, segment_id):
     if assembly_motion not in NarrationSegment.AssemblyMotion.values:
         return HttpResponseBadRequest("Choisis un effet de mouvement valide.")
 
-    if segment.assembly_motion != assembly_motion:
-        segment.assembly_motion = assembly_motion
-        segment.save(update_fields=["assembly_motion", "updated_at"])
+    settings = _animation_settings_for_assembly_motion(assembly_motion)
+    _save_assembly_animation(project, segment, settings)
+    return redirect("project_detail", project_id=project.pk)
+
+
+def _save_assembly_animation(project, segment, settings):
+    legacy_motion = _assembly_motion_from_animation(settings)
+    changed = (
+        settings != (segment.assembly_animation_settings or default_assembly_animation_settings())
+        or segment.assembly_motion != legacy_motion
+    )
+    if changed:
+        segment.assembly_animation_settings = settings
+        segment.assembly_motion = legacy_motion
+        segment.save(update_fields=["assembly_animation_settings", "assembly_motion", "updated_at"])
         _invalidate_video(project)
-    if assembly_motion == NarrationSegment.AssemblyMotion.PARALLAX:
-        messages.warning(request, "Effet bientôt disponible : cette image sera rendue sans mouvement.")
+    if settings["effects"]["parallax"]["enabled"]:
+        messages.warning(request, "Effet bientôt disponible en Assemblage : la parallaxe reste sans effet dans ce mode.")
+    elif changed:
+        messages.success(request, "Les effets d’image ont été enregistrés.")
     else:
-        messages.success(request, "Effet de mouvement enregistré.")
+        messages.info(request, "Aucun changement à enregistrer.")
+
+
+@login_required
+@require_POST
+def save_assembly_animation(request, project_id, segment_id):
+    project = get_object_or_404(
+        NarrationProject, pk=project_id, user=request.user, mode=NarrationProject.Mode.ASSEMBLY,
+    )
+    segment = get_object_or_404(NarrationSegment, pk=segment_id, project=project)
+    if project.status in {NarrationProject.Status.QUEUED, NarrationProject.Status.PROCESSING}:
+        return HttpResponse("Attends la fin du traitement avant de modifier les effets.", status=409)
+    if not segment.image or not segment.image.name or (segment.video_clip and segment.video_clip.name):
+        return HttpResponseBadRequest("Les effets sont disponibles uniquement pour une image fixe.")
+    try:
+        settings = _validate_animation_settings_json(request.POST.get("animation_settings"))
+    except ValueError as exc:
+        return HttpResponseBadRequest(str(exc))
+    _save_assembly_animation(project, segment, settings)
     return redirect("project_detail", project_id=project.pk)
 
 
@@ -2422,6 +2424,7 @@ def duplicate_project(request, project_id):
                 image=segment.image.name if segment.image else "",
                 video_clip=segment.video_clip.name if segment.video_clip else "",
                 assembly_motion=segment.assembly_motion,
+                assembly_animation_settings=deepcopy(segment.assembly_animation_settings),
                 motion=segment.motion,
                 camera_profile=segment.camera_profile,
                 light_breathing=segment.light_breathing,

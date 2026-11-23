@@ -183,15 +183,38 @@
               <button class="editor-button" type="submit">Enregistrer le visuel</button>
             </form>
             {% if slot.segment.image and not slot.segment.video_clip %}
-            <form method="post" action="{% url 'save_assembly_motion' project.id slot.segment.id %}" class="scene-editor-fields assembly-motion-form" data-assembly-motion-form>
+            <form method="post" action="{% url 'save_assembly_animation' project.id slot.segment.id %}" class="scene-editor-fields assembly-animation-form" data-assembly-animation-form>
               {% csrf_token %}
-              <label class="setting-label" for="assemblyMotion{{ slot.position }}">Mouvement de l’image
-                <select class="editor-select" id="assemblyMotion{{ slot.position }}" name="assembly_motion" data-assembly-motion {% if project.status == 'queued' or project.status == 'processing' %}disabled{% endif %}>
-                  {% for value,label in assembly_motions %}<option value="{{ value }}" {% if slot.segment.assembly_motion == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
+              <input type="hidden" name="assembly_motion" value="{{ slot.segment.assembly_motion }}">
+              <input type="hidden" name="animation_settings" value="{{ slot.segment.assembly_animation_settings_json|escape }}">
+              <label class="setting-label" for="assemblyCameraProfile{{ slot.position }}">Fluidité du mouvement
+                <select class="editor-select" id="assemblyCameraProfile{{ slot.position }}" name="camera_profile" data-animation-setting {% if project.status == 'queued' or project.status == 'processing' %}disabled{% endif %}>
+                  {% for value,label in camera_profiles %}<option value="{{ value }}" {% if slot.segment.assembly_animation_settings.camera_profile == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
                 </select>
               </label>
-              <p class="editor-alert" data-assembly-parallax-warning {% if slot.segment.assembly_motion != 'parallax' %}hidden{% endif %}>Effet bientôt disponible. Cette image sera rendue sans mouvement.</p>
-              <button class="editor-button" type="submit" {% if project.status == 'queued' or project.status == 'processing' %}disabled{% endif %}>Enregistrer l’effet</button>
+              <div class="animation-toolbar">
+                {% for control in slot.segment.assembly_animation_controls %}
+                <div class="animation-effect">
+                  <label>
+                    <input type="checkbox" data-animation-setting data-effect-name="{{ control.key }}" data-effect-field="enabled" {% if control.enabled %}checked{% endif %} {% if project.status == 'queued' or project.status == 'processing' %}disabled{% endif %}>
+                    {{ control.label }}
+                  </label>
+                  <select class="editor-select" aria-label="Intensité {{ control.label }}" data-animation-setting data-effect-name="{{ control.key }}" data-effect-field="level" {% if project.status == 'queued' or project.status == 'processing' %}disabled{% endif %}>
+                    {% for value,label in animation_levels %}<option value="{{ value }}" {% if control.level == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
+                  </select>
+                  {% if control.directions %}
+                  <select class="editor-select" aria-label="Direction {{ control.label }}" data-animation-setting data-effect-name="{{ control.key }}" data-effect-field="direction" {% if project.status == 'queued' or project.status == 'processing' %}disabled{% endif %}>
+                    {% for value,label in control.directions %}<option value="{{ value }}" {% if control.direction == value %}selected{% endif %}>{{ label }}</option>{% endfor %}
+                  </select>
+                  {% endif %}
+                </div>
+                {% endfor %}
+              </div>
+              <p class="editor-alert" data-assembly-parallax-warning {% if not slot.segment.assembly_animation_settings.effects.parallax.enabled %}hidden{% endif %}>Effet bientôt disponible en Assemblage : la parallaxe 2.5D reste sans effet dans ce mode. Elle fonctionne en mode Scènes.</p>
+              <div class="scene-save-row">
+                <span class="editor-small">Les effets actifs se cumulent sur cette image.</span>
+                <button class="editor-button" type="submit" {% if project.status == 'queued' or project.status == 'processing' %}disabled{% endif %}>Enregistrer l’effet</button>
+              </div>
             </form>
             {% elif slot.segment.video_clip and not slot.segment.image %}
             <p class="editor-muted">Les effets de mouvement s’appliquent uniquement aux images fixes.</p>
