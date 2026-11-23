@@ -30,7 +30,7 @@ from PIL import Image, UnidentifiedImageError
 from .models import (
     ANIMATION_EFFECTS, ANIMATION_LEVEL_CHOICES, AudioAsset, AudioSession, BackgroundTrack, NarrationProject,
     MediaFolder, NarrationSegment, ProjectFolder, StudioBatch, StudioBatchItem, Voice,
-    default_animation_settings, legacy_animation_settings,
+    default_animation_settings, default_assembly_animation_settings, legacy_animation_settings,
 )
 from .services import (
     _voice_sample_digest, cache_key_for, hash_file, normalize_voice_sample, regenerate_audio_asset, srt_text,
