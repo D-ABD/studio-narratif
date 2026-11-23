@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import uuid
 import wave
 from collections import OrderedDict
 
@@ -447,6 +448,74 @@ def _read_studio_audio_cache(cache_audio, cache_metadata):
         return captions, duration
     except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
         return None
+
+
+def regenerate_audio_asset(asset, new_text):
+    """Replace an XTTS AudioAsset only after its replacement audio is ready.
+
+    Previous stored audio files are deliberately retained as unreferenced files
+    because this app does not yet have a safe AudioAsset orphan cleanup pass.
+    """
+    voice = asset.voice
+    if not voice or voice.user_id != asset.user_id or not voice.consent_confirmed:
+        raise ValueError("La voix de cet audio n’est plus disponible ou son autorisation n’est pas confirmée.")
+
+    expected_key = cache_key_for(new_text, voice)
+    cache_audio, cache_metadata = _persistent_cache_paths(expected_key)
+    cached = _read_studio_audio_cache(cache_audio, cache_metadata)
+    if cached:
+        captions, duration = cached
+        source_audio = cache_audio
+    else:
+        with tempfile.TemporaryDirectory(prefix=f"petit-studio-asset-{asset.pk}-") as folder:
+            source_audio = Path(folder) / "narration.wav"
+            _synthesize_segment(new_text, voice, source_audio)
+            captions = align_audio(source_audio, new_text)
+            duration = wav_duration(source_audio)
+            timings = _studio_timings(captions, duration)
+
+            cache_audio, cache_metadata = _persistent_cache_paths(expected_key)
+            temporary_audio = cache_audio.with_name(f".{expected_key}.{uuid.uuid4().hex}.wav.tmp")
+            temporary_metadata = cache_metadata.with_name(f".{expected_key}.{uuid.uuid4().hex}.json.tmp")
+            try:
+                shutil.copy2(source_audio, temporary_audio)
+                temporary_metadata.write_text(
+                    json.dumps({"captions": captions, "duration": duration}, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                temporary_audio.replace(cache_audio)
+                temporary_metadata.replace(cache_metadata)
+            finally:
+                temporary_audio.unlink(missing_ok=True)
+                temporary_metadata.unlink(missing_ok=True)
+
+            return _store_regenerated_asset(asset, new_text, source_audio, duration, timings)
+
+    timings = _studio_timings(captions, duration)
+    return _store_regenerated_asset(asset, new_text, source_audio, duration, timings)
+
+
+def _store_regenerated_asset(asset, new_text, source_audio, duration, timings):
+    new_stored_file = None
+    try:
+        with transaction.atomic():
+            with Path(source_audio).open("rb") as stream:
+                asset.audio_file.save(
+                    f"audio-asset-{asset.pk}-{uuid.uuid4().hex}.wav", File(stream), save=False,
+                )
+            new_stored_file = (asset.audio_file.storage, asset.audio_file.name)
+            asset.text = new_text
+            asset.duration = duration
+            asset.timings = timings
+            asset.save(update_fields=["audio_file", "text", "duration", "timings", "updated_at"])
+    except Exception:
+        if new_stored_file:
+            try:
+                new_stored_file[0].delete(new_stored_file[1])
+            except Exception:
+                logger.exception("Impossible de nettoyer le nouveau fichier audio non référencé %s.", new_stored_file[1])
+        raise
+    return asset
 
 
 def _save_studio_asset(batch, item, voice, audio_path, duration, timings):

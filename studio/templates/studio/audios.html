@@ -73,6 +73,7 @@
             <td colspan="5"><div class="audio-accordion-panel" id="audio-details-{{ asset.id }}" role="region" aria-label="Aperçu et actions pour {{ asset.name }}" hidden>
               <audio controls preload="none" src="{{ asset.audio_file.url }}" aria-label="Aperçu de {{ asset.name }}"></audio>
               <div class="audio-row-actions">
+                {% if asset.can_regenerate_text %}<a class="button button-secondary button-small" href="{% url 'edit_audio_asset' asset.id %}">✏️ Modifier</a>{% endif %}
                 <details class="audio-rename-details">
                   <summary class="button button-secondary button-small">Renommer</summary>
                   <form method="post" action="{% url 'rename_audio_asset' asset.id %}" class="audio-rename-form">

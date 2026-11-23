@@ -32,7 +32,9 @@ from .models import (
     MediaFolder, NarrationSegment, ProjectFolder, StudioBatch, StudioBatchItem, Voice,
     default_animation_settings, legacy_animation_settings,
 )
-from .services import _voice_sample_digest, cache_key_for, hash_file, normalize_voice_sample, srt_text
+from .services import (
+    _voice_sample_digest, cache_key_for, hash_file, normalize_voice_sample, regenerate_audio_asset, srt_text,
+)
 from .audio_services import (
     MAX_OPERATIONS as MAX_AUDIO_OPERATIONS,
     _delete_audio_session_files,
@@ -1223,7 +1225,7 @@ def studio_batch_status(request, batch_id):
 def audios(request):
     per_page = get_per_page(request)
     assets, folder_context = _filter_media_folder(
-        request, AudioAsset.objects.filter(user=request.user).order_by("-created_at", "-id"),
+        request, AudioAsset.objects.filter(user=request.user).select_related("voice").order_by("-created_at", "-id"),
     )
     audio_page, page_response = _page_or_redirect(
         request, assets, per_page,
@@ -1236,7 +1238,7 @@ def audios(request):
 def _audio_library_response(request, *, status=200, audio_page=None, folder_context=None):
     if folder_context is None:
         assets, folder_context = _filter_media_folder(
-            request, AudioAsset.objects.filter(user=request.user).order_by("-created_at", "-id"),
+            request, AudioAsset.objects.filter(user=request.user).select_related("voice").order_by("-created_at", "-id"),
         )
     else:
         assets = None
@@ -1249,6 +1251,16 @@ def _audio_library_response(request, *, status=200, audio_page=None, folder_cont
     for asset in audio_assets:
         minutes, seconds = divmod(max(0, round(asset.duration)), 60)
         asset.duration_mmss = f"{minutes:02d}:{seconds:02d}"
+        voice = asset.voice
+        asset.can_regenerate_text = bool(
+            asset.source == AudioAsset.Source.XTTS
+            and voice
+            and voice.user_id == request.user.id
+            and voice.consent_confirmed
+            and voice.sample
+            and voice.sample.name
+            and voice.sample.storage.exists(voice.sample.name)
+        )
     context = {
         "audio_assets": audio_assets,
         "audio_page": audio_page,
@@ -1258,6 +1270,73 @@ def _audio_library_response(request, *, status=200, audio_page=None, folder_cont
     }
     context.update(folder_context)
     return render(request, "studio/audios.html", context, status=status)
+
+
+def _audio_text_edit_context(request, asset, *, text=None, error=""):
+    voice = asset.voice
+    can_regenerate = bool(
+        asset.source == AudioAsset.Source.XTTS
+        and voice
+        and voice.user_id == request.user.id
+        and voice.consent_confirmed
+        and voice.sample
+        and voice.sample.name
+        and voice.sample.storage.exists(voice.sample.name)
+    )
+    return {
+        "audio_asset": asset,
+        "audio_text": asset.text if text is None else text,
+        "can_regenerate": can_regenerate,
+        "error_message": error,
+        "max_text_chars": MAX_STUDIO_TEXT_CHARS,
+    }
+
+
+@login_required
+@require_http_methods(["GET", "POST"])
+def edit_audio_asset(request, asset_id):
+    asset = get_object_or_404(
+        AudioAsset.objects.select_related("voice"), pk=asset_id, user=request.user,
+    )
+    if request.method == "GET":
+        return render(request, "studio/audio_asset_edit.html", _audio_text_edit_context(request, asset))
+
+    def reject(message, status=400):
+        if request.headers.get("x-requested-with") == "XMLHttpRequest":
+            return JsonResponse({"success": False, "message": message}, status=status)
+        return render(request, "studio/audio_asset_edit.html", _audio_text_edit_context(
+            request, asset, text=request.POST.get("text", ""), error=message,
+        ), status=status)
+
+    if not _audio_text_edit_context(request, asset)["can_regenerate"]:
+        return reject("Cet audio ne peut pas être régénéré : vérifie sa source et sa voix.", status=400)
+
+    new_text = (request.POST.get("text") or "").strip()
+    if not new_text:
+        return reject("Le texte ne peut pas être vide.")
+    if len(new_text) > MAX_STUDIO_TEXT_CHARS:
+        return reject(f"Le texte ne peut pas dépasser {MAX_STUDIO_TEXT_CHARS} caractères.")
+    if new_text == (asset.text or "").strip():
+        message = "Texte identique, aucune régénération nécessaire."
+        messages.info(request, message)
+        if request.headers.get("x-requested-with") == "XMLHttpRequest":
+            return JsonResponse({
+                "success": True, "unchanged": True, "message": message,
+                "redirect_url": reverse("edit_audio_asset", args=[asset.pk]),
+            })
+        return redirect("edit_audio_asset", asset_id=asset.pk)
+
+    try:
+        regenerate_audio_asset(asset, new_text)
+    except Exception:
+        logger.exception("Échec de régénération de l’audio %s pour l’utilisateur %s.", asset.pk, request.user.pk)
+        return reject("La régénération a échoué. L’ancien audio est conservé.", status=500)
+
+    message = "Audio régénéré avec succès."
+    messages.success(request, message)
+    if request.headers.get("x-requested-with") == "XMLHttpRequest":
+        return JsonResponse({"success": True, "message": message, "redirect_url": reverse("audios")})
+    return redirect("audios")
 
 
 def _unlink_audio_asset_file(path):

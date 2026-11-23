@@ -1,0 +1,40 @@
+{% extends "studio/base.html" %}
+{% block title %}Modifier le texte · {{ audio_asset.name }}{% endblock %}
+{% block heading %}Modifier le texte audio{% endblock %}
+{% block content %}
+<style>
+  .audio-text-edit-page { max-width:900px; margin:0 auto; }
+  .audio-text-edit-form { display:grid; gap:13px; }
+  .audio-text-edit-form label { color:#A8B1BF; font-size:11px; font-weight:650; }
+  .audio-text-edit-form textarea { width:100%; min-height:240px; padding:12px; border:1px solid #303A49; border-radius:10px; color:#E7EAF0; background:#10141C; resize:vertical; line-height:1.6; }
+  .audio-text-edit-actions { display:flex; align-items:center; flex-wrap:wrap; gap:10px; }
+  .audio-text-edit-spinner { width:16px; height:16px; border:2px solid #6C7788; border-top-color:#FFC65D; border-radius:50%; animation:audio-regeneration-spin .7s linear infinite; }
+  .audio-text-edit-spinner[hidden] { display:none; }
+  .audio-text-edit-status { min-height:20px; color:#AEB8C7; font-size:11px; }
+  .audio-text-edit-error { margin:0 0 12px; color:#F49A92; }
+  @keyframes audio-regeneration-spin { to { transform:rotate(360deg); } }
+</style>
+<section class="card audio-text-edit-page">
+  <div class="section-title">
+    <div><span class="step-number">✏</span><h2>{{ audio_asset.name }}</h2></div>
+    <span class="muted small">Voix : {{ audio_asset.voice.name|default:"indisponible" }}</span>
+  </div>
+  {% if error_message %}<p class="audio-text-edit-error" role="alert">{{ error_message }}</p>{% endif %}
+  {% if can_regenerate %}
+  <form method="post" action="{% url 'edit_audio_asset' audio_asset.id %}" class="audio-text-edit-form" data-audio-text-edit-form>
+    {% csrf_token %}
+    <label for="audioAssetText">Texte à prononcer</label>
+    <textarea id="audioAssetText" name="text" maxlength="{{ max_text_chars }}" required>{{ audio_text }}</textarea>
+    <p class="muted small">La régénération XTTS peut prendre plusieurs minutes. L’audio actuel reste disponible si la génération échoue.</p>
+    <div class="audio-text-edit-actions">
+      <button class="button button-primary" type="submit" data-audio-text-edit-submit>Régénérer l'audio</button>
+      <span class="audio-text-edit-spinner" data-audio-regeneration-spinner hidden aria-hidden="true"></span>
+      <span class="audio-text-edit-status" data-audio-regeneration-status role="status" aria-live="polite"></span>
+    </div>
+  </form>
+  {% else %}
+  <p class="audio-empty">Cet audio ne peut pas être régénéré : il doit avoir été créé avec XTTS et conserver une voix autorisée.</p>
+  {% endif %}
+  <p><a class="text-link" href="{% url 'audios' %}">← Retour à la bibliothèque audio</a></p>
+</section>
+{% endblock %}

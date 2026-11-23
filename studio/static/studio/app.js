@@ -57,6 +57,46 @@
     });
   });
 
+  document.addEventListener('submit', async event => {
+    const form = event.target instanceof HTMLFormElement && event.target.matches('[data-audio-text-edit-form]')
+      ? event.target
+      : null;
+    if (!form) return;
+    event.preventDefault();
+
+    const button = form.querySelector('[data-audio-text-edit-submit]');
+    const spinner = form.querySelector('[data-audio-regeneration-spinner]');
+    const status = form.querySelector('[data-audio-regeneration-status]');
+    if (button) button.disabled = true;
+    if (spinner) spinner.hidden = false;
+    if (status) status.textContent = 'Régénération en cours... (cela peut prendre plusieurs minutes si XTTS doit recharger)';
+
+    let shouldRedirect = false;
+    try {
+      const response = await fetch(form.action, {
+        method: 'POST',
+        headers: {'X-Requested-With': 'XMLHttpRequest'},
+        body: new FormData(form),
+      });
+      const data = await response.json();
+      if (!response.ok || !data.success) throw new Error(data.message || 'La régénération a échoué.');
+      if (status) status.textContent = data.message;
+      if (data.unchanged) {
+        if (spinner) spinner.hidden = true;
+        if (button) button.disabled = false;
+      } else {
+        shouldRedirect = true;
+      }
+    } catch (error) {
+      if (status) status.textContent = error.message || 'Impossible de contacter le serveur.';
+      if (spinner) spinner.hidden = true;
+      if (button) button.disabled = false;
+    }
+    if (shouldRedirect) {
+      window.setTimeout(() => { window.location.href = form.dataset.redirectUrl || '/audios/'; }, 700);
+    }
+  });
+
   // Capture les soumissions tôt, même si une autre initialisation de la page échoue.
   document.addEventListener('submit', event => {
     const form = event.target;

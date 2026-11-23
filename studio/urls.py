@@ -27,6 +27,7 @@ urlpatterns = [
     path("studio/batches/<int:batch_id>/cancel/", views.cancel_studio_batch, name="cancel_studio_batch"),
     path("audios/", views.audios, name="audios"),
     path("audios/upload/", views.upload_audio_asset, name="upload_audio_asset"),
+    path("audios/<int:asset_id>/edit/", views.edit_audio_asset, name="edit_audio_asset"),
     path("audios/<int:asset_id>/move/", views.move_audio_asset, name="move_audio_asset"),
     path("audios/<int:asset_id>/rename/", views.rename_audio_asset, name="rename_audio_asset"),
     path("audios/<int:asset_id>/delete/", views.delete_audio_asset, name="delete_audio_asset"),
