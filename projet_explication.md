@@ -158,7 +158,7 @@ Les variables d'environnement lues par le code sont :
 
 | Variable | Rôle | Comportement si absente |
 |---|---|---|
-| `DJANGO_SECRET_KEY` | Clé secrète Django | Une clé aléatoire est générée au démarrage ; elle change au redémarrage. |
+| `DJANGO_SECRET_KEY` | Clé secrète Django | Si absente, une clé locale persistante est générée dans `.django-secret-key` et les sessions restent valides après redémarrage. |
 | `DJANGO_DEBUG` | Active `DEBUG` uniquement si sa valeur est exactement `1` | Vaut `1` par défaut, donc `DEBUG=True`. Utiliser `0` ou `False` pour désactiver le mode debug. |
 | `MEDIA_ROOT` | Répertoire des médias, caches et verrou du worker | `media/` à la racine du dépôt. |
 | `FFMPEG_BINARY` | Chemin explicite vers FFmpeg | Le code cherche d'abord les environnements Conda courants, puis `ffmpeg` dans le `PATH`. |

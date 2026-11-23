@@ -3,7 +3,33 @@ import secrets
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY") or secrets.token_urlsafe(50)
+
+
+def _get_secret_key():
+    """Keep Django sessions valid across local restarts without changing code."""
+    configured = os.environ.get("DJANGO_SECRET_KEY")
+    if configured:
+        return configured
+
+    secret_file = BASE_DIR / ".django-secret-key"
+    try:
+        secret = secret_file.read_text(encoding="utf-8").strip()
+        if secret:
+            return secret
+    except FileNotFoundError:
+        pass
+
+    secret = secrets.token_urlsafe(50)
+    try:
+        secret_file.write_text(secret, encoding="utf-8")
+        secret_file.chmod(0o600)
+    except OSError:
+        # Do not crash startup if the local secret file cannot be written.
+        pass
+    return secret
+
+
+SECRET_KEY = _get_secret_key()
 DEBUG = os.environ.get("DJANGO_DEBUG", "1") == "1"
 ALLOWED_HOSTS = ["127.0.0.1", "localhost"]
 

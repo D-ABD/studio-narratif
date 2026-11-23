@@ -21,6 +21,7 @@ db.sqlite3
 db.sqlite3-journal
 local_settings.py
 /media/
+.django-secret-key
 
 # Secrets
 .env.*
@@ -33,3 +34,6 @@ local_settings.py
 # Keep the existing placeholder file unignored
 !media/.gitkeep
 db.sqlite3.backup-*
+*.tar.gz
+*.zip
+db.sqlite3.backup*

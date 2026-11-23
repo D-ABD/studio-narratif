@@ -210,6 +210,18 @@ def _group_words(words, max_words=7):
     ]
 
 
+def cache_key_for(text, voice, model_id=MODEL_ID, language=LANGUAGE_CODE, sample_digest=None):
+    """Stable cache identity: exact text, sample bytes, model, and language."""
+    sample_digest = sample_digest or _voice_sample_digest(voice)
+    source = json.dumps({
+        "text": text.strip(),
+        "voice_sample": sample_digest,
+        "model": model_id,
+        "language": language,
+    }, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(source.encode("utf-8")).hexdigest()
+
+
 def align_audio(audio_path, narration_text):
     """Align authored French text against XTTS output; never synthesize fallback timestamps."""
     try:
@@ -226,9 +238,18 @@ def align_audio(audio_path, narration_text):
             # WhisperX's alignment model is large. Keep it in memory for the
             # lifetime of this Django process instead of reloading it per segment.
             if _ALIGNMENT_MODEL is None or _ALIGNMENT_DEVICE != device or _ALIGNMENT_BACKEND is not whisperx:
-                _ALIGNMENT_MODEL, _ALIGNMENT_METADATA = whisperx.load_align_model(
-                    language_code=LANGUAGE_CODE, device=device,
-                )
+                _configure_alignment_https()
+                try:
+                    _ALIGNMENT_MODEL, _ALIGNMENT_METADATA = whisperx.load_align_model(
+                        language_code=LANGUAGE_CODE, device=device,
+                    )
+                except Exception:
+                    # A first download can fail transiently while the CA context or cache initializes.
+                    time.sleep(1)
+                    _configure_alignment_https()
+                    _ALIGNMENT_MODEL, _ALIGNMENT_METADATA = whisperx.load_align_model(
+                        language_code=LANGUAGE_CODE, device=device,
+                    )
                 _ALIGNMENT_DEVICE = device
                 _ALIGNMENT_BACKEND = whisperx
             model, metadata = _ALIGNMENT_MODEL, _ALIGNMENT_METADATA
@@ -846,3 +867,19 @@ def prepare_project(project_id):
             flush=True,
         )
         close_old_connections()
+
+
+def _configure_alignment_https():
+    """Use Certifi's CA bundle for PyTorch/WhisperX downloads on macOS."""
+    try:
+        import certifi
+        import ssl
+    except ImportError:
+        return
+
+    ca_bundle = certifi.where()
+    if not ca_bundle:
+        return
+    os.environ.setdefault("SSL_CERT_FILE", ca_bundle)
+    os.environ.setdefault("REQUESTS_CA_BUNDLE", ca_bundle)
+    ssl._create_default_https_context = lambda: ssl.create_default_context(cafile=ca_bundle)
