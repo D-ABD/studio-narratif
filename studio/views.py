@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 31058)
-Total output lines: 2684
-
 import json
 import hashlib
 import logging
@@ -1349,7 +1346,95 @@ def edit_audio_asset(request, asset_id):
     def reject(message, status=400):
         if request.headers.get("x-requested-with") == "XMLHttpRequest":
             return JsonResponse({"success": False, "message": message}, status=status)
-        return render(request, "s…1058 tokens truncated…)
+        return render(request, "studio/audio_asset_edit.html", _audio_text_edit_context(
+            request, asset, text=request.POST.get("text", ""), error=message,
+        ), status=status)
+
+    if not _audio_text_edit_context(request, asset)["can_regenerate"]:
+        return reject("Cet audio ne peut pas être régénéré : vérifie sa source et sa voix.", status=400)
+
+    new_text = (request.POST.get("text") or "").strip()
+    if not new_text:
+        return reject("Le texte ne peut pas être vide.")
+    if len(new_text) > MAX_STUDIO_TEXT_CHARS:
+        return reject(f"Le texte ne peut pas dépasser {MAX_STUDIO_TEXT_CHARS} caractères.")
+    if new_text == (asset.text or "").strip():
+        message = "Texte identique, aucune régénération nécessaire."
+        messages.info(request, message)
+        if request.headers.get("x-requested-with") == "XMLHttpRequest":
+            return JsonResponse({
+                "success": True, "unchanged": True, "message": message,
+                "redirect_url": reverse("edit_audio_asset", args=[asset.pk]),
+            })
+        return redirect("edit_audio_asset", asset_id=asset.pk)
+
+    try:
+        regenerate_audio_asset(asset, new_text)
+    except Exception:
+        logger.exception("Échec de régénération de l’audio %s pour l’utilisateur %s.", asset.pk, request.user.pk)
+        return reject("La régénération a échoué. L’ancien audio est conservé.", status=500)
+
+    message = "Audio régénéré avec succès."
+    messages.success(request, message)
+    if request.headers.get("x-requested-with") == "XMLHttpRequest":
+        return JsonResponse({"success": True, "message": message, "redirect_url": reverse("audios")})
+    return redirect("audios")
+
+
+def _unlink_audio_asset_file(path):
+    try:
+        Path(path).unlink()
+    except FileNotFoundError:
+        logger.warning("Le fichier audio %s était déjà absent lors de sa suppression.", path)
+    except OSError:
+        logger.warning("Impossible de supprimer le fichier audio %s après suppression en base.", path, exc_info=True)
+
+
+@login_required
+@require_POST
+def upload_audio_asset(request):
+    upload = request.FILES.get("audio_file")
+    if not upload or upload.size <= 0:
+        messages.error(request, "Sélectionne un fichier audio.")
+        return _audio_library_response(request, status=400)
+    if upload.size > MAX_AUDIO_ASSET_BYTES:
+        messages.error(request, "Le fichier audio dépasse la limite de 100 Mo.")
+        return _audio_library_response(request, status=400)
+    extension = Path(upload.name).suffix.lower()
+    if extension not in ALLOWED_AUDIO_ASSET_EXTENSIONS:
+        messages.error(request, "Formats acceptés : MP3, WAV, M4A et OGG.")
+        return _audio_library_response(request, status=400)
+
+    asset = None
+    created_file = None
+    try:
+        with tempfile.TemporaryDirectory(prefix="petit-studio-audio-asset-") as folder:
+            staged_path = Path(folder) / f"upload{extension}"
+            _stream_upload_to_path(upload, staged_path)
+            duration = _probe_music_duration(staged_path)
+            name = Path(upload.name).stem.strip()[:100] or "Audio importé"
+            asset = AudioAsset(
+                user=request.user,
+                name=name,
+                duration=duration,
+                source=AudioAsset.Source.UPLOAD,
+            )
+            with staged_path.open("rb") as stream:
+                asset.audio_file.save(Path(upload.name).name, File(stream), save=False)
+            if asset.audio_file.name:
+                created_file = (asset.audio_file.storage, asset.audio_file.name)
+            asset.save()
+        messages.success(request, f"L’audio « {asset.name} » a été ajouté à ta bibliothèque.")
+        return redirect("audios")
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        if created_file:
+            _delete_storage_files([created_file])
+        logger.info("Import audio refusé pour l’utilisateur %s : %s", request.user.pk, exc)
+        messages.error(request, str(exc) or "Impossible de lire ce fichier audio.")
+        return _audio_library_response(request, status=400)
+    except Exception:
+        if created_file:
+            _delete_storage_files([created_file])
         logger.exception("Échec de l’enregistrement d’un audio pour l’utilisateur %s.", request.user.pk)
         messages.error(request, "Impossible d’enregistrer cet audio.")
         return _audio_library_response(request, status=500)
