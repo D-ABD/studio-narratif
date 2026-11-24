@@ -1991,11 +1991,11 @@ def save_assembly_motion(request, project_id, segment_id):
         return HttpResponseBadRequest("Choisis un effet de mouvement valide.")
 
     settings = _animation_settings_for_assembly_motion(assembly_motion)
-    _save_assembly_animation(project, segment, settings)
+    _save_assembly_animation(request, project, segment, settings)
     return redirect("project_detail", project_id=project.pk)
 
 
-def _save_assembly_animation(project, segment, settings):
+def _save_assembly_animation(request, project, segment, settings):
     legacy_motion = _assembly_motion_from_animation(settings)
     changed = (
         settings != (segment.assembly_animation_settings or default_assembly_animation_settings())
@@ -2029,7 +2029,7 @@ def save_assembly_animation(request, project_id, segment_id):
         settings = _validate_animation_settings_json(request.POST.get("animation_settings"))
     except ValueError as exc:
         return HttpResponseBadRequest(str(exc))
-    _save_assembly_animation(project, segment, settings)
+    _save_assembly_animation(request, project, segment, settings)
     return redirect("project_detail", project_id=project.pk)
 
 
