@@ -17,7 +17,8 @@ from django.db import close_old_connections
 from django.utils import timezone
 
 from .models import (
-    AudioAsset, NarrationProject, NarrationSegment, default_assembly_animation_settings,
+    AudioAsset, NarrationProject, NarrationSegment, VideoMerge, VideoMergeItem,
+    default_assembly_animation_settings,
 )
 from .services import _ffmpeg_path, wav_duration
 from .job_control import (
@@ -976,7 +977,8 @@ def _probe_clip(path):
     try:
         result = subprocess.run(
             [_ffprobe_path(), "-v", "error", "-show_entries",
-             "stream=codec_type,duration,width,height,codec_name,avg_frame_rate,r_frame_rate:format=duration",
+             "stream=codec_type,duration,width,height,codec_name,profile,pix_fmt,avg_frame_rate,r_frame_rate,time_base,"
+             "sample_rate,sample_fmt,channels,channel_layout,codec_tag_string:format=duration,format_name",
              "-of", "json", str(path)],
             capture_output=True, text=True, check=False,
             timeout=FFPROBE_TIMEOUT_SECONDS,
@@ -999,6 +1001,7 @@ def _probe_clip(path):
         if not video_streams:
             raise ValueError("aucune piste vidéo")
         video = video_streams[0]
+        audio_streams = [stream for stream in streams if stream.get("codec_type") == "audio"]
         try:
             duration = float(video.get("duration"))
         except (TypeError, ValueError):
@@ -1024,6 +1027,25 @@ def _probe_clip(path):
             "codec": codec,
             "fps": fps,
             "fps_raw": fps_raw,
+            "profile": video.get("profile"),
+            "pixel_format": video.get("pix_fmt"),
+            "video_time_base": video.get("time_base"),
+            "video_codec_tag": video.get("codec_tag_string"),
+            "audio_streams": [
+                {
+                    "codec": stream.get("codec_name"),
+                    "profile": stream.get("profile"),
+                    "sample_rate": stream.get("sample_rate"),
+                    "sample_format": stream.get("sample_fmt"),
+                    "channels": stream.get("channels"),
+                    "channel_layout": stream.get("channel_layout"),
+                    "time_base": stream.get("time_base"),
+                    "codec_tag": stream.get("codec_tag_string"),
+                }
+                for stream in audio_streams
+            ],
+            "stream_types": [stream.get("codec_type") for stream in streams],
+            "format_name": info.get("format", {}).get("format_name"),
             "probe_seconds": elapsed,
         }
         resolution = f"{width}x{height}" if width and height else "inconnue"
@@ -1038,6 +1060,182 @@ def _probe_clip(path):
         raise RuntimeError(f"Impossible de lire les métadonnées du clip « {Path(path).name} » : {exc}") from exc
 
 
+def _merge_clip_signature(metadata):
+    """Return the stream parameters that must match for concat-demuxer stream copy."""
+    if not metadata or not metadata.get("has_audio") or len(metadata.get("audio_streams", [])) != 1:
+        return None
+    if sorted(metadata.get("stream_types", [])) != ["audio", "video"]:
+        return None
+    required_video = (
+        metadata.get("codec"), metadata.get("profile"), metadata.get("width"),
+        metadata.get("height"), metadata.get("pixel_format"), metadata.get("fps_raw"),
+        metadata.get("video_time_base"), metadata.get("video_codec_tag"),
+    )
+    audio = metadata["audio_streams"][0]
+    required_audio = (
+        audio.get("codec"), audio.get("profile"), audio.get("sample_rate"),
+        audio.get("sample_format"), audio.get("channels"), audio.get("channel_layout"),
+        audio.get("time_base"), audio.get("codec_tag"),
+    )
+    if any(value in (None, "") for value in required_video + required_audio):
+        return None
+    return required_video + required_audio
+
+
+def _video_merge_requires_reencode(metadata_list):
+    signatures = [_merge_clip_signature(metadata) for metadata in metadata_list]
+    return not signatures or signatures[0] is None or any(signature != signatures[0] for signature in signatures[1:])
+
+
+def _concat_quote(path):
+    """Quote a path for FFmpeg's concat demuxer list syntax."""
+    return "'" + str(path).replace("\\", "\\\\").replace("'", "'\\''") + "'"
+
+
+def _normalize_merge_clip_command(ffmpeg, source, output, duration, width, height, metadata=None):
+    command = [ffmpeg, "-y", "-v", "error", "-i", str(source)]
+    metadata = metadata or _probe_clip(source)
+    if metadata.get("has_audio"):
+        command.extend(["-map", "0:v:0", "-map", "0:a:0"])
+    else:
+        command.extend([
+            "-f", "lavfi", "-t", f"{duration:.3f}", "-i",
+            "anullsrc=channel_layout=stereo:sample_rate=48000",
+            "-map", "0:v:0", "-map", "1:a:0",
+        ])
+    command.extend([
+        "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,fps=24,setsar=1,format=yuv420p",
+        "-af", "aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo",
+        "-t", f"{duration:.3f}", "-r", "24",
+        *_video_encoder_args(ffmpeg, width, height), "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-ac", "2", "-shortest", str(output),
+    ])
+    return command
+
+
+def render_video_merge(merge_id):
+    """Concatenate user-owned, already-rendered projects without touching their source videos."""
+    close_old_connections()
+    try:
+        merge = VideoMerge.objects.prefetch_related("items__source_project").get(pk=merge_id)
+        items = list(merge.items.select_related("source_project").order_by("position", "id"))
+        if len(items) < 2:
+            raise ValueError("Sélectionne au moins deux vidéos pour les assembler.")
+
+        sources = []
+        source_metadata = []
+        total_duration = 0.0
+        for item in items:
+            project = item.source_project
+            if (
+                project is None or project.status != NarrationProject.Status.READY
+                or not project.video_file or project.video_file.name != item.source_video_name
+            ):
+                raise ValueError(f"Le projet {item.source_title} a été supprimé ou modifié entre temps.")
+            try:
+                source_path = Path(project.video_file.path)
+                stat = source_path.stat()
+            except (OSError, ValueError):
+                raise ValueError(f"Le projet {item.source_title} a été supprimé ou modifié entre temps.")
+            if (
+                not source_path.is_file() or stat.st_size != item.source_video_size
+                or stat.st_mtime_ns != item.source_video_mtime_ns
+            ):
+                raise ValueError(f"Le projet {item.source_title} a été supprimé ou modifié entre temps.")
+            metadata = _probe_clip(source_path)
+            signature = _merge_clip_signature(metadata)
+            expected_signature = item.source_metadata.get("signature")
+            if (list(signature) if signature is not None else None) != expected_signature:
+                raise ValueError(f"Le projet {item.source_title} a été supprimé ou modifié entre temps.")
+            sources.append((item, source_path, metadata))
+            source_metadata.append(metadata)
+            total_duration += float(metadata["duration"])
+
+        requires_reencode = _video_merge_requires_reencode(source_metadata)
+        if requires_reencode != merge.requires_reencode:
+            raise ValueError("Les paramètres vidéo des sources ont changé. Relance l’assemblage.")
+
+        ffmpeg = _ffmpeg_path()
+        with tempfile.TemporaryDirectory(prefix=f"studio-video-merge-{merge.pk}-") as temporary_dir:
+            folder = Path(temporary_dir)
+            concat_sources = []
+            if requires_reencode:
+                normalized_commands = []
+                force_software_encoder = False
+                for index, (_item, source_path, metadata) in enumerate(sources, start=1):
+                    merge.status_message = f"Réencodage vidéo {index}/{len(sources)}…"
+                    merge.progress_percent = 5 + round(65 * (index - 1) / len(sources))
+                    merge.save(update_fields=["status_message", "progress_percent", "updated_at"])
+                    normalized = folder / f"normalized-{index:04}.mp4"
+                    command = _normalize_merge_clip_command(
+                        ffmpeg, source_path, normalized, metadata["duration"], 1080, 1920, metadata,
+                    )
+                    if force_software_encoder:
+                        command = _software_fallback_command(command) or command
+                    fallback_used = _run_ffmpeg(command, folder, f"normalisation vidéo {index}")
+                    if fallback_used and not force_software_encoder:
+                        for previous_command in normalized_commands:
+                            fallback = _software_fallback_command(previous_command)
+                            if fallback:
+                                _remove_partial_output(previous_command, folder)
+                                _run_ffmpeg(fallback, folder, "normalisation homogène d’une vidéo")
+                        force_software_encoder = True
+                    normalized_commands.append(command)
+                    if not normalized.is_file() or normalized.stat().st_size < 1000:
+                        raise RuntimeError(f"FFmpeg n’a pas produit la vidéo normalisée {index}.")
+                    concat_sources.append(normalized)
+                    merge.progress_percent = 5 + round(65 * index / len(sources))
+                    merge.save(update_fields=["progress_percent", "updated_at"])
+            else:
+                concat_sources = [source_path for _item, source_path, _metadata in sources]
+
+            concat_list = folder / "merge-inputs.txt"
+            concat_list.write_text(
+                "".join(f"file {_concat_quote(path)}\n" for path in concat_sources), encoding="utf-8",
+            )
+            output = folder / "merged.mp4"
+            merge.status_message = "Concaténation des vidéos…"
+            merge.progress_percent = max(70, merge.progress_percent)
+            merge.save(update_fields=["status_message", "progress_percent", "updated_at"])
+            _run_ffmpeg(
+                [ffmpeg, "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", str(concat_list),
+                 "-c", "copy", "-movflags", "+faststart", str(output)],
+                folder, "concaténation des vidéos",
+            )
+            if not output.is_file() or output.stat().st_size < 1000:
+                raise RuntimeError("FFmpeg n’a pas produit la vidéo assemblée.")
+            result_metadata = _probe_clip(output)
+            if abs(float(result_metadata["duration"]) - total_duration) > max(0.15, len(sources) * 0.05):
+                raise RuntimeError("La durée de la vidéo assemblée ne correspond pas à la somme des sources.")
+
+            with output.open("rb") as stream:
+                merge.output_file.save(f"assemblage-{merge.pk}.mp4", File(stream), save=False)
+            merge.duration_seconds = float(result_metadata["duration"])
+            merge.status = VideoMerge.Status.READY
+            merge.progress_percent = 100
+            merge.status_message = (
+                "Assemblage terminé · vidéos réencodées en 1080×1920."
+                if requires_reencode else "Assemblage terminé sans réencodage."
+            )
+            merge.error_message = ""
+            merge.queued_at = None
+            merge.finished_at = timezone.now()
+            merge.save(update_fields=[
+                "output_file", "duration_seconds", "status", "progress_percent", "status_message",
+                "error_message", "queued_at", "finished_at", "updated_at",
+            ])
+    except Exception as exc:
+        VideoMerge.objects.filter(pk=merge_id).update(
+            status=VideoMerge.Status.ERROR,
+            progress_percent=0,
+            status_message="L’assemblage des vidéos a échoué.",
+            error_message=str(exc)[:2000],
+            queued_at=None,
+            finished_at=timezone.now(),
+        )
+    finally:
+        close_old_connections()
 def render_video_assembly(project_id):
     """Normalize and concatenate imported clips, retaining their original audio."""
     close_old_connections()

@@ -1411,4 +1411,168 @@
   } catch (error) {
     console.error('Erreur pendant l’initialisation du studio audio', error);
   }
+
+  const videoMergeForm = document.querySelector('[data-video-merge-form]');
+  if (videoMergeForm) {
+    const selectedList = videoMergeForm.querySelector('[data-merge-selected-list]');
+    const orderedInput = videoMergeForm.querySelector('[data-merge-ordered-ids]');
+    const submitButton = videoMergeForm.querySelector('[data-merge-submit]');
+    const spinner = videoMergeForm.querySelector('[data-merge-spinner]');
+    const warning = videoMergeForm.querySelector('[data-merge-warning]');
+    let selectedIds = [];
+    let submitting = false;
+
+    const renderMergeOrder = () => {
+      selectedList.replaceChildren();
+      if (!selectedIds.length) {
+        const empty = document.createElement('li');
+        empty.className = 'merge-intro';
+        empty.textContent = 'Choisis les vidéos à assembler.';
+        selectedList.append(empty);
+      }
+      selectedIds.forEach((id, index) => {
+        const card = videoMergeForm.querySelector(`[data-project-id="${CSS.escape(id)}"]`);
+        const row = document.createElement('li');
+        row.className = 'merge-selected-row';
+        row.dataset.mergeSelectedId = id;
+        const title = document.createElement('span');
+        title.textContent = card?.dataset.projectTitle || `Projet ${id}`;
+        const actions = document.createElement('div');
+        actions.className = 'merge-order-actions';
+        [['up', 'Monter', '↑'], ['down', 'Descendre', '↓']].forEach(([direction, label, icon]) => {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.dataset.mergeMove = direction;
+          button.setAttribute('aria-label', `${label} ${title.textContent}`);
+          button.title = label;
+          button.textContent = icon;
+          button.disabled = direction === 'up' ? index === 0 : index === selectedIds.length - 1;
+          actions.append(button);
+        });
+        row.append(title, actions);
+        selectedList.append(row);
+      });
+      orderedInput.value = JSON.stringify(selectedIds);
+      submitButton.disabled = submitting || selectedIds.length < 2;
+    };
+
+    videoMergeForm.querySelectorAll('[data-merge-project-select]').forEach(checkbox => {
+      checkbox.addEventListener('change', () => {
+        const id = checkbox.value;
+        selectedIds = checkbox.checked
+          ? [...selectedIds, id]
+          : selectedIds.filter(selectedId => selectedId !== id);
+        if (warning) warning.hidden = true;
+        renderMergeOrder();
+      });
+    });
+
+    selectedList.addEventListener('click', event => {
+      const button = event.target.closest('[data-merge-move]');
+      const row = button?.closest('[data-merge-selected-id]');
+      if (!button || !row) return;
+      const index = selectedIds.indexOf(row.dataset.mergeSelectedId);
+      const nextIndex = button.dataset.mergeMove === 'up' ? index - 1 : index + 1;
+      if (index < 0 || nextIndex < 0 || nextIndex >= selectedIds.length) return;
+      [selectedIds[index], selectedIds[nextIndex]] = [selectedIds[nextIndex], selectedIds[index]];
+      renderMergeOrder();
+    });
+
+    videoMergeForm.addEventListener('submit', async event => {
+      event.preventDefault();
+      if (submitting || selectedIds.length < 2) return;
+      submitting = true;
+      if (warning) warning.hidden = true;
+      if (spinner) spinner.hidden = false;
+      renderMergeOrder();
+      let confirmReencode = false;
+      try {
+        while (true) {
+          const payload = new FormData(videoMergeForm);
+          payload.set('ordered_project_ids', JSON.stringify(selectedIds));
+          if (confirmReencode) payload.set('confirm_reencode', '1');
+          const response = await fetch(videoMergeForm.action, {
+            method: 'POST',
+            headers: {'X-Requested-With': 'XMLHttpRequest'},
+            body: payload,
+          });
+          const data = await response.json();
+          if (!response.ok || !data.ok) {
+            if (data.requires_reencode && !confirmReencode) {
+              warning.textContent = data.warning || 'Réencodage nécessaire (plus lent).';
+              warning.hidden = false;
+              if (!window.confirm(data.warning || 'Réencodage nécessaire (plus lent). Continuer ?')) break;
+              confirmReencode = true;
+              continue;
+            }
+            throw new Error(data.error || data.warning || 'Impossible de créer l’assemblage.');
+          }
+          window.location.assign(data.redirect_url);
+          return;
+        }
+      } catch (error) {
+        if (warning) {
+          warning.textContent = error.message || 'Impossible de lancer l’assemblage.';
+          warning.hidden = false;
+        }
+      } finally {
+        submitting = false;
+        if (spinner) spinner.hidden = true;
+        renderMergeOrder();
+      }
+    });
+    renderMergeOrder();
+  }
+
+  const mergeJobs = [...document.querySelectorAll('[data-video-merge-job]')];
+  const mergeStatusLabels = {queued: 'En attente', processing: 'En cours', ready: 'Terminé', error: 'Échec'};
+  const refreshVideoMerge = async card => {
+    if (!['queued', 'processing'].includes(card.dataset.status)) return;
+    try {
+      const response = await fetch(card.dataset.statusUrl, {cache: 'no-store'});
+      if (!response.ok) throw new Error('Statut indisponible');
+      const data = await response.json();
+      card.dataset.status = data.status;
+      const state = card.querySelector('[data-merge-job-state]');
+      const message = card.querySelector('[data-merge-job-message]');
+      const progress = card.querySelector('[data-merge-job-progress]');
+      const error = card.querySelector('[data-merge-job-error]');
+      if (state) state.textContent = mergeStatusLabels[data.status] || data.status;
+      if (message) message.textContent = data.message || '';
+      if (progress) {
+        progress.value = Math.max(0, Math.min(100, Number(data.progress) || 0));
+        progress.hidden = data.status !== 'processing';
+      }
+      if (error) {
+        error.textContent = data.error || '';
+        error.hidden = !data.error;
+      }
+      if (data.status === 'ready' && data.preview_url) {
+        if (!card.querySelector('video')) {
+          const player = document.createElement('video');
+          player.controls = true;
+          player.preload = 'metadata';
+          card.append(player);
+          const duration = document.createElement('span');
+          duration.className = 'merge-project-meta';
+          duration.textContent = `${Number(data.duration || 0).toFixed(1)} s`;
+          card.append(duration);
+          const download = document.createElement('a');
+          download.textContent = 'Télécharger le MP4 ↓';
+          card.append(download);
+        }
+        card.querySelector('video').src = data.preview_url;
+        const download = [...card.querySelectorAll('a')].find(link => link.textContent.includes('Télécharger'));
+        if (download) download.href = data.download_url;
+      }
+    } catch (error) {
+      const message = card.querySelector('[data-merge-job-message]');
+      if (message) message.textContent = 'Actualisation impossible. Nouvelle tentative automatique.';
+    }
+  };
+  if (mergeJobs.some(card => ['queued', 'processing'].includes(card.dataset.status))) {
+    const refreshMerges = () => mergeJobs.forEach(refreshVideoMerge);
+    refreshMerges();
+    window.setInterval(refreshMerges, 2000);
+  }
 })();

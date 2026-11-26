@@ -103,6 +103,10 @@ def audio_session_upload_to(instance, filename):
     return f"audio-sessions/user_{instance.user_id}/{uuid.uuid4().hex}{extension}"
 
 
+def video_merge_upload_to(instance, filename):
+    return f"exports/merge/user_{instance.user_id}/{uuid.uuid4().hex}.mp4"
+
+
 class MediaFolder(models.Model):
     user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="media_folders")
     name = models.CharField("nom", max_length=120)
@@ -343,6 +347,60 @@ class NarrationProject(models.Model):
 
     def __str__(self):
         return self.title
+
+
+class VideoMerge(models.Model):
+    class Status(models.TextChoices):
+        QUEUED = "queued", "En attente"
+        PROCESSING = "processing", "En cours"
+        READY = "ready", "Prêt"
+        ERROR = "error", "Erreur"
+
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT, related_name="video_merges")
+    source_projects = models.ManyToManyField(
+        NarrationProject, through="VideoMergeItem", related_name="video_merges",
+    )
+    output_file = models.FileField(upload_to=video_merge_upload_to, blank=True)
+    status = models.CharField(max_length=12, choices=Status.choices, default=Status.QUEUED, db_index=True)
+    requires_reencode = models.BooleanField(default=False)
+    duration_seconds = models.FloatField(default=0)
+    progress_percent = models.PositiveSmallIntegerField(default=0)
+    status_message = models.CharField(max_length=240, blank=True)
+    error_message = models.TextField(blank=True)
+    queued_at = models.DateTimeField(null=True, blank=True, default=timezone.now, db_index=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(default=timezone.now)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at", "-id"]
+
+    def __str__(self):
+        return f"Assemblage vidéo #{self.pk} · {self.user}"
+
+
+class VideoMergeItem(models.Model):
+    merge = models.ForeignKey(VideoMerge, on_delete=models.CASCADE, related_name="items")
+    source_project = models.ForeignKey(
+        NarrationProject, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name="video_merge_items",
+    )
+    source_title = models.CharField(max_length=120)
+    source_video_name = models.CharField(max_length=255)
+    source_video_size = models.PositiveBigIntegerField(default=0)
+    source_video_mtime_ns = models.PositiveBigIntegerField(default=0)
+    source_metadata = models.JSONField(default=dict, blank=True)
+    position = models.PositiveSmallIntegerField()
+
+    class Meta:
+        ordering = ["position", "id"]
+        constraints = [
+            models.UniqueConstraint(fields=["merge", "position"], name="unique_video_merge_item_position"),
+        ]
+
+    def __str__(self):
+        return f"{self.source_title} · {self.position + 1}"
 
 
 class NarrationSegment(models.Model):

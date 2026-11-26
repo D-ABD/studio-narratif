@@ -23,7 +23,7 @@ from PIL import Image
 
 from .models import (
     AudioAsset, AudioSession, BackgroundTrack, MediaFolder, NarrationProject, NarrationSegment, ProjectFolder,
-    StudioBatch, StudioBatchItem, Voice,
+    StudioBatch, StudioBatchItem, VideoMerge, VideoMergeItem, Voice,
     default_animation_settings,
 )
 from .services import (
@@ -3524,3 +3524,176 @@ class PadSequenceSaveTests(MediaTestCase):
         self.assertContains(response, "data-sequencer-play")
         self.assertContains(response, "data-sequencer-save")
         self.assertContains(response, f"/audio-studio/{session.pk}/save-sequence/")
+
+
+class VideoMergeTests(MediaTestCase):
+    @staticmethod
+    def clip_metadata(*, duration=5.0, width=1080, height=1920, fps_raw="24/1", has_audio=True):
+        audio_streams = [{
+            "codec": "aac", "profile": "LC", "sample_rate": "48000", "sample_format": "fltp",
+            "channels": 2, "channel_layout": "stereo", "time_base": "1/48000", "codec_tag": "mp4a",
+        }] if has_audio else []
+        return {
+            "duration": duration, "has_audio": has_audio, "width": width, "height": height,
+            "codec": "h264", "fps": 24, "fps_raw": fps_raw, "profile": "High",
+            "pixel_format": "yuv420p", "video_time_base": "1/12288", "video_codec_tag": "avc1",
+            "audio_streams": audio_streams,
+            "stream_types": ["video", "audio"] if has_audio else ["video"],
+            "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+        }
+
+    def make_rendered_project(self, title, *, duration=5.0, user=None):
+        project = NarrationProject.objects.create(
+            user=user or self.user, title=title, status=NarrationProject.Status.READY,
+            duration_seconds=duration,
+        )
+        project.video_file.save(f"{title}.mp4", ContentFile(b"rendered-video" * 300), save=True)
+        return project
+
+    def post_merge(self, projects, *, confirm=False):
+        return self.client.post("/projects/merge/create/", {
+            "ordered_project_ids": json.dumps([project.pk for project in projects]),
+            "confirm_reencode": "1" if confirm else "0",
+        })
+
+    @patch("studio.views._probe_clip")
+    def test_page_lists_only_ready_rendered_projects_and_order_is_persisted(self, probe):
+        first = self.make_rendered_project("Premier", duration=6.0)
+        second = self.make_rendered_project("Deuxième", duration=8.0)
+        draft = NarrationProject.objects.create(user=self.user, title="Brouillon")
+        probe.return_value = self.clip_metadata()
+
+        page = self.client.get("/projects/merge/")
+        self.assertEqual(page.status_code, 200)
+        self.assertContains(page, "Premier")
+        self.assertContains(page, "Deuxième")
+        self.assertNotIn(draft.pk, [project.pk for project in page.context["projects"]])
+        self.assertContains(page, "data-merge-selected-list")
+        self.assertContains(page, "data-merge-project-select")
+
+        response = self.post_merge([second, first])
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json()["ok"])
+        merge = VideoMerge.objects.get()
+        self.assertEqual(list(merge.items.values_list("source_project_id", flat=True)), [second.pk, first.pk])
+        self.assertEqual(list(merge.items.values_list("position", flat=True)), [0, 1])
+        self.assertFalse(merge.requires_reencode)
+        self.assertTrue(draft.pk)
+
+    @patch("studio.video_services._probe_clip")
+    @patch("studio.video_services._run_ffmpeg")
+    def test_compatible_videos_use_stream_copy_and_store_the_summed_duration(self, run_ffmpeg, probe):
+        first = self.make_rendered_project("Premier", duration=5.0)
+        second = self.make_rendered_project("Deuxième", duration=7.0)
+        metadata = self.clip_metadata(duration=5.0)
+        with patch("studio.views._probe_clip", return_value=metadata):
+            response = self.post_merge([first, second])
+        self.assertTrue(response.json()["ok"])
+        merge = VideoMerge.objects.get()
+
+        def fake_ffmpeg(command, cwd, _operation, **_kwargs):
+            Path(command[-1]).write_bytes(b"merged" * 500)
+            if "merge-inputs.txt" in command:
+                pass
+            return False
+
+        run_ffmpeg.side_effect = fake_ffmpeg
+        probe.side_effect = [
+            self.clip_metadata(duration=5.0), self.clip_metadata(duration=7.0),
+            self.clip_metadata(duration=12.0),
+        ]
+        from .video_services import render_video_merge
+        render_video_merge(merge.pk)
+
+        merge.refresh_from_db()
+        self.assertEqual(merge.status, VideoMerge.Status.READY)
+        self.assertAlmostEqual(merge.duration_seconds, 12.0)
+        concat_call = next(
+            call for call in run_ffmpeg.call_args_list
+            if call.args[2] == "concaténation des vidéos"
+        )
+        concat_command = concat_call.args[0]
+        self.assertIn("-c", concat_command)
+        self.assertEqual(concat_command[concat_command.index("-c") + 1], "copy")
+
+    @patch("studio.video_services._probe_clip")
+    @patch("studio.video_services._run_ffmpeg")
+    def test_different_video_formats_require_confirmation_and_reencode(self, run_ffmpeg, probe):
+        first = self.make_rendered_project("Vertical", duration=5.0)
+        second = self.make_rendered_project("Horizontal", duration=7.0)
+        vertical = self.clip_metadata(duration=5.0)
+        horizontal = self.clip_metadata(duration=7.0, width=1920, height=1080, fps_raw="30/1")
+        with patch("studio.views._probe_clip", side_effect=[vertical, horizontal, vertical, horizontal]):
+            warning = self.post_merge([first, second])
+            self.assertEqual(warning.status_code, 200)
+            self.assertTrue(warning.json()["requires_reencode"])
+            self.assertIn("Réencodage nécessaire (plus lent)", warning.json()["warning"])
+            created = self.post_merge([first, second], confirm=True)
+        self.assertTrue(created.json()["ok"])
+        merge = VideoMerge.objects.get()
+        self.assertTrue(merge.requires_reencode)
+
+        def fake_ffmpeg(command, _cwd, _operation, **_kwargs):
+            Path(command[-1]).write_bytes(b"normalized-or-merged" * 200)
+            return False
+
+        run_ffmpeg.side_effect = fake_ffmpeg
+        probe.side_effect = [vertical, horizontal, self.clip_metadata(duration=12.0)]
+        from .video_services import render_video_merge
+        render_video_merge(merge.pk)
+
+        merge.refresh_from_db()
+        self.assertEqual(merge.status, VideoMerge.Status.READY)
+        normalization_commands = [call.args[0] for call in run_ffmpeg.call_args_list if "normalisation vidéo" in call.args[2]]
+        self.assertEqual(len(normalization_commands), 2)
+        for command in normalization_commands:
+            self.assertIn("scale=1080:1920", command[command.index("-vf") + 1])
+            self.assertEqual(command[command.index("-r") + 1], "24")
+            self.assertEqual(command[command.index("-c:a") + 1], "aac")
+
+    @patch("studio.views._probe_clip")
+    def test_foreign_project_is_not_accepted_and_status_is_private(self, probe):
+        probe.return_value = self.clip_metadata()
+        own = self.make_rendered_project("Mon projet")
+        other_user = get_user_model().objects.create_user(username="merge-owner", password="MergeSafe123!x")
+        foreign = self.make_rendered_project("Projet privé", user=other_user)
+        denied = self.post_merge([own, foreign])
+        self.assertEqual(denied.status_code, 404)
+        self.assertFalse(VideoMerge.objects.exists())
+
+        private_merge = VideoMerge.objects.create(user=other_user)
+        item = VideoMergeItem.objects.create(
+            merge=private_merge, source_project=foreign, source_title=foreign.title,
+            source_video_name=foreign.video_file.name, position=0,
+        )
+        status = self.client.get(f"/projects/merge/status/{private_merge.pk}/")
+        download = self.client.get(f"/projects/merge/{private_merge.pk}/download/")
+        self.assertEqual(status.status_code, 404)
+        self.assertEqual(download.status_code, 404)
+        self.assertIsNotNone(item.pk)
+
+    @patch("studio.views._probe_clip")
+    def test_deleted_source_is_rejected_by_worker_with_clear_message(self, probe):
+        probe.return_value = self.clip_metadata()
+        first = self.make_rendered_project("Source supprimée")
+        second = self.make_rendered_project("Source conservée")
+        self.assertTrue(self.post_merge([first, second]).json()["ok"])
+        merge = VideoMerge.objects.get()
+        first.delete()
+
+        from .video_services import render_video_merge
+        render_video_merge(merge.pk)
+
+        merge.refresh_from_db()
+        self.assertEqual(merge.status, VideoMerge.Status.ERROR)
+        self.assertIn("Le projet Source supprimée a été supprimé ou modifié entre temps.", merge.error_message)
+
+    def test_worker_claims_video_merge_jobs(self):
+        from .management.commands.run_narration_worker import Command
+
+        merge = VideoMerge.objects.create(user=self.user, status=VideoMerge.Status.QUEUED)
+        task = Command._claim_next_task()
+
+        self.assertEqual(task, ("video_merge", merge.pk))
+        merge.refresh_from_db()
+        self.assertEqual(merge.status, VideoMerge.Status.PROCESSING)

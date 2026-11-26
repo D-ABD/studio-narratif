@@ -6,11 +6,12 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import close_old_connections, transaction
 from django.utils import timezone
 
-from studio.models import NarrationProject, StudioBatch, StudioBatchItem
+from studio.models import NarrationProject, StudioBatch, StudioBatchItem, VideoMerge
 from studio.job_control import JobCancelled, mark_job_cancelled
 from studio.services import generate_studio_batch, prepare_project
 from studio.video_services import (
-    render_project_assembly, render_project_video, render_video_assembly, render_video_narration,
+    render_project_assembly, render_project_video, render_video_assembly, render_video_merge,
+    render_video_narration,
 )
 
 
@@ -35,6 +36,7 @@ class Command(BaseCommand):
         ))
         self._recover_interrupted_jobs()
         self._recover_interrupted_studio_batches()
+        self._recover_interrupted_video_merges()
         while True:
             task = self._claim_next_task()
             if task is None:
@@ -58,6 +60,25 @@ class Command(BaseCommand):
                         finished_at=timezone.now(),
                     )
                     self.stderr.write(self.style.ERROR(f"Lot Studio {task_id} : {exc}"))
+                finally:
+                    close_old_connections()
+                if options["once"]:
+                    return
+                continue
+
+            if task_type == "video_merge":
+                self.stdout.write(f"Assemblage vidéo {task_id}…")
+                try:
+                    render_video_merge(task_id)
+                except Exception as exc:
+                    VideoMerge.objects.filter(pk=task_id, status=VideoMerge.Status.PROCESSING).update(
+                        status=VideoMerge.Status.ERROR,
+                        status_message="L’assemblage des vidéos a échoué.",
+                        error_message=str(exc)[:2000],
+                        queued_at=None,
+                        finished_at=timezone.now(),
+                    )
+                    self.stderr.write(self.style.ERROR(f"Assemblage vidéo {task_id} : {exc}"))
                 finally:
                     close_old_connections()
                 if options["once"]:
@@ -169,6 +190,20 @@ class Command(BaseCommand):
                 f"{reset_items} narration(s) remise(s) en attente · {cancelled_items} narration(s) annulée(s)."
             )
 
+    def _recover_interrupted_video_merges(self):
+        now = timezone.now()
+        recovered = VideoMerge.objects.filter(status=VideoMerge.Status.PROCESSING).update(
+            status=VideoMerge.Status.QUEUED,
+            queued_at=now,
+            started_at=None,
+            finished_at=None,
+            progress_percent=0,
+            status_message="Traitement interrompu · reprise automatique de l’assemblage.",
+            updated_at=now,
+        )
+        if recovered:
+            self.stdout.write(f"{recovered} assemblage(s) vidéo interrompu(s) remis en attente.")
+
     @staticmethod
     def _claim_next_task():
         """Claim the oldest project or standalone batch in one shared FIFO queue."""
@@ -181,7 +216,11 @@ class Command(BaseCommand):
                      .filter(status=StudioBatch.Status.PENDING)
                      .order_by("queued_at", "id")
                      .first())
-            if project is None and batch is None:
+            merge = (VideoMerge.objects
+                     .filter(status=VideoMerge.Status.QUEUED)
+                     .order_by("queued_at", "id")
+                     .first())
+            if project is None and batch is None and merge is None:
                 return None
 
             candidates = []
@@ -189,6 +228,8 @@ class Command(BaseCommand):
                 candidates.append((project.queued_at or project.created_at, project.pk, "project"))
             if batch is not None:
                 candidates.append((batch.queued_at or batch.created_at, batch.pk, "studio_batch"))
+            if merge is not None:
+                candidates.append((merge.queued_at or merge.created_at, merge.pk, "video_merge"))
             _queued_at, task_id, task_type = min(candidates)
             now = timezone.now()
             if task_type == "studio_batch":
@@ -197,6 +238,18 @@ class Command(BaseCommand):
                 ).update(
                     status=StudioBatch.Status.PROCESSING,
                     status_message="Préparation du lot…",
+                    started_at=now,
+                    finished_at=None,
+                    queued_at=None,
+                    error_message="",
+                )
+            elif task_type == "video_merge":
+                updated = VideoMerge.objects.filter(
+                    pk=task_id, status=VideoMerge.Status.QUEUED,
+                ).update(
+                    status=VideoMerge.Status.PROCESSING,
+                    status_message="Vérification des vidéos sources…",
+                    progress_percent=2,
                     started_at=now,
                     finished_at=None,
                     queued_at=None,

@@ -19,7 +19,7 @@ from django.core.paginator import Paginator
 from django.db import transaction
 from django.db.models import Count, Q
 from django.db.models.deletion import ProtectedError
-from django.http import Http404, HttpResponse, HttpResponseBadRequest, JsonResponse
+from django.http import FileResponse, Http404, HttpResponse, HttpResponseBadRequest, JsonResponse
 from django.urls import reverse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
@@ -29,7 +29,7 @@ from PIL import Image, UnidentifiedImageError
 
 from .models import (
     ANIMATION_EFFECTS, ANIMATION_LEVEL_CHOICES, AudioAsset, AudioSession, BackgroundTrack, NarrationProject,
-    MediaFolder, NarrationSegment, ProjectFolder, StudioBatch, StudioBatchItem, Voice,
+    MediaFolder, NarrationSegment, ProjectFolder, StudioBatch, StudioBatchItem, VideoMerge, VideoMergeItem, Voice,
     default_animation_settings, default_assembly_animation_settings, legacy_animation_settings,
 )
 from .services import (
@@ -45,7 +45,9 @@ from .audio_services import (
     probe_audio,
     render_pad_sequence,
 )
-from .video_services import _probe_clip, validate_assembly_project
+from .video_services import (
+    _merge_clip_signature, _probe_clip, _video_merge_requires_reencode, validate_assembly_project,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +70,7 @@ MAX_AUDIO_STUDIO_UPLOAD_BYTES = MAX_AUDIO_ASSET_BYTES
 MAX_PAD_SEQUENCE_EVENTS = 500
 MAX_STUDIO_BATCH_ITEMS = 20
 MAX_STUDIO_TEXT_CHARS = 12000
+MAX_VIDEO_MERGE_PROJECTS = 50
 ALLOWED_MUSIC_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg"}
 ALLOWED_AUDIO_ASSET_EXTENSIONS = {".mp3", ".wav", ".m4a", ".ogg"}
 ALLOWED_SAMPLE_EXTENSIONS = {".wav", ".mp3", ".webm", ".m4a", ".ogg"}
@@ -538,6 +541,149 @@ def project_list(request):
         "selected_folder": selected_folder,
         "project_folders": ProjectFolder.objects.filter(user=request.user).order_by("name", "id"),
     })
+
+
+@login_required
+@require_GET
+def video_merge_page(request):
+    projects = NarrationProject.objects.filter(
+        user=request.user, status=NarrationProject.Status.READY,
+    ).exclude(video_file="").order_by("-updated_at", "-id")
+    merges = VideoMerge.objects.filter(user=request.user).prefetch_related(
+        "items__source_project",
+    )[:20]
+    return render(request, "studio/video_merge.html", {
+        "projects": projects,
+        "video_merges": merges,
+    })
+
+
+@login_required
+@require_POST
+def create_video_merge(request):
+    raw_ids = request.POST.get("ordered_project_ids", "")
+    try:
+        if raw_ids:
+            project_ids = json.loads(raw_ids)
+        else:
+            project_ids = request.POST.getlist("project_ids")
+        if not isinstance(project_ids, list) or not 2 <= len(project_ids) <= MAX_VIDEO_MERGE_PROJECTS:
+            raise ValueError
+        project_ids = [int(project_id) for project_id in project_ids]
+        if len(set(project_ids)) != len(project_ids):
+            raise ValueError
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return JsonResponse({
+            "ok": False,
+            "error": f"Sélectionne entre 2 et {MAX_VIDEO_MERGE_PROJECTS} projets distincts.",
+        }, status=400)
+
+    project_map = {
+        project.pk: project
+        for project in NarrationProject.objects.filter(pk__in=project_ids, user=request.user)
+    }
+    if len(project_map) != len(project_ids):
+        raise Http404
+    ordered_projects = [project_map[project_id] for project_id in project_ids]
+    metadata_list = []
+    snapshots = []
+    try:
+        for project in ordered_projects:
+            if project.status != NarrationProject.Status.READY or not project.video_file:
+                return JsonResponse({
+                    "ok": False,
+                    "error": f"Le projet « {project.title} » n’a pas de vidéo prête à assembler.",
+                }, status=400)
+            video_path = Path(project.video_file.path)
+            try:
+                stat = video_path.stat()
+            except (OSError, ValueError):
+                return JsonResponse({
+                    "ok": False,
+                    "error": f"Le fichier vidéo du projet « {project.title} » est introuvable.",
+                }, status=400)
+            metadata = _probe_clip(video_path)
+            metadata_list.append(metadata)
+            snapshots.append({
+                "name": project.video_file.name,
+                "size": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns,
+                "signature": _merge_clip_signature(metadata),
+            })
+    except RuntimeError as exc:
+        return JsonResponse({"ok": False, "error": str(exc)}, status=400)
+
+    requires_reencode = _video_merge_requires_reencode(metadata_list)
+    confirmed = request.POST.get("confirm_reencode") == "1"
+    if requires_reencode and not confirmed:
+        return JsonResponse({
+            "ok": False,
+            "requires_reencode": True,
+            "warning": "Réencodage nécessaire (plus lent). Les vidéos seront normalisées en 1080×1920, 24 fps, H.264 et AAC.",
+        })
+
+    now = timezone.now()
+    merge = VideoMerge.objects.create(
+        user=request.user,
+        status=VideoMerge.Status.QUEUED,
+        requires_reencode=requires_reencode,
+        queued_at=now,
+        progress_percent=0,
+        status_message=(
+            "Réencodage nécessaire · vidéo ajoutée à la file."
+            if requires_reencode else "Assemblage sans réencodage ajouté à la file."
+        ),
+    )
+    VideoMergeItem.objects.bulk_create([
+        VideoMergeItem(
+            merge=merge,
+            source_project=project,
+            source_title=project.title,
+            source_video_name=snapshot["name"],
+            source_video_size=snapshot["size"],
+            source_video_mtime_ns=snapshot["mtime_ns"],
+            source_metadata={
+                "signature": list(snapshot["signature"]) if snapshot["signature"] is not None else None,
+            },
+            position=position,
+        )
+        for position, (project, snapshot) in enumerate(zip(ordered_projects, snapshots))
+    ])
+    return JsonResponse({
+        "ok": True,
+        "merge_id": merge.pk,
+        "redirect_url": f"{reverse('video_merge_page')}?merge={merge.pk}",
+    })
+
+
+@json_login_required
+@require_GET
+def video_merge_status(request, merge_id):
+    merge = get_object_or_404(VideoMerge, pk=merge_id, user=request.user)
+    download_url = reverse("video_merge_download", args=[merge.pk])
+    return JsonResponse({
+        "status": merge.status,
+        "progress": merge.progress_percent,
+        "message": merge.status_message,
+        "error": merge.error_message,
+        "duration": merge.duration_seconds,
+        "preview_url": f"{download_url}?inline=1" if merge.output_file else "",
+        "download_url": download_url if merge.output_file else "",
+    })
+
+
+@login_required
+@require_GET
+def video_merge_download(request, merge_id):
+    merge = get_object_or_404(VideoMerge, pk=merge_id, user=request.user)
+    if not merge.output_file:
+        raise Http404
+    return FileResponse(
+        merge.output_file.open("rb"),
+        as_attachment=request.GET.get("inline") != "1",
+        filename=f"assemblage-{merge.pk}.mp4",
+        content_type="video/mp4",
+    )
 
 
 def _folder_action_response(request, *, message, status=200, folder_id=None):

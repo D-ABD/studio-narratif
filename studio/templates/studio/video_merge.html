@@ -1,0 +1,84 @@
+{% extends "studio/base.html" %}
+{% block title %}Assembler des vidéos · Petit Studio{% endblock %}
+{% block heading %}Assembler des vidéos{% endblock %}
+{% block content %}
+<style>
+  .merge-page { display:grid; gap:16px; max-width:1180px; margin:0 auto; }
+  .merge-intro { color:#A8B2C1; font-size:12px; margin:0; }
+  .merge-project-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(245px,1fr)); gap:12px; }
+  .merge-project-card { display:grid; gap:9px; padding:12px; border:1px solid #303A49; border-radius:12px; background:#151A22; }
+  .merge-project-select { display:flex; align-items:center; gap:9px; min-width:0; color:#E3E7ED; font-weight:700; font-size:12px; }
+  .merge-project-select input { accent-color:#F59E0B; width:16px; height:16px; }
+  .merge-project-title { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .merge-project-card video { width:100%; aspect-ratio:16/9; border-radius:8px; background:#080B10; object-fit:contain; }
+  .merge-project-meta { color:#929BAA; font-size:10px; }
+  .merge-selected-list { display:grid; gap:7px; padding:0; margin:12px 0; list-style:none; }
+  .merge-selected-row { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:9px 11px; border:1px solid #303A49; border-radius:9px; background:#111720; color:#E3E7ED; font-size:11px; }
+  .merge-selected-row span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .merge-order-actions { display:flex; gap:5px; flex:0 0 auto; }
+  .merge-order-actions button { width:30px; height:28px; border:1px solid #394454; border-radius:7px; background:#202833; color:#E3E7ED; cursor:pointer; }
+  .merge-order-actions button:disabled { opacity:.35; cursor:not-allowed; }
+  .merge-warning { color:#FFD58A; font-size:11px; }
+  .merge-jobs { display:grid; gap:10px; }
+  .merge-job { display:grid; gap:8px; padding:13px; border:1px solid #303A49; border-radius:11px; background:#151A22; }
+  .merge-job-head { display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px; color:#E3E7ED; font-size:12px; }
+  .merge-job-message,.merge-job-error { color:#A8B2C1; font-size:11px; }
+  .merge-job-error { color:#F2A49C; }
+  .merge-job progress { width:100%; accent-color:#F59E0B; }
+  .merge-job video { width:min(100%,680px); max-height:390px; border-radius:9px; background:#080B10; }
+  .merge-job a { color:#FFC65D; font-size:11px; }
+  @media(max-width:600px) { .merge-project-grid { grid-template-columns:1fr; } }
+</style>
+<main class="merge-page">
+  <section class="card">
+    <div class="section-title"><div><span class="step-number">✂</span><h2>Créer un assemblage vidéo</h2></div></div>
+    <p class="merge-intro">Sélectionne au moins deux projets déjà rendus, puis règle leur ordre avec les flèches. Les projets sources restent inchangés.</p>
+    {% if projects %}
+    <form method="post" action="{% url 'create_video_merge' %}" data-video-merge-form>
+      {% csrf_token %}
+      <input type="hidden" name="ordered_project_ids" value="[]" data-merge-ordered-ids>
+      <div class="merge-project-grid">
+        {% for project in projects %}
+        <article class="merge-project-card" data-merge-project data-project-id="{{ project.id }}" data-project-title="{{ project.title }}">
+          <label class="merge-project-select">
+            <input type="checkbox" data-merge-project-select value="{{ project.id }}">
+            <span class="merge-project-title">{{ project.title }}</span>
+          </label>
+          <video controls muted preload="none" src="{{ project.video_file.url }}" aria-label="Aperçu de {{ project.title }}"></video>
+          <span class="merge-project-meta">{{ project.duration_seconds|floatformat:1 }} s · {{ project.get_video_format_display }} · {{ project.updated_at|date:"d/m/Y" }}</span>
+        </article>
+        {% endfor %}
+      </div>
+      <div class="card" style="margin:14px 0 0;padding:12px">
+        <strong style="font-size:12px">Ordre final</strong>
+        <ol class="merge-selected-list" data-merge-selected-list><li class="merge-intro" data-merge-empty>Choisis les vidéos à assembler.</li></ol>
+        <p class="merge-warning" data-merge-warning hidden></p>
+        <button class="button button-primary" type="submit" data-merge-submit disabled>Assembler les vidéos sélectionnées</button>
+        <span class="merge-intro" data-merge-spinner hidden>Assemblage en cours… Tu peux laisser cette page ouverte.</span>
+      </div>
+    </form>
+    {% else %}
+    <p class="merge-intro">Aucun projet avec une vidéo prête n’est disponible.</p>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <div class="section-title"><div><span class="step-number">↻</span><h2>Assemblages récents</h2></div></div>
+    <div class="merge-jobs" data-video-merge-jobs>
+      {% for merge in video_merges %}
+      <article class="merge-job" data-video-merge-job data-merge-id="{{ merge.id }}" data-status-url="{% url 'video_merge_status' merge.id %}" data-status="{{ merge.status }}">
+        <div class="merge-job-head"><strong>Assemblage #{{ merge.id }}</strong><span data-merge-job-state>{{ merge.get_status_display }}</span></div>
+        <span class="merge-job-message" data-merge-job-message>{{ merge.status_message }}</span>
+        <progress max="100" value="{{ merge.progress_percent }}" data-merge-job-progress {% if merge.status != 'processing' %}hidden{% endif %}></progress>
+        <span class="merge-job-error" data-merge-job-error {% if not merge.error_message %}hidden{% endif %}>{{ merge.error_message }}</span>
+        {% if merge.output_file %}
+        <video controls preload="metadata" src="{% url 'video_merge_download' merge.id %}?inline=1"></video>
+        <span class="merge-project-meta">{{ merge.duration_seconds|floatformat:1 }} s · {{ merge.items.count }} vidéos</span>
+        <a href="{% url 'video_merge_download' merge.id %}">Télécharger le MP4 ↓</a>
+        {% endif %}
+      </article>
+      {% empty %}<p class="merge-intro">Aucun assemblage créé pour le moment.</p>{% endfor %}
+    </div>
+  </section>
+</main>
+{% endblock %}

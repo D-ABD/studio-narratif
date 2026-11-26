@@ -516,6 +516,7 @@
           <nav class="premium-nav" aria-label="Organisation">
             <a class="premium-nav-link{% if request.resolver_match.url_name == 'project_list' and not folder_filter_active %} active{% endif %}" href="{% url 'project_list' %}" title="Tous les projets"><span class="premium-icon" aria-hidden="true">▤</span><span class="premium-link-label">Tous les projets</span></a>
             <a class="premium-nav-link{% if request.resolver_match.url_name == 'queue_view' %} active{% endif %}" href="{% url 'queue_view' %}" title="File d'attente"><span class="premium-icon" aria-hidden="true">☷</span><span class="premium-link-label">File d'attente</span><span class="premium-queue-count" id="queueCountBadge" aria-label="{{ queue_count }} projet(s) en attente">{{ queue_count }}</span></a>
+            <a class="premium-nav-link{% if request.resolver_match.url_name == 'video_merge_page' %} active{% endif %}" href="{% url 'video_merge_page' %}" title="Assembler des vidéos"><span class="premium-icon" aria-hidden="true">▻</span><span class="premium-link-label">Assembler des vidéos</span></a>
           </nav>
           <section class="premium-nested-section" aria-label="DOSSIERS de projets">
             <div class="premium-folder-heading">
@@ -621,6 +622,6 @@
     </div>
   </form>
 </dialog>
-  <script src="{% static 'studio/app.js' %}?v=31" defer></script>
+  <script src="{% static 'studio/app.js' %}?v=32" defer></script>
 </body>
 </html>
