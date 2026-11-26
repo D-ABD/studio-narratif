@@ -548,12 +548,43 @@ def project_list(request):
 def video_merge_page(request):
     projects = NarrationProject.objects.filter(
         user=request.user, status=NarrationProject.Status.READY,
-    ).exclude(video_file="").order_by("-updated_at", "-id")
+    ).exclude(video_file="").select_related("folder").order_by("-updated_at", "-id")
+    query = (request.GET.get("q") or "").strip()[:100]
+    if query:
+        projects = projects.filter(title__icontains=query)
+
+    folder_filter = request.GET.get("folder", "all")
+    selected_folder = None
+    if folder_filter == "":
+        projects = projects.filter(folder__isnull=True)
+    elif folder_filter != "all":
+        try:
+            folder_id = int(folder_filter)
+        except (TypeError, ValueError):
+            raise Http404
+        selected_folder = get_object_or_404(ProjectFolder, pk=folder_id, user=request.user)
+        projects = projects.filter(folder=selected_folder)
+
+    project_page, page_response = _page_or_redirect(request, projects, 20)
+    if page_response:
+        return page_response
+    pagination_state = {"per_page": "20"}
+    if query:
+        pagination_state["q"] = query
+    if folder_filter != "all":
+        pagination_state["folder"] = folder_filter
     merges = VideoMerge.objects.filter(user=request.user).prefetch_related(
         "items__source_project",
     )[:20]
     return render(request, "studio/video_merge.html", {
-        "projects": projects,
+        "projects": project_page.object_list,
+        "project_page": project_page,
+        "project_total": project_page.paginator.count,
+        "query": query,
+        "folder_filter": folder_filter,
+        "selected_folder": selected_folder,
+        "project_folders": ProjectFolder.objects.filter(user=request.user).order_by("name", "id"),
+        "pagination_params": urlencode(pagination_state),
         "video_merges": merges,
     })
 

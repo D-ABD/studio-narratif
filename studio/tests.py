@@ -3580,6 +3580,44 @@ class VideoMergeTests(MediaTestCase):
         self.assertFalse(merge.requires_reencode)
         self.assertTrue(draft.pk)
 
+    def test_merge_page_searches_by_name_filters_folders_and_paginates_twenty(self):
+        folder = ProjectFolder.objects.create(user=self.user, name="Campagne")
+        matching = self.make_rendered_project("Campagne finale")
+        matching.folder = folder
+        matching.save(update_fields=["folder"])
+        root_project = self.make_rendered_project("Campagne racine")
+
+        for index in range(20):
+            self.make_rendered_project(f"Rendu {index:02d}")
+
+        page_one = self.client.get("/projects/merge/")
+        self.assertEqual(page_one.status_code, 200)
+        self.assertEqual(page_one.context["project_page"].paginator.per_page, 20)
+        self.assertEqual(page_one.context["project_page"].number, 1)
+        self.assertEqual(len(page_one.context["projects"]), 20)
+        self.assertContains(page_one, "data-merge-project-row")
+        self.assertContains(page_one, "data-merge-selection-key")
+
+        page_two = self.client.get("/projects/merge/?page=2")
+        self.assertEqual(page_two.status_code, 200)
+        self.assertEqual(len(page_two.context["projects"]), 2)
+
+        searched = self.client.get("/projects/merge/?q=finale")
+        self.assertEqual(list(searched.context["projects"]), [matching])
+
+        in_folder = self.client.get(f"/projects/merge/?folder={folder.pk}")
+        self.assertEqual(list(in_folder.context["projects"]), [matching])
+        root_only = self.client.get("/projects/merge/?folder=&q=Campagne")
+        self.assertEqual(list(root_only.context["projects"]), [root_project])
+
+    def test_merge_page_rejects_a_folder_owned_by_another_user(self):
+        other_user = get_user_model().objects.create_user(username="merge-filter-owner", password="MergeSafe123!x")
+        foreign_folder = ProjectFolder.objects.create(user=other_user, name="Privé")
+
+        response = self.client.get(f"/projects/merge/?folder={foreign_folder.pk}")
+
+        self.assertEqual(response.status_code, 404)
+
     @patch("studio.video_services._probe_clip")
     @patch("studio.video_services._run_ffmpeg")
     def test_compatible_videos_use_stream_copy_and_store_the_summed_duration(self, run_ffmpeg, probe):
