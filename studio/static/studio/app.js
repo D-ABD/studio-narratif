@@ -1413,6 +1413,12 @@
   }
 
   const videoMergeForm = document.querySelector('[data-video-merge-form]');
+  console.log('[VideoMerge debug] initialisation', {
+    formFound: Boolean(videoMergeForm),
+    checkboxCount: videoMergeForm?.querySelectorAll('[data-merge-project-select]').length ?? 0,
+    submitButtonFound: Boolean(videoMergeForm?.querySelector('[data-merge-submit]')),
+    selectionKey: videoMergeForm?.dataset.mergeSelectionKey || null,
+  });
   if (videoMergeForm) {
     const selectedList = videoMergeForm.querySelector('[data-merge-selected-list]');
     const orderedInput = videoMergeForm.querySelector('[data-merge-ordered-ids]');
@@ -1446,7 +1452,16 @@
     }
 
     const persistSelection = () => {
-      try { sessionStorage.setItem(selectionKey, JSON.stringify(selectedItems)); } catch (_) {}
+      const serialized = JSON.stringify(selectedItems);
+      try {
+        sessionStorage.setItem(selectionKey, serialized);
+        console.log('[VideoMerge debug] sessionStorage écrit', {
+          key: selectionKey,
+          value: sessionStorage.getItem(selectionKey),
+        });
+      } catch (error) {
+        console.error('[VideoMerge debug] écriture sessionStorage impossible', error);
+      }
     };
 
     const itemFromRow = row => ({
@@ -1458,6 +1473,11 @@
     });
 
     const renderMergeSelection = () => {
+      console.log('[VideoMerge debug] renderMergeSelection:start', {
+        count: selectedItems.length,
+        ids: selectedItems.map(item => item.id),
+        submitting,
+      });
       selectedList.replaceChildren();
       if (!selectedItems.length) {
         const empty = document.createElement('li');
@@ -1513,11 +1533,24 @@
       orderedInput.value = JSON.stringify(selectedItems.map(item => Number(item.id)));
       if (selectionCount) selectionCount.textContent = `${selectedItems.length} vidéo${selectedItems.length === 1 ? '' : 's'}`;
       submitButton.disabled = submitting || selectedItems.length < 2;
+      console.log('[VideoMerge debug] renderMergeSelection:button', {
+        count: selectedItems.length,
+        disabled: submitButton.disabled,
+        orderedIds: orderedInput.value,
+      });
       persistSelection();
     };
 
     const setProjectSelection = (id, selected, sourceRow = null) => {
       const existingIndex = selectedItems.findIndex(item => item.id === String(id));
+      console.log('[VideoMerge debug] setProjectSelection:start', {
+        id,
+        selected,
+        sourceRowFound: Boolean(sourceRow),
+        rowProjectId: sourceRow?.dataset.projectId || null,
+        existingIndex,
+        currentIds: selectedItems.map(item => item.id),
+      });
       if (selected && existingIndex === -1) {
         if (selectedItems.length >= maxSelection) {
           if (warning) {
@@ -1526,16 +1559,38 @@
           }
           return;
         }
-        if (sourceRow) selectedItems.push(itemFromRow(sourceRow));
+        if (sourceRow) {
+          const item = itemFromRow(sourceRow);
+          console.log('[VideoMerge debug] itemFromRow', {id: item.id, rowProjectId: sourceRow.dataset.projectId});
+          selectedItems.push(item);
+        } else {
+          console.error('[VideoMerge debug] sourceRow est null; item non ajouté', {id, selected});
+        }
       } else if (!selected && existingIndex !== -1) {
         selectedItems.splice(existingIndex, 1);
       }
       if (warning) warning.hidden = true;
+      console.log('[VideoMerge debug] setProjectSelection:avant rendu', {
+        count: selectedItems.length,
+        ids: selectedItems.map(item => item.id),
+      });
       renderMergeSelection();
+      console.log('[VideoMerge debug] setProjectSelection:après rendu', {
+        disabled: submitButton.disabled,
+        count: selectedItems.length,
+      });
     };
 
     videoMergeForm.addEventListener('change', event => {
       const checkbox = event.target.closest('[data-merge-project-select]');
+      console.log('[VideoMerge debug] change reçu', {
+        targetTag: event.target?.tagName || null,
+        targetMatches: Boolean(event.target?.matches?.('[data-merge-project-select]')),
+        checkboxFound: Boolean(checkbox),
+        value: checkbox?.value || null,
+        checked: checkbox?.checked ?? null,
+        sourceRowFound: Boolean(checkbox?.closest('[data-merge-project-row]')),
+      });
       if (!checkbox) return;
       setProjectSelection(checkbox.value, checkbox.checked, checkbox.closest('[data-merge-project-row]'));
     });
