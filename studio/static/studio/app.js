@@ -951,9 +951,7 @@
 
 (() => {
   const editor = document.querySelector('[data-audio-studio-editor]');
-  if (!editor) return;
-
-  try {
+  if (editor) try {
     const operationUrl = editor.dataset.operationsUrl;
     const previewUrl = editor.dataset.previewUrl;
     const csrf = document.querySelector('[name=csrfmiddlewaretoken]')?.value || '';
